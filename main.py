@@ -187,6 +187,15 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+def flush_input():
+    """Clear event queue and wait for mouse release to prevent click-through."""
+    pygame.event.clear()
+    for _ in range(10):
+        pygame.event.pump()
+        if not any(pygame.mouse.get_pressed()):
+            break
+
+
 def normalize_rotation(r):
     return int(round(r / 90.0) * 90) % 360
 
@@ -404,9 +413,12 @@ def save_level(objects, name, filename):
 
 
 def load_level(path):
-    with open(path) as f:
-        data = json.load(f)
-    return data.get("name", "Untitled"), [normalize_object(o) for o in data.get("objects", [])]
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("name", "Untitled"), [normalize_object(o) for o in data.get("objects", [])]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        return None, None
 
 
 def list_levels():
@@ -425,11 +437,9 @@ def create_tutorial():
     objs.append({"t": T_HALF_SPIKE, "x": 12, "y": 9})
     objs.append({"t": T_PAD, "x": 22, "y": 9})
     objs.append({"t": T_ORB, "x": 25, "y": 7})
-    for gx in [30, 31, 36, 37, 38, 43, 44]:
+    for gx in [30, 31, 36, 37, 43, 44]:
         objs.append({"t": T_SPIKE, "x": gx, "y": 9})
-    for gx in range(34, 37):
-        objs.append({"t": T_BLOCK, "x": gx, "y": 8})
-    objs.append({"t": T_SPIKE, "x": 35, "y": 7})
+    objs.append({"t": T_BLOCK, "x": 34, "y": 8})
     objs.append({"t": T_PAD, "x": 47, "y": 9})
     objs.append({"t": T_DASH_ORB, "x": 50, "y": 7})
     objs.append({"t": T_SPEED_FAST, "x": 54, "y": 9})
@@ -443,7 +453,7 @@ def create_tutorial():
     objs.append({"t": T_SPIKE, "x": 63, "y": 6})
     objs.append({"t": T_PAD, "x": 77, "y": 9})
     objs.append({"t": T_ORB, "x": 80, "y": 7})
-    for gx in [85, 86, 90, 91, 92, 96, 97]:
+    for gx in [85, 86, 90, 91, 96, 97]:
         objs.append({"t": T_SPIKE, "x": gx, "y": 9})
     objs.append({"t": T_GRAV, "x": 104, "y": 9})
     for gx in range(105, 122):
@@ -452,23 +462,39 @@ def create_tutorial():
     objs.append({"t": T_SPEED_SLOW, "x": 112, "y": 4})
     for gx in [114, 117, 119]:
         objs.append({"t": T_SPIKE, "x": gx, "y": 2})
-    objs.append({"t": T_MODE_BALL, "x": 123, "y": 4})
-    objs.append({"t": T_GRAV, "x": 124, "y": 4})
-    for gx in range(126, 130):
-        objs.append({"t": T_BLOCK, "x": gx, "y": 10})
-        objs.append({"t": T_BLOCK, "x": gx, "y": 7})
-    objs.append({"t": T_MODE_CUBE, "x": 131, "y": 9})
-    objs.append({"t": T_SPEED_NORMAL, "x": 132, "y": 9})
+    objs.append({"t": T_GRAV, "x": 121, "y": 4})
+    objs.append({"t": T_MODE_CUBE, "x": 122, "y": 4})
+    objs.append({"t": T_SPEED_NORMAL, "x": 128, "y": 9})
     for gx in [126, 127, 134, 135]:
         objs.append({"t": T_SPIKE, "x": gx, "y": 9})
-    objs.append({"t": T_HALF_SPIKE, "x": 136, "y": 9})
+    objs.append({"t": T_HALF_SPIKE, "x": 138, "y": 9})
     objs.append({"t": T_END, "x": 145, "y": 9})
     save_level(objs, "Tutorial", "tutorial")
+
+
+class SpatialGrid:
+    def __init__(self, objects):
+        self.cells = {}
+        for o in objects:
+            key = (o["x"], o["y"])
+            if key not in self.cells:
+                self.cells[key] = []
+            self.cells[key].append(o)
+
+    def query_rect(self, left_gx, right_gx, top_gy, bot_gy):
+        result = []
+        for gx in range(left_gx, right_gx + 1):
+            for gy in range(top_gy, bot_gy + 1):
+                cell = self.cells.get((gx, gy))
+                if cell:
+                    result.extend(cell)
+        return result
 
 
 class Player:
     def __init__(self, objects):
         self.objects = objects
+        self._grid = SpatialGrid(objects)
         self.reset()
 
     def reset(self):
@@ -522,6 +548,8 @@ class Player:
         right = rect.right // CELL + extra
         top = rect.top // CELL - extra
         bottom = rect.bottom // CELL + extra
+        if self._grid:
+            return self._grid.query_rect(left, right, top, bottom)
         return [o for o in self.objects if left <= o["x"] <= right and top <= o["y"] <= bottom]
 
     def jump(self, force=None):
@@ -748,7 +776,191 @@ class Player:
         surf.blit(rot, rr)
 
 
+class Bot:
+    LOOK_AHEAD = 80
+
+    def __init__(self, objects):
+        self.objects = objects
+        self._grid = SpatialGrid(objects)
+
+    def decide(self, player):
+        if not player.alive or player.won:
+            return False, False
+        if player.mode == MODE_SHIP:
+            return self._decide_ship(player)
+        no_act = self._sim_once(player, False, False)
+        if no_act >= self.LOOK_AHEAD:
+            return False, False
+        # Try greedy multi-jump simulation (with orb buffer awareness)
+        first_jump, greedy_surv = self._sim_greedy(player)
+        if greedy_surv >= self.LOOK_AHEAD:
+            if player.mode == MODE_CUBE:
+                if player.on_ground:
+                    return first_jump, True  # jump or just refresh buffer
+                return True, True  # keep input active for orbs in air
+            return first_jump, first_jump
+        # Try single jump
+        once = self._sim_once(player, True, True)
+        if once >= self.LOOK_AHEAD:
+            return True, True
+        # Try buffered for orb activation without auto-jump
+        buffered = self._sim_buffered(player)
+        if buffered >= self.LOOK_AHEAD:
+            if player.on_ground and player.mode == MODE_CUBE:
+                return False, True
+            if not player.on_ground:
+                return True, True
+        # In air: keep buffer active if it improves survival (no downside)
+        if not player.on_ground and player.mode == MODE_CUBE:
+            if greedy_surv > no_act or buffered > no_act:
+                return True, True
+        if no_act <= 4 and once > no_act:
+            return True, True
+        return False, False
+
+    def _decide_ship(self, player):
+        no_hold = self._sim_sustained(player, False)
+        if no_hold >= self.LOOK_AHEAD:
+            return False, False
+        with_hold = self._sim_sustained(player, True)
+        if with_hold > no_hold:
+            return True, False
+        return False, False
+
+    def _sim_once(self, player, hold, press):
+        sim = self._clone(player)
+        for i in range(self.LOOK_AHEAD):
+            if not sim.alive:
+                return i
+            if sim.won:
+                return self.LOOK_AHEAD
+            if i == 0:
+                sim.update(hold, press)
+            else:
+                sim.update(False, False)
+        if not sim.on_ground and sim.vy * sim.grav > 0:
+            for j in range(40):
+                if not sim.alive:
+                    return self.LOOK_AHEAD + j
+                if sim.won:
+                    return self.LOOK_AHEAD + 40
+                sim.update(False, False)
+        return self.LOOK_AHEAD + 40
+
+    def _sim_greedy(self, player):
+        """Forward simulation with greedy jump decisions and orb awareness.
+        Returns (first_jump, survival_frames)."""
+        sim = self._clone(player)
+        first_jump = None
+        DANGER = 50
+        JUMP_PROBE = 35
+        INNER = 15
+        for i in range(self.LOOK_AHEAD):
+            if not sim.alive:
+                return first_jump if first_jump is not None else False, i
+            if sim.won:
+                return first_jump if first_jump is not None else False, self.LOOK_AHEAD
+            do_act = False
+            if sim.on_ground and sim.mode in (MODE_CUBE, MODE_BALL):
+                # Check if not acting leads to death (long look-ahead)
+                probe_no = self._clone(sim)
+                no_safe = True
+                for _ in range(DANGER):
+                    probe_no.input_buffer = max(probe_no.input_buffer, 2)
+                    probe_no.update(False, False)
+                    if not probe_no.alive:
+                        no_safe = False
+                        break
+                if not no_safe:
+                    # Check if acting (jump/flip) is safe (with mini-greedy re-acts)
+                    pj = self._clone(sim)
+                    pj.input_buffer = max(pj.input_buffer, 2)
+                    pj.update(True, True)
+                    yes_safe = True
+                    for k in range(JUMP_PROBE):
+                        if not pj.alive:
+                            yes_safe = False
+                            break
+                        inner_act = False
+                        if pj.on_ground and pj.mode in (MODE_CUBE, MODE_BALL):
+                            ip = self._clone(pj)
+                            for _ in range(INNER):
+                                ip.input_buffer = max(ip.input_buffer, 2)
+                                ip.update(False, False)
+                                if not ip.alive:
+                                    inner_act = True
+                                    break
+                        pj.input_buffer = max(pj.input_buffer, 2)
+                        pj.update(inner_act, inner_act)
+                    if not pj.alive:
+                        yes_safe = False
+                    do_act = yes_safe
+            if first_jump is None:
+                first_jump = do_act
+            sim.input_buffer = max(sim.input_buffer, 2)
+            sim.update(do_act, do_act)
+        if not sim.on_ground and sim.vy * sim.grav > 0:
+            for j in range(40):
+                if not sim.alive:
+                    return first_jump if first_jump is not None else False, self.LOOK_AHEAD + j
+                if sim.won:
+                    return first_jump if first_jump is not None else False, self.LOOK_AHEAD + 40
+                sim.input_buffer = max(sim.input_buffer, 2)
+                sim.update(False, False)
+        return first_jump if first_jump is not None else False, self.LOOK_AHEAD + 40
+
+    def _sim_buffered(self, player):
+        sim = self._clone(player)
+        sim.input_buffer = self.LOOK_AHEAD
+        for i in range(self.LOOK_AHEAD):
+            if not sim.alive:
+                return i
+            if sim.won:
+                return self.LOOK_AHEAD
+            sim.update(False, False)
+        if not sim.on_ground and sim.vy * sim.grav > 0:
+            for j in range(40):
+                if not sim.alive:
+                    return self.LOOK_AHEAD + j
+                if sim.won:
+                    return self.LOOK_AHEAD + 40
+                sim.update(False, False)
+        return self.LOOK_AHEAD + 40
+
+    def _sim_sustained(self, player, hold):
+        sim = self._clone(player)
+        for i in range(self.LOOK_AHEAD):
+            if not sim.alive:
+                return i
+            if sim.won:
+                return self.LOOK_AHEAD
+            sim.update(hold, False)
+        return self.LOOK_AHEAD
+
+    def _clone(self, player):
+        sim = Player.__new__(Player)
+        sim.objects = self.objects
+        sim._grid = self._grid
+        sim.x = player.x
+        sim.y = player.y
+        sim.vy = player.vy
+        sim.on_ground = player.on_ground
+        sim.alive = True
+        sim.won = False
+        sim.angle = player.angle
+        sim.grav = player.grav
+        sim.trail = []
+        sim.passed = set(player.passed)
+        sim.frame = player.frame
+        sim.mode = player.mode
+        sim.move_speed = player.move_speed
+        sim.dash_timer = player.dash_timer
+        sim.input_buffer = player.input_buffer
+        return sim
+
+
 def run_menu(screen, clock):
+    flush_input()
     stars = make_stars()
     pulse = 0
     b_play = b_edit = b_quit = pygame.Rect(0, 0, 0, 0)
@@ -787,6 +999,7 @@ def run_menu(screen, clock):
 
 
 def run_select(screen, clock):
+    flush_input()
     files = list_levels()
     scroll = 0
     stars = make_stars()
@@ -829,6 +1042,7 @@ def run_select(screen, clock):
 
 
 def run_play(screen, clock, objects, level_name="Level", editor_test=False):
+    flush_input()
     player = Player(objects)
     particles = Particles()
     stars = make_stars()
@@ -842,6 +1056,9 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False):
     prev_input_held = False
     sim_accum = 0.0
     pending_jump_press = False
+    mouse_was_up = False
+    bot = Bot(objects)
+    bot_active = False
     test_speeds = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0]
     test_speed_idx = len(test_speeds) - 1
     while True:
@@ -855,7 +1072,9 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False):
                 sys.exit()
             if ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
-                    return "quit"
+                    return
+                if ev.key == pygame.K_b:
+                    bot_active = not bot_active
                 if ev.key == pygame.K_r and not player.won:
                     player.reset()
                     attempts += 1
@@ -872,20 +1091,30 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False):
             if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 clicked_pos = ev.pos
                 mouse_pressed_this_frame = True
-        keys = pygame.key.get_pressed()
-        jump_held = keys[pygame.K_SPACE] or keys[pygame.K_UP] or keys[pygame.K_w] or pygame.mouse.get_pressed()[0]
-        jump_pressed = mouse_pressed_this_frame or (jump_held and not prev_input_held)
+        if not pygame.mouse.get_pressed()[0]:
+            mouse_was_up = True
+        mouse_input = mouse_was_up and pygame.mouse.get_pressed()[0]
+        if bot_active and player.alive and not player.won:
+            bot_hold, bot_press = bot.decide(player)
+            jump_held = bot_hold
+            jump_pressed = bot_press
+        else:
+            keys = pygame.key.get_pressed()
+            jump_held = keys[pygame.K_SPACE] or keys[pygame.K_UP] or keys[pygame.K_w] or mouse_input
+            jump_pressed = (mouse_pressed_this_frame and mouse_was_up) or (jump_held and not prev_input_held)
         prev_input_held = jump_held
         if jump_pressed:
             pending_jump_press = True
         if player.won and clicked_pos:
             if rc_menu.collidepoint(clicked_pos):
-                return "menu"
+                return
             if rc_replay.collidepoint(clicked_pos):
                 player.reset()
                 attempts = 1
                 death_timer = 0
                 prev_input_held = False
+                pending_jump_press = False
+                mouse_was_up = False
         step_scale = test_speeds[test_speed_idx] if editor_test else 1.0
         sim_accum += step_scale
         while sim_accum >= 1.0:
@@ -923,12 +1152,14 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False):
         txt(screen, level_name, WIDTH // 2, 8, 15, C_GRAY, True)
         txt(screen, player.mode.title(), WIDTH - 220, 26, 15, C_GRAY)
         txt(screen, f"Move {player.move_speed:.1f}", WIDTH - 150, 26, 15, C_GRAY)
+        if bot_active:
+            txt(screen, "BOT", WIDTH - 60, 26, 17, C_ORB)
         if editor_test:
             txt(screen, f"Test {test_speeds[test_speed_idx]:.2f}x", WIDTH - 85, 26, 15, C_GRAY)
-        else:
-            txt(screen, "", WIDTH - 85, 26, 15, C_GRAY)
         if editor_test:
-            txt(screen, "[/- slower  ]/= faster  0 reset", WIDTH // 2, HEIGHT - 22, 15, C_GRAY, True)
+            txt(screen, "[/- slower  ]/= faster  0 reset  |  B toggle bot", WIDTH // 2, HEIGHT - 22, 15, C_GRAY, True)
+        else:
+            txt(screen, "B toggle bot  |  R restart  |  Esc menu", WIDTH // 2, HEIGHT - 22, 15, C_GRAY, True)
         if player.won:
             ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             ov.fill((0, 0, 0, 130))
@@ -1033,6 +1264,7 @@ def object_at_cell(objects, gx, gy, prefer_non_start=False):
 
 
 def run_editor(screen, clock):
+    flush_input()
     objects = [{"t": T_BLOCK, "x": gx, "y": 10, "r": 0} for gx in range(60)]
     level_name = "Untitled"
     cam_x, cam_y = 0.0, 0.0
@@ -1143,10 +1375,15 @@ def run_editor(screen, clock):
         if do_load:
             path = load_level_dialog(screen, clock)
             if path:
-                level_name, objects = load_level(path)
-                msg, msg_timer = f"Loaded: {level_name}", 120
+                loaded_name, loaded_objs = load_level(path)
+                if loaded_objs is not None:
+                    level_name, objects = loaded_name, loaded_objs
+                    msg, msg_timer = f"Loaded: {level_name}", 120
+                else:
+                    msg, msg_timer = "Failed to load level", 120
         if do_test:
             run_play(screen, clock, list(objects), level_name + " (Test)", editor_test=True)
+            flush_input()
         mb = pygame.mouse.get_pressed()
         if (mb[0] or mb[2]) and PAL_H < mpos[1] < BAR_Y:
             gx = int((mpos[0] + cam_x) // CELL)
@@ -1259,7 +1496,8 @@ def main():
             path = run_select(screen, clock)
             if path:
                 name, objs = load_level(path)
-                run_play(screen, clock, objs, name)
+                if objs is not None:
+                    run_play(screen, clock, objs, name)
             state = "menu"
         elif state == "editor":
             run_editor(screen, clock)
