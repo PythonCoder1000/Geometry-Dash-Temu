@@ -118,6 +118,12 @@ class Player:
         self.move_speed = BASE_MOVE_SPEED
         self.dash_timer = 0
         self.input_buffer = 0
+        # Mirror keeps its own input buffer so a single click registers for
+        # both bodies' orbs. With one shared buffer, the main consumes it
+        # first and the mirror's orb (if any) silently misses out — the
+        # bot's beam search never noticed because it just retries the next
+        # frame, but a human only gets the one tap.
+        self.mirror_input_buffer = 0
         self.teleport_cooldown = 0
         self.target_cam_y = 0.0
         self.bg_preset = 0
@@ -838,7 +844,10 @@ class Player:
         # Pads / orbs / gravity portal / mode portals / solo portal collapse.
         # Returns True if the mirror collapsed back into the main player —
         # in that case stop touching m (it's None now) and skip rotation.
-        input_active = input_held or self.input_buffer > 0
+        # Use the mirror's own input_buffer here so a single click registers
+        # for the mirror's orb even if the main already consumed its buffer
+        # this frame.
+        input_active = input_held or self.mirror_input_buffer > 0
         if self._handle_mirror_interactions(trigger_rect, input_active,
                                             input_pressed):
             return
@@ -972,11 +981,13 @@ class Player:
                 continue
             # Cube-style orbs the mirror reacts to. Dash/teleport orbs are
             # skipped — those imply mode-specific behaviour the mirror lacks.
+            # Gates on the MIRROR's buffer, so the main consuming its buffer
+            # this frame doesn't lock the mirror out of its own orb.
             if t in (T_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB) \
                     and key not in self.passed:
                 cell = (o["x"], o["y"])
                 if activated_orb_cell is None:
-                    if self.input_buffer <= 0:
+                    if self.mirror_input_buffer <= 0:
                         continue
                     activated_orb_cell = cell
                 elif cell != activated_orb_cell:
@@ -1052,7 +1063,11 @@ class Player:
                 self._start_rotate_trigger(o)
                 self.passed.add(key)
         if activated_orb_cell is not None:
-            self.input_buffer = 0
+            # Mirror consumed its own orb — clear ONLY the mirror's buffer.
+            # The main's buffer is untouched so its orb (if any) still fires
+            # this frame, matching the user expectation that one click acts
+            # on both bodies.
+            self.mirror_input_buffer = 0
         return False
 
     # ---- per-frame update ------------------------------------------------
@@ -1079,8 +1094,12 @@ class Player:
         self.trail = [[x, y, a, al - 5] for x, y, a, al in self.trail if al > 5]
         if input_pressed:
             self.input_buffer = 6
-        elif self.input_buffer > 0:
-            self.input_buffer -= 1
+            self.mirror_input_buffer = 6
+        else:
+            if self.input_buffer > 0:
+                self.input_buffer -= 1
+            if self.mirror_input_buffer > 0:
+                self.mirror_input_buffer -= 1
         # Mode physics
         if self.mode == MODE_SHIP:
             self.vy += SHIP_GRAVITY * self.grav

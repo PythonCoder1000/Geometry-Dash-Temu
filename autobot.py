@@ -82,6 +82,7 @@ _SNAP_KEYS = [
     'frame', 'mode', 'move_speed', 'dash_timer', 'input_buffer',
     'teleport_cooldown', 'target_cam_y', 'bg_preset',
     'color_index', '_grav_flip_grace', '_wall_frames',
+    'mirror_input_buffer',
 ]
 
 # Pre-built index for fast object position restore
