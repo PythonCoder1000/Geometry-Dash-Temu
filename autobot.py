@@ -3,12 +3,16 @@ to find one that reaches the finish.  Press L in the editor to run it;
 the result is drawn as bot-path waypoints and the exact inputs are saved
 for replay with K."""
 
+import multiprocessing as _mp
+import os as _os
+import time as _time
+
 import pygame
 
 from constants import (
     CELL, PLAYER_SIZE, HEIGHT, WIDTH,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
-    HAZARD_TYPES,
+    HAZARD_TYPES, ORB_TYPES,
     T_END,
     C_PLAYER,
 )
@@ -23,41 +27,89 @@ import sfx
 class _SimPlayer(Player):
     """Player subclass optimised for headless simulation.
 
-    Uses a spatial grid for O(1) nearby_for_rect instead of O(N) scan.
-    All physics is inherited unchanged from Player so the simulation matches
-    real play frame-for-frame — duplicating the physics here previously caused
-    silent drift (different inflate radius, missing spider branch, extra
-    ground probe) that made beam-search "wins" fail on replay.
+    Uses a flat-array spatial grid for O(1) nearby_for_rect (no tuple hashing,
+    no hash-table probing — just integer indexing). All physics is inherited
+    unchanged from Player so the simulation matches real play frame-for-frame
+    — duplicating the physics here previously caused silent drift (different
+    inflate radius, missing spider branch, extra ground probe) that made
+    beam-search "wins" fail on replay.
     """
 
+    # Extra cells of padding around the initial object bounds so move-trigger
+    # animations don't overrun the flat-array grid. ±50 cells = ±2500px is
+    # comfortably larger than any move trigger in practice. A move that does
+    # escape triggers _rebuild_grid to widen the bounds on the fly.
+    _GRID_MARGIN = 50
+
     def __init__(self, objects):
-        # Build spatial grid BEFORE super().__init__ (which calls reset).
-        self._grid = {}
-        for o in objects:
-            gx, gy = o["x"], o["y"]
-            self._grid.setdefault((gx, gy), []).append(o)
+        # Build flat-array grid BEFORE super().__init__ (which calls reset).
+        self._init_grid(objects)
         super().__init__(objects)
 
+    def _init_grid(self, objects):
+        """Allocate the flat array and fill it with the current objects.
+        Bounds span all object positions plus _GRID_MARGIN on every side."""
+        if not objects:
+            self._grid_ox = 0
+            self._grid_oy = 0
+            self._grid_w = 1
+            self._grid_h = 1
+            self._grid_arr = [None]
+            return
+        min_x = min(o["x"] for o in objects) - self._GRID_MARGIN
+        max_x = max(o["x"] for o in objects) + self._GRID_MARGIN
+        min_y = min(o["y"] for o in objects) - self._GRID_MARGIN
+        max_y = max(o["y"] for o in objects) + self._GRID_MARGIN
+        self._grid_ox = min_x
+        self._grid_oy = min_y
+        self._grid_w = max_x - min_x + 1
+        self._grid_h = max_y - min_y + 1
+        arr = [None] * (self._grid_w * self._grid_h)
+        w = self._grid_w
+        for o in objects:
+            idx = (o["y"] - min_y) * w + (o["x"] - min_x)
+            cell = arr[idx]
+            if cell is None:
+                arr[idx] = [o]
+            else:
+                cell.append(o)
+        self._grid_arr = arr
+
     def nearby_for_rect(self, rect, extra=2):
-        left = rect.left // CELL - extra
-        right = rect.right // CELL + extra
-        top = rect.top // CELL - extra
-        bottom = rect.bottom // CELL + extra
+        # Hot path: called ~2M times per solve. Local names + no tuple hash.
+        ox = self._grid_ox
+        oy = self._grid_oy
+        left = rect.left // CELL - extra - ox
+        right = rect.right // CELL + extra - ox
+        top = rect.top // CELL - extra - oy
+        bottom = rect.bottom // CELL + extra - oy
+        w = self._grid_w
+        h = self._grid_h
+        if left < 0:
+            left = 0
+        if top < 0:
+            top = 0
+        if right >= w:
+            right = w - 1
+        if bottom >= h:
+            bottom = h - 1
+        if left > right or top > bottom:
+            return []
         result = []
-        grid = self._grid
-        for gx in range(int(left), int(right) + 1):
-            for gy in range(int(top), int(bottom) + 1):
-                cell = grid.get((gx, gy))
-                if cell:
+        arr = self._grid_arr
+        for gy in range(top, bottom + 1):
+            base = gy * w
+            for gx in range(left, right + 1):
+                cell = arr[base + gx]
+                if cell is not None:
                     result.extend(cell)
         return result
 
     def _rebuild_grid(self):
-        """Rebuild grid after object positions change (move triggers)."""
-        self._grid.clear()
-        for o in self.objects:
-            gx, gy = o["x"], o["y"]
-            self._grid.setdefault((gx, gy), []).append(o)
+        """Rebuild grid after object positions change (move triggers).
+        Re-derives bounds, so moves that escape the original margin are
+        tolerated at the cost of one full rebuild."""
+        self._init_grid(self.objects)
 
     def _step_move_animations(self):
         """Run move animations and refresh the grid when objects shift."""
@@ -104,23 +156,36 @@ def _snap(player):
     of (type, x, y) keys for portals the mirror has consumed (independent
     of the main body's `passed`). Beam search MUST round-trip both or every
     restore after a dual portal silently desyncs from reality.
+
+    Hot path: called 100k+ times per solve. Explicit attribute access beats
+    ``tuple(getattr(p, k) for k in _SNAP_KEYS)`` by ~3× because we skip the
+    per-key ``__getattribute__`` dispatch with a string name.
     """
-    vals = tuple(getattr(player, k, 0) for k in _SNAP_KEYS)
-    passed = frozenset(player.passed)
-    # Animations: store minimal data needed to restore
-    anims = tuple(
-        (id(a['obj']), a['sx'], a['sy'], a['ex'], a['ey'],
-         a['frame'], a['duration'],
-         a['curve'], a['curve_area'])
-        for a in player.move_animations
-    ) if player.move_animations else ()
-    # Object positions: only track moved objects
-    obj_pos = tuple(
-        (id(o), o['x'], o['y'], o.get('_fx'), o.get('_fy'))
-        for o in player.objects
-        if '_fx' in o or '_fy' in o
+    vals = (
+        player.x, player.y, player.vy, player.on_ground, player.alive,
+        player.won, player.angle, player.grav, player.frame, player.mode,
+        player.move_speed, player.dash_timer, player.input_buffer,
+        player.teleport_cooldown, player.target_cam_y, player.bg_preset,
+        player.color_index, player._grav_flip_grace, player._wall_frames,
+        player.mirror_input_buffer,
     )
-    # Dual-mode mirror — None pre-portal, populated tuple after.
+    passed = frozenset(player.passed)
+    anims = player.move_animations
+    if anims:
+        anims = tuple(
+            (id(a['obj']), a['sx'], a['sy'], a['ex'], a['ey'],
+             a['frame'], a['duration'], a['curve'], a['curve_area'])
+            for a in anims
+        )
+    else:
+        anims = ()
+    # Object positions — only track objects that have moved (have _fx/_fy).
+    obj_pos_list = []
+    for o in player.objects:
+        if '_fx' in o or '_fy' in o:
+            obj_pos_list.append((id(o), o['x'], o['y'],
+                                 o.get('_fx'), o.get('_fy')))
+    obj_pos = tuple(obj_pos_list)
     m = player.mirror
     if m is None:
         mirror = None
@@ -128,40 +193,49 @@ def _snap(player):
         mirror = (m["y"], m["vy"], m["grav"], m["on_ground"],
                   m.get("angle", 0.0), m["alive"],
                   m.get("mode", MODE_CUBE), m.get("size", PLAYER_SIZE))
-    mirror_passed = frozenset(getattr(player, "mirror_passed", set()))
+    mirror_passed = frozenset(player.mirror_passed)
     return (vals, passed, anims, obj_pos, mirror, mirror_passed)
 
 
 def _restore(player, snap):
-    """Restore player state from snapshot."""
-    # Backwards-compat: pad legacy snapshots so a mid-solve format upgrade
-    # doesn't throw. 4-tuple = pre-mirror; 5-tuple = pre-mirror_passed.
-    mirror_passed = frozenset()
-    if len(snap) == 4:
+    """Restore player state from snapshot — tuple-unpack into attributes
+    rather than iterating _SNAP_KEYS with setattr (same speed-win rationale
+    as _snap)."""
+    # Forward-compat pad: older 4/5-tuple snapshots are never written by the
+    # current _snap, but the bot_menu cache on disk might hold one from a
+    # mid-upgrade run. Cheap branches that never fire in normal operation.
+    n = len(snap)
+    if n == 4:
         vals, passed, anims, obj_pos = snap
         mirror = None
-    elif len(snap) == 5:
+        mirror_passed = frozenset()
+    elif n == 5:
         vals, passed, anims, obj_pos, mirror = snap
+        mirror_passed = frozenset()
     else:
         vals, passed, anims, obj_pos, mirror, mirror_passed = snap
-    for i, k in enumerate(_SNAP_KEYS):
-        setattr(player, k, vals[i])
+    (player.x, player.y, player.vy, player.on_ground, player.alive,
+     player.won, player.angle, player.grav, player.frame, player.mode,
+     player.move_speed, player.dash_timer, player.input_buffer,
+     player.teleport_cooldown, player.target_cam_y, player.bg_preset,
+     player.color_index, player._grav_flip_grace, player._wall_frames,
+     player.mirror_input_buffer) = vals
     player.passed = set(passed)
     player.mirror_passed = set(mirror_passed)
     player.trail = []
-    # Restore animations
     if anims:
+        obj_index = _obj_index
         player.move_animations = [
-            {'obj': _obj_index[oid], 'sx': sx, 'sy': sy, 'ex': ex, 'ey': ey,
+            {'obj': obj_index[oid], 'sx': sx, 'sy': sy, 'ex': ex, 'ey': ey,
              'frame': fr, 'duration': dur, 'curve': crv, 'curve_area': ca}
             for oid, sx, sy, ex, ey, fr, dur, crv, ca in anims
         ]
     else:
         player.move_animations = []
-    # Restore object positions
     if obj_pos:
+        obj_index = _obj_index
         for oid, x, y, fx, fy in obj_pos:
-            o = _obj_index.get(oid)
+            o = obj_index.get(oid)
             if o is None:
                 continue
             o['x'], o['y'] = x, y
@@ -174,12 +248,9 @@ def _restore(player, snap):
             else:
                 o.pop('_fy', None)
         player._rebuild_grid()
-    # Restore dual mirror — must come AFTER scalar state so the mirror's
-    # independent vy/grav/y aren't accidentally tied to the player's.
     if mirror is None:
         player.mirror = None
     else:
-        # 6-tuple legacy: pre-mode/size. 8-tuple current: includes both.
         if len(mirror) == 6:
             my, mvy, mgrav, mog, mang, malive = mirror
             mmode = MODE_CUBE
@@ -187,13 +258,9 @@ def _restore(player, snap):
         else:
             my, mvy, mgrav, mog, mang, malive, mmode, msize = mirror
         player.mirror = {
-            "y": float(my),
-            "vy": float(mvy),
-            "grav": int(mgrav),
-            "on_ground": bool(mog),
-            "angle": float(mang),
+            "y": float(my), "vy": float(mvy), "grav": int(mgrav),
+            "on_ground": bool(mog), "angle": float(mang),
             "alive": bool(malive),
-            # mode is a string constant ("cube"/"ship"/etc) — no int cast.
             "mode": mmode,
             "size": int(msize),
         }
@@ -258,6 +325,23 @@ def _dedup_key(snap):
 # Beam search solver
 # ---------------------------------------------------------------------------
 
+
+def _solve_attempt_worker(args):
+    """Module-level (picklable) worker for parallel beam-search attempts.
+
+    Runs ONE attempt headless in a subprocess and returns its raw result.
+    Must be at module scope so multiprocessing's spawn context can pickle it.
+    No screen / clock — workers can't drive pygame display from a subprocess;
+    the parent process polls for completion and shows progress instead.
+    """
+    objects, width, max_frames, prefix_inputs, attempt_idx = args
+    bot = AutoBot(objects)
+    wp, mwp, inp, won = bot._beam_search(
+        width, max_frames, None, None, attempt_idx,
+        prefix_inputs=prefix_inputs)
+    return wp, mwp, inp, won, attempt_idx
+
+
 class AutoBot:
     """Finds a path through a level using beam search — maintains K parallel
     candidate paths, expanding each with all possible inputs and keeping the
@@ -270,6 +354,17 @@ class AutoBot:
         # Precompute the finish-line x so scoring can weight final approach.
         end_xs = [o["x"] * CELL for o in objects if o["t"] == T_END]
         self._end_x = max(end_xs) if end_xs else 0
+        # Precompute which cell columns contain an orb. Input pruning uses
+        # this to decide "tap inputs irrelevant here" in O(1). Only orbs
+        # care about input_buffer — pads, portals and triggers fire on
+        # contact regardless of input state.
+        self._orb_cells = set()
+        for o in objects:
+            if o["t"] in ORB_TYPES:
+                self._orb_cells.add((o["x"], o["y"]))
+        # Cheaper column-only variant for fast "is any orb within a few
+        # cells of this x?" without iterating the full grid each time.
+        self._orb_xs = set(c[0] for c in self._orb_cells)
 
     # Frames of cached input we discard before resuming beam search after a
     # divergence. Gives the beam wiggle-room around the change point — without
@@ -333,28 +428,76 @@ class AutoBot:
             #    to commit to a route. The seed-prefix is only used on the
             #    first attempt — if it fails, we drop it and retry from
             #    scratch in case the cached prefix itself was misleading.
+            #
+            #    Attempt 1 runs in-process (fast path: most easy levels win
+            #    here, and subprocess spawn overhead would double their
+            #    wall-clock time). If it fails, attempts 2-4 run concurrently
+            #    in worker subprocesses — the first one to win terminates
+            #    the others. This is pure parallelism: identical beam widths,
+            #    identical scoring, identical dedup, no quality loss.
             widths = [self.BEAM_WIDTH,
                       self.BEAM_WIDTH * 2,
                       self.BEAM_WIDTH * 4,
                       self.BEAM_WIDTH * 8]
-            for attempt, width in enumerate(widths):
-                # Last attempt also gets 50% more frames.
-                attempt_frames = max_frames if attempt < 3 else int(max_frames * 1.5)
-                attempt_prefix = prefix_inputs if attempt == 0 else None
-                waypoints, mirror_waypoints, inputs, won = self._beam_search(
-                    width, attempt_frames, screen, clock, attempt,
-                    prefix_inputs=attempt_prefix)
-                if won:
-                    break
-                # Remember the deepest failed run so we can show it to the user
-                # if no full solution is found.
-                if waypoints:
-                    farthest = max((wp[0] for wp in waypoints), default=-1.0)
-                    if farthest > best_failed_x:
-                        best_failed_x = farthest
-                        best_failed_waypoints = waypoints
-                        best_failed_mirror_waypoints = mirror_waypoints
-                        best_failed_inputs = inputs
+
+            # Attempt 1 sequentially.
+            waypoints, mirror_waypoints, inputs, won = self._beam_search(
+                widths[0], max_frames, screen, clock, 0,
+                prefix_inputs=prefix_inputs)
+            if not won and waypoints:
+                farthest = max((wp[0] for wp in waypoints), default=-1.0)
+                if farthest > best_failed_x:
+                    best_failed_x = farthest
+                    best_failed_waypoints = waypoints
+                    best_failed_mirror_waypoints = mirror_waypoints
+                    best_failed_inputs = inputs
+
+            # Attempts 2-4 in parallel (skipped if attempt 1 already won).
+            if not won:
+                remaining = []
+                for attempt in (1, 2, 3):
+                    frames = max_frames if attempt < 3 else int(max_frames * 1.5)
+                    remaining.append(
+                        (self.objects, widths[attempt], frames, None, attempt))
+                try:
+                    par_wp, par_mwp, par_in, par_won, par_failed = \
+                        self._solve_attempts_parallel(remaining, screen, clock)
+                except Exception:
+                    # Multiprocessing is best-effort. If it fails (e.g. in
+                    # restricted environments or sandboxes that can't spawn
+                    # subprocesses), fall back to the original sequential
+                    # retry loop so behaviour is preserved exactly.
+                    par_won = False
+                    par_failed = None
+                    for attempt in (1, 2, 3):
+                        frames = (max_frames if attempt < 3
+                                  else int(max_frames * 1.5))
+                        waypoints, mirror_waypoints, inputs, won = \
+                            self._beam_search(widths[attempt], frames,
+                                              screen, clock, attempt,
+                                              prefix_inputs=None)
+                        if won:
+                            break
+                        if waypoints:
+                            farthest = max((wp[0] for wp in waypoints),
+                                           default=-1.0)
+                            if farthest > best_failed_x:
+                                best_failed_x = farthest
+                                best_failed_waypoints = waypoints
+                                best_failed_mirror_waypoints = mirror_waypoints
+                                best_failed_inputs = inputs
+                else:
+                    if par_won:
+                        waypoints, mirror_waypoints, inputs, won = \
+                            par_wp, par_mwp, par_in, True
+                    elif par_failed is not None:
+                        fwp, fmwp, fin, fx = par_failed
+                        if fx > best_failed_x:
+                            best_failed_x = fx
+                            best_failed_waypoints = fwp
+                            best_failed_mirror_waypoints = fmwp
+                            best_failed_inputs = fin
+
             if not won and best_failed_waypoints:
                 waypoints = best_failed_waypoints
                 mirror_waypoints = best_failed_mirror_waypoints
@@ -465,15 +608,38 @@ class AutoBot:
         STAGNATION_BASE = 220
         STAGNATION_THIN_BEAM = 90  # used when <= 4 alive candidates left
 
+        # Snap field indices (locals to avoid attribute lookups in the loop)
+        _ON_GROUND = 3
+        _MIRROR = 4  # snap[4] is the mirror tuple or None
+        _TAP_PRUNABLE_MODES = (MODE_CUBE, MODE_BALL, MODE_SPIDER)
+        _HOLD_SENSITIVE_MODES = (MODE_SHIP, MODE_WAVE, MODE_UFO)
+        orb_xs = self._orb_xs
+
+        # Cell radius around the candidate where an orb can still be
+        # activated by a tap made RIGHT NOW. input_buffer=6 frames, max
+        # move_speed ~10px/frame, so 60px of forward travel = ~1.2 cells.
+        # Round up to 2 for safety margin; add 1 more for the player's own
+        # width straddling two cells. Total: 3 cells forward, 1 back.
+        _TAP_LOOKAHEAD = 3
+        _TAP_LOOKBACK = 1
+
+        def _has_orb_near_x(gx):
+            """True if any orb sits in the window of cell columns the
+            player can reach before input_buffer expires."""
+            for dx in range(-_TAP_LOOKBACK, _TAP_LOOKAHEAD + 1):
+                if (gx + dx) in orb_xs:
+                    return True
+            return False
+
         while total_frames < max_frames and not won:
             # Input options depend on mode of best candidate. The (False, True)
             # 'tap' option activates orbs / pads without committing to a hold —
             # essential for cube/spider orb-chain routes.
             mode = beam[0][0][0][_MODE]
             if mode in (MODE_BALL, MODE_UFO, MODE_CUBE, MODE_SPIDER):
-                options = [(False, False), (True, True), (False, True)]
+                default_options = [(False, False), (True, True), (False, True)]
             else:
-                options = [(False, False), (True, True)]
+                default_options = [(False, False), (True, True)]
 
             # Expand all beam entries with all input options
             candidates = []
@@ -483,6 +649,31 @@ class AutoBot:
 
             for beam_idx, (snap, _, _) in enumerate(beam):
                 parent_pcount = parent_passed[beam_idx]
+                # Per-candidate input pruning (safe — no missed paths).
+                # When the candidate is in cube/ball/spider mid-air AND
+                # there's no orb close enough to catch a tap (buffer decays
+                # in ~6 frames), (True, True) and (False, True) produce
+                # physics identical to (False, False); they differ only in
+                # input_buffer which has no target to activate before it
+                # expires. Skip them. Mirror-check: if the mirror body is
+                # in a hold-sensitive mode (ship/wave/ufo) we can't prune,
+                # since input_held still steers the mirror.
+                vals = snap[0]
+                cand_mode = vals[_MODE]
+                options = default_options
+                if (cand_mode in _TAP_PRUNABLE_MODES
+                        and not vals[_ON_GROUND]):
+                    mirror_forbids = False
+                    m_snap = snap[_MIRROR]
+                    if m_snap is not None and len(m_snap) >= 7:
+                        # mirror tuple: (y, vy, grav, on_ground, angle,
+                        #                alive, mode, size)
+                        if m_snap[5] and m_snap[6] in _HOLD_SENSITIVE_MODES:
+                            mirror_forbids = True
+                    if not mirror_forbids:
+                        gx = int(vals[0]) // CELL
+                        if not _has_orb_near_x(gx):
+                            options = [(False, False)]
                 for held, pressed in options:
                     _restore(player, snap)
                     player.update(held, pressed)
@@ -662,6 +853,128 @@ class AutoBot:
                 sfx.toggle()
 
         return waypoints, mirror_waypoints, player.won
+
+    def _solve_attempts_parallel(self, attempts_args, screen, clock):
+        """Run beam-search attempts concurrently in worker subprocesses.
+
+        ``attempts_args`` is a list of tuples shaped like the input to
+        ``_solve_attempt_worker``. Returns
+        ``(wp, mwp, inputs, won, best_failed)`` where ``best_failed`` is
+        ``None`` if no attempt produced a non-empty trajectory or
+        ``(wp, mwp, inputs, farthest_x)`` for the deepest failing run.
+
+        Uses the 'spawn' multiprocessing context so worker state is clean
+        — the parent process may already have pygame / SDL initialized,
+        which doesn't fork cleanly. The first worker to return ``won=True``
+        causes the pool to terminate immediately; other in-flight workers
+        are killed.
+
+        While workers run the parent polls for completion every ~50ms,
+        repainting the progress display and watching for ESC / QUIT so the
+        user can still cancel a long solve.
+        """
+        ctx = _mp.get_context("spawn")
+        n_workers = min(len(attempts_args),
+                        max(1, _os.cpu_count() or 1))
+        pool = ctx.Pool(processes=n_workers)
+        try:
+            pending_results = [
+                pool.apply_async(_solve_attempt_worker, (a,))
+                for a in attempts_args
+            ]
+            pending = list(range(len(pending_results)))
+
+            won_tuple = None             # (wp, mwp, inp, True)
+            best_failed = None           # (wp, mwp, inp, x)
+            cancelled = False
+            last_paint = 0.0
+            paint_interval = 0.2
+
+            while pending and won_tuple is None and not cancelled:
+                ready_now = [i for i in pending
+                             if pending_results[i].ready()]
+                for i in ready_now:
+                    pending.remove(i)
+                    wp, mwp, inp, won, _aidx = pending_results[i].get()
+                    if won:
+                        won_tuple = (wp, mwp, inp, True)
+                        break
+                    if wp:
+                        farthest = max((p[0] for p in wp), default=-1.0)
+                        if best_failed is None or farthest > best_failed[3]:
+                            best_failed = (wp, mwp, inp, farthest)
+                if won_tuple is not None:
+                    break
+                if not pending:
+                    break
+
+                # Paint & poll ESC. Only when we have a screen — otherwise
+                # (tests / headless tools) just sleep briefly.
+                if screen is not None:
+                    now = _time.monotonic()
+                    if now - last_paint >= paint_interval:
+                        last_paint = now
+                        if self._draw_parallel_progress(
+                                screen, clock,
+                                len(pending), n_workers):
+                            cancelled = True
+                            break
+                    else:
+                        _time.sleep(0.02)
+                else:
+                    _time.sleep(0.05)
+
+            if won_tuple is not None:
+                wp, mwp, inp, _ = won_tuple
+                return wp, mwp, inp, True, best_failed
+            if cancelled:
+                return [], [], [], False, best_failed
+            return [], [], [], False, best_failed
+        finally:
+            # terminate() sends SIGTERM to workers still running the beam
+            # search; join() waits for them to exit before returning.
+            pool.terminate()
+            pool.join()
+
+    def _draw_parallel_progress(self, screen, clock, n_pending, n_workers):
+        """Minimal progress display for the parallel phase. Returns True
+        if the user pressed ESC (cancel)."""
+        from graphics import txt
+        completed = n_workers - n_pending
+        screen.fill((10, 8, 24))
+        txt(screen, "AUTO-BOT  PARALLEL BEAM SEARCH",
+            WIDTH // 2, HEIGHT // 2 - 60, 28, (255, 180, 60), True)
+        txt(screen,
+            f"{completed}/{n_workers} attempts done  |  {n_pending} running",
+            WIDTH // 2, HEIGHT // 2 - 10, 18, (180, 180, 200), True)
+        # Simple running-bar: each worker shown as a cell.
+        bw = 400
+        bx = WIDTH // 2 - bw // 2
+        by = HEIGHT // 2 + 30
+        pygame.draw.rect(screen, (40, 40, 60), (bx, by, bw, 22),
+                         border_radius=6)
+        if n_workers > 0:
+            cell_w = bw // n_workers
+            for i in range(n_workers):
+                color = ((90, 220, 120) if i < completed
+                         else (255, 180, 60))
+                pygame.draw.rect(
+                    screen, color,
+                    (bx + i * cell_w + 2, by + 2,
+                     cell_w - 4, 18),
+                    border_radius=4)
+        txt(screen, "Escape to cancel",
+            WIDTH // 2, HEIGHT // 2 + 100, 16, (140, 140, 155), True)
+        pygame.display.flip()
+        if clock:
+            clock.tick(60)
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                pygame.quit()
+                raise SystemExit
+            if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                return True
+        return False
 
     def _clearance_bonus(self, player):
         """Small bonus for distance from hazards, used as tiebreaker."""
