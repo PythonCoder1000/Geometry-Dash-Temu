@@ -121,10 +121,11 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     # and cache the waypoints; subsequent H presses just toggle the overlay
     # so the expensive search doesn't repeat. Disabled in sim runs because
     # the autobot would be racing itself.
-    hint_path = None       # list of (x, y) waypoints when computed
+    hint_path = None          # list of (x, y) waypoints when computed
+    hint_mirror_path = None   # parallel mirror path for dual segments
     hint_visible = False
     hint_solving = False
-    hint_status = ""       # "" | "ok" | "partial" | "failed"
+    hint_status = ""          # "" | "ok" | "partial" | "failed"
 
     # GD-style music: play level music from the start. We used to gate
     # this on `not editor_test` (so the editor's Test button stayed silent),
@@ -250,10 +251,13 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     def _compute_hint_path():
         """Run the autobot once and cache its waypoints for the H overlay.
 
-        Returns ("ok"|"partial"|"failed", waypoints). The solver shows its
-        own progress UI so we don't need to draw anything here. We pass the
-        ORIGINAL objects (pre-_orig_x mutations) so the simulator starts
-        from the same level layout the player is currently attempting.
+        Returns ``(status, waypoints, mirror_waypoints)`` where ``status``
+        is ``"ok"|"partial"|"failed"``. ``mirror_waypoints`` is the dual
+        mirror's parallel path (empty list when the level never goes dual).
+        The solver shows its own progress UI so we don't need to draw
+        anything here. We pass the ORIGINAL objects (pre-_orig_x mutations)
+        so the simulator starts from the same level layout the player is
+        currently attempting.
         """
         try:
             from autobot import AutoBot
@@ -265,12 +269,12 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                       if not (isinstance(k, str) and k.startswith("_"))}
                 clean.append(co)
             solver = AutoBot(clean)
-            wp, _inputs, won = solver.solve(screen, clock)
+            wp, mwp, _inputs, won = solver.solve(screen, clock)
             if not wp:
-                return "failed", None
-            return ("ok" if won else "partial"), list(wp)
+                return "failed", None, None
+            return ("ok" if won else "partial"), list(wp), list(mwp)
         except Exception:
-            return "failed", None
+            return "failed", None, None
 
     def _persist_win():
         """Persist meta: verified / attempts / best_progress / coins_collected.
@@ -354,7 +358,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                     _full_reset()
                 elif ev.key == pygame.K_b and not is_sim_run and not player.won:
                     # Bot menu: opens the dedicated bot UI for solving / replay.
-                    from bot_menu import run_bot_menu
+                    from bot_menu import run_bot_menu, get_last_mirror_waypoints
                     result = run_bot_menu(
                         screen, clock, [dict(o) for o in objects],
                         precomputed_path=hint_path,
@@ -366,6 +370,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                         new_path, new_status = result
                         if new_path:
                             hint_path = new_path
+                            hint_mirror_path = get_last_mirror_waypoints()
                             hint_status = new_status
                             hint_visible = True
                     guard.reset()
@@ -376,8 +381,9 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                     # toggle visibility instantly.
                     if hint_path is None and not hint_solving:
                         hint_solving = True
-                        hint_status, new_path = _compute_hint_path()
+                        hint_status, new_path, new_mirror = _compute_hint_path()
                         hint_path = new_path
+                        hint_mirror_path = new_mirror
                         hint_visible = (hint_path is not None)
                         hint_solving = False
                         guard.reset()
@@ -621,6 +627,22 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                     prev_pt = (sx, sy)
                 else:
                     prev_pt = None
+            # Mirror path (when the level enters dual): blue so the user can
+            # tell the two bodies apart at a glance.
+            if hint_mirror_path:
+                prev_pt = None
+                for wx, wy in hint_mirror_path:
+                    sx = int(wx - cam_x - shake_x)
+                    sy = int(wy - cam_y - shake_y)
+                    if -40 < sx < WIDTH + 40 and -200 < sy < HEIGHT + 200:
+                        pygame.draw.circle(hint_surf, (90, 170, 255, 120),
+                                           (sx, sy), 4)
+                        if prev_pt is not None:
+                            pygame.draw.line(hint_surf, (90, 170, 255, 70),
+                                             prev_pt, (sx, sy), 2)
+                        prev_pt = (sx, sy)
+                    else:
+                        prev_pt = None
             screen.blit(hint_surf, (0, 0))
         # Ghost overlay: draw a fading trail of the best prior run so the
         # player can see where they previously got further.

@@ -731,6 +731,7 @@ def run_editor(screen, clock):
 
     # Bot path system
     bot_waypoints = []
+    bot_mirror_waypoints = []  # parallel path for the dual mirror (blue line)
     bot_exact_inputs = None  # exact (held, pressed) per frame from autobot
 
     # Snippet "stamp": when set to a list of objects, the next click on the
@@ -1281,7 +1282,9 @@ def run_editor(screen, clock):
                             world_x = (mx + cam_x) / zoom_level
                             world_y = (my + cam_y) / zoom_level
                             bot_waypoints.append((world_x, world_y))
-                            bot_exact_inputs = None  # manual path invalidates autobot inputs
+                            # Manual editing invalidates the autobot pairing.
+                            bot_exact_inputs = None
+                            bot_mirror_waypoints = []
                             msg, msg_timer = f"Bot path: {len(bot_waypoints)} pts (K=run, R-click=undo)", 90
                         else:
                             push_undo()
@@ -1609,7 +1612,8 @@ def run_editor(screen, clock):
         if do_bot_menu:
             # Editor-side bot menu: when the user clicks Replay, run the
             # solved inputs against a real Player in the test-play screen.
-            from bot_menu import run_bot_menu, get_last_inputs
+            from bot_menu import (run_bot_menu, get_last_inputs,
+                                  get_last_mirror_waypoints)
 
             def _replay_in_editor(inputs):
                 # Same level_music wiring as the other bot replays — keep
@@ -1634,6 +1638,7 @@ def run_editor(screen, clock):
                 wp, status = result
                 if wp:
                     bot_waypoints = list(wp)
+                    bot_mirror_waypoints = get_last_mirror_waypoints()
                     bot_exact_inputs = get_last_inputs() or bot_exact_inputs
                     tool = TOOL_BOT_PATH
                     msg, msg_timer = (
@@ -1742,6 +1747,20 @@ def run_editor(screen, clock):
                 col = (255, 220, 100) if is_end else (255, 180, 60)
                 pygame.draw.circle(screen, col, pt, 5)
                 pygame.draw.circle(screen, (0, 0, 0), pt, 5, 1)
+        # Mirror path: drawn in blue to distinguish the dual body's route
+        # from the main yellow path. Only present when the autobot solved
+        # a level that enters dual mode.
+        if bot_mirror_waypoints:
+            mpath_pts = []
+            for wx, wy in bot_mirror_waypoints:
+                sx = int(wx * zoom_level - cam_x)
+                sy = int(wy * zoom_level - cam_y)
+                mpath_pts.append((sx, sy))
+            if len(mpath_pts) >= 2:
+                pygame.draw.lines(screen, (90, 170, 255), False, mpath_pts, 2)
+            for pt in mpath_pts:
+                pygame.draw.circle(screen, (90, 170, 255), pt, 4)
+                pygame.draw.circle(screen, (0, 0, 0), pt, 4, 1)
         if pending_link:
             kind = pending_link.get("kind")
             if kind == "teleport":

@@ -921,15 +921,18 @@ flat = make_flat_level(length=20)
 _hb = _HintBot([dict(o) for o in flat])
 check("AutoBot accepts plain object list", _hb is not None)
 
-# solve() must return (waypoints, inputs, won). Pass a tiny max_frames so
-# the test stays quick even if the solver has to explore a bit.
-_hwp, _hin, _hwon = _hb.solve(screen=None, clock=None, max_frames=600)
+# solve() returns (waypoints, mirror_waypoints, inputs, won). Pass a tiny
+# max_frames so the test stays quick even if the solver has to explore a bit.
+_hwp, _hmwp, _hin, _hwon = _hb.solve(screen=None, clock=None, max_frames=600)
 check("AutoBot.solve returns a waypoint list",
       isinstance(_hwp, list))
+check("AutoBot.solve returns a mirror waypoint list",
+      isinstance(_hmwp, list))
 check("AutoBot.solve returns an input list",
       isinstance(_hin, list))
 check("AutoBot waypoints have 2-tuples",
       not _hwp or (len(_hwp[0]) == 2 and isinstance(_hwp[0][0], (int, float))))
+check("Flat-level mirror waypoints empty (no dual portal)", _hmwp == [])
 
 # When waypoints come back, they must lie somewhere in the level bounds so
 # play.py's world-to-screen transform doesn't draw off-canvas noise.
@@ -950,7 +953,7 @@ for gx in range(40):
     trivial.append({"t": T_BLOCK, "x": gx, "y": 10, "r": 0})
 trivial.append({"t": T_END, "x": 35, "y": 9, "r": 0})
 _solver = _HintBot([dict(o) for o in trivial])
-_twp, _tin, _twon = _solver.solve(screen=None, clock=None, max_frames=2000)
+_twp, _tmwp, _tin, _twon = _solver.solve(screen=None, clock=None, max_frames=2000)
 check("AutoBot solves trivial flat level", _twon is True)
 check("AutoBot trivial solution has inputs", len(_tin) > 0)
 check("AutoBot trivial waypoints reach end x",
@@ -966,7 +969,7 @@ for gx in range(40):
 spike_level.append({"t": T_SPIKE, "x": 12, "y": 9, "r": 0})
 spike_level.append({"t": T_END, "x": 35, "y": 9, "r": 0})
 _obstacle_bot = _HintBot([dict(o) for o in spike_level])
-_owp, _oin, _owon = _obstacle_bot.solve(screen=None, clock=None, max_frames=3000)
+_owp, _omwp, _oin, _owon = _obstacle_bot.solve(screen=None, clock=None, max_frames=3000)
 check("AutoBot solves single-spike level", _owon is True)
 # When the bot solves with a jump, at least one frame must have pressed=True
 if _owon:
@@ -1078,6 +1081,65 @@ _ab_restore(_sp, _legacy_snap)
 check("Restore tolerates legacy 4-tuple snapshot",
       _sp.mirror is None)
 
+# 5) Solo portal collapses the mirror back into the main player. Build a
+#    level with a ceiling (so the upside-down mirror can land), a dual
+#    portal, then a solo portal further along; after the player crosses
+#    solo, mirror must be None and the player should still be alive (no
+#    crash from clearing self.mirror mid-substep).
+from constants import T_MODE_SOLO, T_COIN, T_BG_TRIGGER
+def _make_dual_corridor(length, extras=None):
+    """Flat ground at y=10 plus a ceiling at y=2 so a -grav mirror has
+    something to land on instead of falling off the top of the screen."""
+    level = [{"t": T_START, "x": 3, "y": 9, "r": 0}]
+    for gx in range(length):
+        level.append({"t": T_BLOCK, "x": gx, "y": 10, "r": 0})
+        level.append({"t": T_BLOCK, "x": gx, "y": 2, "r": 0})
+    level.append({"t": T_END, "x": length - 1, "y": 9, "r": 0})
+    if extras:
+        level.extend(extras)
+    return level
+
+_collapse_objs = _make_dual_corridor(60, extras=[
+    {"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0},
+    {"t": T_MODE_SOLO, "x": 30, "y": 9, "r": 0},
+])
+_cp = Player(_collapse_objs)
+_saw_mirror = False
+for _ in range(400):
+    _cp.update(False, False)
+    if _cp.mirror is not None:
+        _saw_mirror = True
+    if _saw_mirror and _cp.mirror is None:
+        break
+    if not _cp.alive or _cp.won:
+        break
+check("Solo portal collapses mirror back to main player",
+      _saw_mirror and _cp.mirror is None and _cp.alive)
+
+# 6) Mirror picks up coins and consumes triggers. Drop a coin at the mirror's
+#    height (above the player on flat ground with grav-flipped mirror) and
+#    confirm the coin gets collected even though the main player never goes
+#    near it. The corridor's ceiling keeps the mirror grounded.
+_mirror_coin_objs = _make_dual_corridor(60, extras=[
+    {"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0},
+    # Coin just below the ceiling — only the upside-down mirror will sweep
+    # through it (the main player stays on the floor).
+    {"t": T_COIN, "x": 14, "y": 3, "r": 0, "coin_id": 7},
+    # BG trigger same column — fires when EITHER body crosses it.
+    {"t": T_BG_TRIGGER, "x": 14, "y": 3, "r": 0, "bg": 3},
+])
+_mp = Player(_mirror_coin_objs)
+for _ in range(180):
+    _mp.update(False, False)
+    if 7 in _mp.coins_collected and _mp.bg_preset == 3:
+        break
+    if not _mp.alive:
+        break
+check("Mirror collects coins along its path",
+      7 in _mp.coins_collected)
+check("Mirror fires global triggers (bg_preset changed)",
+      _mp.bg_preset == 3)
+
 
 # ---------------------------------------------------------------------------
 # Editor test-mode music wiring
@@ -1138,7 +1200,7 @@ if _test_block_start >= 0 and _test_block_end > _test_block_start:
 section("Bot menu click-handling guards")
 import bot_menu as _bm
 
-# 1. _run_solver signature: must yield 4 values (wp, inputs, status, err).
+# 1. _run_solver signature: returns (wp, mwp, inputs, status, err).
 _solver_sig = inspect.signature(_bm._run_solver)
 check("_run_solver signature unchanged (screen, clock, objects)",
       list(_solver_sig.parameters) == ["screen", "clock", "objects"])
@@ -1146,9 +1208,9 @@ check("_run_solver signature unchanged (screen, clock, objects)",
 # 2. Crash surfacing: a deliberately malformed level should NOT vanish into
 #    a silent "failed". The exception's class name needs to land in `err`.
 _garbage = [{"no_t_field": True}]
-_wp, _inp, _status, _err = _bm._run_solver(None, None, _garbage)
-check("_run_solver returns 4-tuple (wp, inputs, status, err)",
-      _wp is None and _inp == [] and _status == "failed"
+_wp, _mwp, _inp, _status, _err = _bm._run_solver(None, None, _garbage)
+check("_run_solver returns 5-tuple (wp, mwp, inputs, status, err)",
+      _wp is None and _mwp == [] and _inp == [] and _status == "failed"
       and isinstance(_err, str))
 check("_run_solver surfaces crash exception class in error string",
       "KeyError" in _err)

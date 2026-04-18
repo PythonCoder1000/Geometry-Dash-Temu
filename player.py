@@ -791,11 +791,123 @@ class Player:
                 if hazard_rect.colliderect(saw_hitbox(o["x"], o["y"])):
                     m["alive"] = False
                     return
+        # Pads / orbs / gravity portal / triggers / solo portal collapse.
+        # Returns True if the mirror collapsed back into the main player —
+        # in that case stop touching m (it's None now) and skip rotation.
+        if self._handle_mirror_interactions(trigger_rect):
+            return
         # Mirror rotation (visual only, cube-style)
         if not m["on_ground"]:
             m["angle"] = m.get("angle", 0.0) - 5 * m["grav"]
         else:
             m["angle"] = round(m.get("angle", 0.0) / 90) * 90
+
+    def _handle_mirror_interactions(self, trigger_rect):
+        """Mirror-side interaction pass: pads, orbs, gravity portals, the
+        solo portal (which collapses the mirror state into the main player),
+        and global triggers. Hazards are handled in _step_mirror; mode
+        portals (mini/big/wave/etc) and dash/teleport orbs are intentionally
+        skipped to keep mirror physics simple. Returns True if the mirror
+        was just collapsed (caller must stop touching ``self.mirror``)."""
+        m = self.mirror
+        activated_orb_cell = None
+        for o in self.nearby_for_rect(trigger_rect, 2):
+            t = o["t"]
+            if t in (T_BLOCK, T_SLAB, T_START, T_END,
+                     T_SPIKE, T_HALF_SPIKE, T_SAW):
+                continue
+            key = (t, o["x"], o["y"])
+            if t in PAD_TYPES and key not in self.passed:
+                if trigger_rect.colliderect(
+                        pad_trigger_rect(o["x"], o["y"], o.get("r", 0))):
+                    if t == T_BLUE_PAD:
+                        m["grav"] *= -1
+                        m["vy"] = PAD_FORCE * 0.5 * m["grav"]
+                    else:
+                        m["vy"] = PAD_FORCE * m["grav"]
+                    m["on_ground"] = False
+                    self.passed.add(key)
+                continue
+            cr = cell_rect(o["x"], o["y"])
+            if not trigger_rect.colliderect(cr):
+                continue
+            if t == T_COIN:
+                cid = o.get("coin_id", 0)
+                if cid and cid not in self.coins_collected:
+                    self.coins_collected.add(cid)
+                continue
+            # Cube-style orbs the mirror reacts to. Dash/teleport orbs are
+            # skipped — those imply mode-specific behaviour the mirror lacks.
+            if t in (T_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB) \
+                    and key not in self.passed:
+                cell = (o["x"], o["y"])
+                if activated_orb_cell is None:
+                    if self.input_buffer <= 0:
+                        continue
+                    activated_orb_cell = cell
+                elif cell != activated_orb_cell:
+                    continue
+                if t == T_ORB:
+                    m["vy"] = JUMP_FORCE * m["grav"]
+                elif t == T_BLUE_ORB:
+                    m["grav"] *= -1
+                elif t == T_GREEN_ORB:
+                    m["vy"] = JUMP_FORCE * m["grav"]
+                elif t == T_BLACK_ORB:
+                    m["vy"] = -JUMP_FORCE * m["grav"]
+                m["on_ground"] = False
+                self.passed.add(key)
+                continue
+            if t == T_GRAV and key not in self.passed:
+                m["grav"] *= -1
+                m["on_ground"] = False
+                self.passed.add(key)
+            elif t == T_MODE_SOLO and key not in self.passed:
+                # Collapse: the mirror "becomes" the main player. Adopt its
+                # y/vy/grav/on_ground/angle so the player keeps the mirror's
+                # arc instead of snapping back to the main body's pose.
+                self.y = float(m["y"])
+                self.vy = float(m["vy"])
+                self.grav = int(m["grav"])
+                self.on_ground = bool(m["on_ground"])
+                self.angle = float(m.get("angle", 0.0))
+                self.mirror = None
+                self.passed.add(key)
+                return True
+            elif t == T_MODE_DUAL and key not in self.passed:
+                # Already dual — consume the portal so it doesn't re-fire on
+                # the main body either.
+                self.passed.add(key)
+            elif t == T_CAMERA_TRIGGER and key not in self.passed:
+                target_row = o.get("cy", o["y"])
+                self.target_cam_y = target_row * CELL + CELL / 2 - HEIGHT / 2
+                self.passed.add(key)
+            elif t == T_BG_TRIGGER and key not in self.passed:
+                self.bg_preset = int(o.get("bg", 0))
+                self.passed.add(key)
+            elif t == T_MOVE_TRIGGER and key not in self.passed:
+                self._start_move_trigger(o)
+                self.passed.add(key)
+            elif t == T_COLOR_TRIGGER and key not in self.passed:
+                self.color_index = (self.color_index + 1) % len(PLAYER_COLORS)
+                self.player_color = PLAYER_COLORS[self.color_index]
+                self.passed.add(key)
+            elif t == T_PULSE_TRIGGER and key not in self.passed:
+                bpm = int(o.get("bpm", 128))
+                duration_s = float(o.get("duration", 2.0))
+                frames = max(1, int(duration_s * 60))
+                self.active_pulses.append({
+                    "start_frame": self.frame,
+                    "end_frame": self.frame + frames,
+                    "bpm": bpm,
+                })
+                self.passed.add(key)
+            elif t == T_ROTATE_TRIGGER and key not in self.passed:
+                self._start_rotate_trigger(o)
+                self.passed.add(key)
+        if activated_orb_cell is not None:
+            self.input_buffer = 0
+        return False
 
     # ---- per-frame update ------------------------------------------------
     def update(self, input_held, input_pressed):
