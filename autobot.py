@@ -96,11 +96,13 @@ def _build_obj_index(player):
 def _snap(player):
     """Capture player state as a lightweight tuple-based snapshot.
 
-    Layout: ``(vals, passed, anims, obj_pos, mirror)`` where ``mirror`` is
-    None when the player has not crossed a dual portal, or a 6-tuple
-    ``(y, vy, grav, on_ground, angle, alive)`` mirroring `_enter_dual`'s
-    state dict. Beam search MUST round-trip the mirror or every restore
-    after a dual portal silently desyncs from reality.
+    Layout: ``(vals, passed, anims, obj_pos, mirror, mirror_passed)`` where
+    ``mirror`` is None when the player has not crossed a dual portal, or
+    an 8-tuple ``(y, vy, grav, on_ground, angle, alive, mode, size)``
+    mirroring `_enter_dual`'s state dict. ``mirror_passed`` is a frozenset
+    of (type, x, y) keys for portals the mirror has consumed (independent
+    of the main body's `passed`). Beam search MUST round-trip both or every
+    restore after a dual portal silently desyncs from reality.
     """
     vals = tuple(getattr(player, k, 0) for k in _SNAP_KEYS)
     passed = frozenset(player.passed)
@@ -123,22 +125,28 @@ def _snap(player):
         mirror = None
     else:
         mirror = (m["y"], m["vy"], m["grav"], m["on_ground"],
-                  m.get("angle", 0.0), m["alive"])
-    return (vals, passed, anims, obj_pos, mirror)
+                  m.get("angle", 0.0), m["alive"],
+                  m.get("mode", MODE_CUBE), m.get("size", PLAYER_SIZE))
+    mirror_passed = frozenset(getattr(player, "mirror_passed", set()))
+    return (vals, passed, anims, obj_pos, mirror, mirror_passed)
 
 
 def _restore(player, snap):
     """Restore player state from snapshot."""
-    # Backwards-compat for old 4-tuple snapshots: pad with mirror=None so a
-    # mid-solve format upgrade doesn't throw.
+    # Backwards-compat: pad legacy snapshots so a mid-solve format upgrade
+    # doesn't throw. 4-tuple = pre-mirror; 5-tuple = pre-mirror_passed.
+    mirror_passed = frozenset()
     if len(snap) == 4:
         vals, passed, anims, obj_pos = snap
         mirror = None
-    else:
+    elif len(snap) == 5:
         vals, passed, anims, obj_pos, mirror = snap
+    else:
+        vals, passed, anims, obj_pos, mirror, mirror_passed = snap
     for i, k in enumerate(_SNAP_KEYS):
         setattr(player, k, vals[i])
     player.passed = set(passed)
+    player.mirror_passed = set(mirror_passed)
     player.trail = []
     # Restore animations
     if anims:
@@ -170,7 +178,13 @@ def _restore(player, snap):
     if mirror is None:
         player.mirror = None
     else:
-        my, mvy, mgrav, mog, mang, malive = mirror
+        # 6-tuple legacy: pre-mode/size. 8-tuple current: includes both.
+        if len(mirror) == 6:
+            my, mvy, mgrav, mog, mang, malive = mirror
+            mmode = MODE_CUBE
+            msize = PLAYER_SIZE
+        else:
+            my, mvy, mgrav, mog, mang, malive, mmode, msize = mirror
         player.mirror = {
             "y": float(my),
             "vy": float(mvy),
@@ -178,6 +192,9 @@ def _restore(player, snap):
             "on_ground": bool(mog),
             "angle": float(mang),
             "alive": bool(malive),
+            # mode is a string constant ("cube"/"ship"/etc) — no int cast.
+            "mode": mmode,
+            "size": int(msize),
         }
 
 
@@ -220,14 +237,20 @@ def _dedup_key(snap):
     )
     # Dual-mode discriminator: two candidates with similar player state but
     # very different mirror states are NOT the same trajectory — the
-    # mirror can die independently. Fold the mirror's discretised y/vy
-    # plus its alive flag into the key. Pre-portal candidates collapse on
-    # the same `None` sentinel, so single-player levels are unaffected.
+    # mirror can die independently and now carries its own mode/size that
+    # change physics. Fold the mirror's discretised y/vy + alive + mode +
+    # size into the key. Pre-portal candidates collapse on the same `None`
+    # sentinel, so single-player levels are unaffected.
     mirror = snap[4] if len(snap) > 4 else None
     if mirror is None:
         return base + (None,)
-    my, mvy, _mgrav, _mog, _mang, malive = mirror
-    return base + (round(my / 5), round(mvy / 2), 1 if malive else 0)
+    if len(mirror) == 6:
+        my, mvy, _mgrav, _mog, _mang, malive = mirror
+        mmode, msize = 0, 0
+    else:
+        my, mvy, _mgrav, _mog, _mang, malive, mmode, msize = mirror
+    return base + (round(my / 5), round(mvy / 2),
+                   1 if malive else 0, mmode, msize)
 
 
 # ---------------------------------------------------------------------------
