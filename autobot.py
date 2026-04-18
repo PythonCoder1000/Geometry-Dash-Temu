@@ -134,7 +134,7 @@ _SNAP_KEYS = [
     'frame', 'mode', 'move_speed', 'dash_timer', 'input_buffer',
     'teleport_cooldown', 'target_cam_y', 'bg_preset',
     'color_index', '_grav_flip_grace', '_wall_frames',
-    'mirror_input_buffer',
+    'mirror_input_buffer', 'size',
 ]
 
 # Pre-built index for fast object position restore
@@ -167,7 +167,7 @@ def _snap(player):
         player.move_speed, player.dash_timer, player.input_buffer,
         player.teleport_cooldown, player.target_cam_y, player.bg_preset,
         player.color_index, player._grav_flip_grace, player._wall_frames,
-        player.mirror_input_buffer,
+        player.mirror_input_buffer, player.size,
     )
     passed = frozenset(player.passed)
     anims = player.move_animations
@@ -219,7 +219,7 @@ def _restore(player, snap):
      player.move_speed, player.dash_timer, player.input_buffer,
      player.teleport_cooldown, player.target_cam_y, player.bg_preset,
      player.color_index, player._grav_flip_grace, player._wall_frames,
-     player.mirror_input_buffer) = vals
+     player.mirror_input_buffer, player.size) = vals
     player.passed = set(passed)
     player.mirror_passed = set(mirror_passed)
     player.trail = []
