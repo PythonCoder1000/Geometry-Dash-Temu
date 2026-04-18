@@ -1,0 +1,843 @@
+"""Gameplay loop.
+
+Runs a single play session — handles input, physics stepping (via Player),
+HUD rendering, pause/win overlays, practice-mode checkpoints, and — on a
+legitimate win — bumps the level's ``verified`` / ``best_progress`` /
+``coins_collected`` metadata so the playlist can mark it verified.
+"""
+
+import sys
+
+import pygame
+
+from constants import (
+    WIDTH, HEIGHT, CELL, FPS,
+    C_DARK, C_PLAYER, C_GRAY, C_WHITE, C_BTN, C_BG_TOP, C_BG_BOT,
+    C_COIN, C_SUCCESS, C_PUBLISH, C_DANGER,
+    DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES,
+    T_TELEPORT_ORB, T_COIN, T_END, T_ORB, T_DASH_ORB, T_BLACK_ORB,
+    T_BLUE_ORB, T_GREEN_ORB, T_GRAV, T_CHECKPOINT,
+)
+from graphics import (
+    draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
+    update_shake, apply_shake, shake_offset, lighter, darker,
+    speaker_icon, icon_button, draw_end_wall,
+)
+import settings
+import gamepad
+import music
+import sfx
+from input_guard import ClickGuard
+from particles import Particles
+from player import Player
+from levels import update_meta
+
+
+# Keys / cells that, when added to player.passed during an update(),
+# should trigger a named SFX.
+_SFX_FOR_TYPE = {
+    T_ORB: ("orb", 0.5),
+    T_DASH_ORB: ("orb", 0.55),
+    T_BLACK_ORB: ("orb", 0.5),
+    T_BLUE_ORB: ("gravity", 0.45),
+    T_GREEN_ORB: ("orb", 0.5),
+    T_GRAV: ("gravity", 0.45),
+    T_CHECKPOINT: ("checkpoint", 0.4),
+}
+
+
+def _total_coins(objects):
+    return sum(1 for o in objects if o["t"] == T_COIN)
+
+
+def _play_interaction_sounds(before_passed, after_passed, before_pads, after_pads,
+                             before_coins, after_coins):
+    """Emit one-shot SFX for orbs/pads/coins consumed this frame."""
+    for key in after_passed - before_passed:
+        t = key[0] if isinstance(key, tuple) and key else None
+        info = _SFX_FOR_TYPE.get(t)
+        if info:
+            sfx.play(*info)
+    if after_pads > before_pads:
+        sfx.play("pad", 0.5)
+    if after_coins > before_coins:
+        sfx.play("click", 0.55)
+
+
+def run_play(screen, clock, objects, level_name="Level", editor_test=False,
+             practice_mode=False, level_music=None, bot_controller=None,
+             playback_inputs=None, meta=None, level_path=None,
+             out_hitboxes=None):
+    """Run a single play session.
+
+    ``meta`` / ``level_path`` (optional) are used to persist verification,
+    attempts, best_progress and coins_collected when the player finishes a
+    published level by hand (not via autobot / playback / editor-test).
+
+    ``out_hitboxes`` (optional list, mutated in place): if given, populated
+    with ``(x, y, size)`` tuples for each frame of the *most recent*
+    completed attempt. The list is cleared and refilled on every restart so
+    the editor's "show hitboxes from last run" overlay always reflects the
+    final attempt the user took before exiting back to the editor.
+    """
+    objects = [dict(o) for o in objects]
+    total_coins = _total_coins(objects)
+    player = Player(objects)
+    player.practice_mode = practice_mode
+    particles = Particles()
+    stars = make_stars()
+    mountains = make_mountains()
+    cam_x = 0.0
+    cam_y = 0.0
+    bg_top = [float(c) for c in C_BG_TOP]
+    bg_bot = [float(c) for c in C_BG_BOT]
+    attempts = 1
+    death_timer = 0
+    death_slowmo_timer = 0
+    death_flash_timer = 0
+    # Speedrun timer: frames elapsed in the current attempt (resets on death,
+    # resumes from 0 on each restart). Persisted as best_time_frames on win.
+    attempt_frames = 0
+    deaths_this_session = 0
+    # Ghost replay: list of (frame, x, y) sampled every few frames of the
+    # current attempt. On death/win, if this attempt got further than the
+    # best run so far, it becomes the new ghost. Drawn on subsequent attempts
+    # to show the player their previous best path. In-memory only.
+    current_run = []
+    best_run = []
+    best_run_progress_x = 0.0
+
+    # Hitbox recording for the editor's "show hitboxes from last run" view.
+    # `current_hitboxes` is the in-progress per-attempt buffer. On
+    # restart/death/win/exit we copy it into out_hitboxes (replacing — we
+    # only show ONE attempt at a time to keep the overlay readable).
+    current_hitboxes = []
+
+    is_sim_run = bool(bot_controller is not None or playback_inputs is not None)
+    # Don't persist progress for editor-test runs or bot/playback runs.
+    can_persist = (not editor_test) and (not is_sim_run) and (level_path is not None)
+
+    # Hint mode (autobot ghost overlay): on first H press we run the solver
+    # and cache the waypoints; subsequent H presses just toggle the overlay
+    # so the expensive search doesn't repeat. Disabled in sim runs because
+    # the autobot would be racing itself.
+    hint_path = None       # list of (x, y) waypoints when computed
+    hint_visible = False
+    hint_solving = False
+    hint_status = ""       # "" | "ok" | "partial" | "failed"
+
+    # GD-style music: play level music from the start. We used to gate
+    # this on `not editor_test` (so the editor's Test button stayed silent),
+    # but the editor now passes level_music through specifically when the
+    # user wants test-mode music — so we just check level_music. Bot and
+    # playback runs from the editor still pass level_music=None and stay
+    # silent, since their variable speeds don't sync to audio.
+    if level_music:
+        music.stop()
+        music.play_file(level_music)
+
+    def _restart_level_music():
+        """Restart level music from the beginning (GD-style on death)."""
+        if level_music:
+            music.stop()
+            music.play_file(level_music)
+
+    def _toggle_music_mute():
+        """Toggle music mute without reverting to the menu track mid-level."""
+        if music.is_muted():
+            music.set_enabled(True)
+            if level_music:
+                music.play_file(level_music)
+        else:
+            music.set_enabled(False)
+
+    pulse = 0
+    max_x = max((o["x"] for o in objects), default=10) * CELL + CELL
+
+    # Win-screen buttons
+    rc_menu = make_rect(WIDTH // 2 - 120, HEIGHT // 2 + 80, 180, 50)
+    rc_replay = make_rect(WIDTH // 2 + 120, HEIGHT // 2 + 80, 180, 50)
+
+    prev_input_held = False
+    sim_accum = 0.0
+    pending_jump_press = False
+    bot_frame = 0
+    test_speeds = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0]
+    test_speed_idx = len(test_speeds) - 1
+    sorted_objects = sorted(
+        [o for o in objects if o["t"] not in TRIGGER_TYPES],
+        key=lambda o: (0 if o["t"] in DECORATION_TYPES else 1, o["x"]),
+    )
+
+    # Pause menu state
+    paused = False
+    pause_menu_buttons = {
+        "resume": make_rect(WIDTH // 2, HEIGHT // 2 - 30, 220, 50),
+        "restart": make_rect(WIDTH // 2, HEIGHT // 2 + 30, 220, 50),
+        "practice_toggle": make_rect(WIDTH // 2, HEIGHT // 2 + 90, 220, 50),
+        "menu": make_rect(WIDTH // 2, HEIGHT // 2 + 150, 220, 50),
+    }
+    # Mute icon rects (populated each frame; only hit-tested while paused)
+    r_mute_music = pygame.Rect(0, 0, 0, 0)
+    r_mute_sfx = pygame.Rect(0, 0, 0, 0)
+
+    # Practice mode checkpoint state
+    checkpoint_flash_timer = 0
+
+    # Click-through guard: the mouse-button press that brought us INTO play
+    # should not be interpreted as an in-game jump on the first frame.
+    # Reset on every state transition (pause, restart, win screen) so the
+    # transition click never doubles as a jump in the next state.
+    guard = ClickGuard()
+    win_sfx_played = False
+    meta_persisted = False
+    best_progress = 0  # % for this session (used for save)
+    best_coins_this_run = 0
+
+    # SFX signal tracking (diffed every frame)
+    last_passed = set()
+    last_pad_count = 0
+    last_coin_count = 0
+
+    def _full_reset():
+        """Reset for a fresh attempt — resets player + all local loop state."""
+        nonlocal attempts, death_timer, death_slowmo_timer, death_flash_timer
+        nonlocal prev_input_held, pending_jump_press, sim_accum, bot_frame
+        nonlocal cam_y, bg_top, bg_bot, last_passed, last_pad_count, last_coin_count
+        nonlocal attempt_frames, current_run, best_run, best_run_progress_x
+        nonlocal current_hitboxes
+        # Commit the finished attempt as the new ghost if it got further.
+        if current_run and current_run[-1][1] > best_run_progress_x:
+            best_run = list(current_run)
+            best_run_progress_x = current_run[-1][1]
+        current_run = []
+        # Snapshot this attempt's hitbox path for the editor overlay before
+        # we start the next attempt. Only commit non-empty paths so a
+        # double-tap on R doesn't blow away the user's last real run.
+        if out_hitboxes is not None and current_hitboxes:
+            out_hitboxes[:] = current_hitboxes
+        current_hitboxes = []
+        player.reset()
+        attempts += 1
+        death_timer = 0
+        death_slowmo_timer = 0
+        death_flash_timer = 0
+        attempt_frames = 0
+        prev_input_held = False
+        pending_jump_press = False
+        sim_accum = 0.0
+        if bot_controller:
+            bot_controller.reset()
+        bot_frame = 0
+        cam_y = 0.0
+        bg_top[:] = [float(c) for c in C_BG_TOP]
+        bg_bot[:] = [float(c) for c in C_BG_BOT]
+        last_passed = set()
+        last_pad_count = 0
+        last_coin_count = 0
+        _restart_level_music()
+
+    def _stop_music_and_return(result):
+        if level_music:
+            music.stop()
+        # Commit the in-progress hitbox buffer on exit too — otherwise a
+        # user who walks away mid-attempt loses the trace they just made.
+        # Same "only save non-empty" guard as _full_reset.
+        if out_hitboxes is not None and current_hitboxes:
+            out_hitboxes[:] = current_hitboxes
+        return result
+
+    def _compute_hint_path():
+        """Run the autobot once and cache its waypoints for the H overlay.
+
+        Returns ("ok"|"partial"|"failed", waypoints). The solver shows its
+        own progress UI so we don't need to draw anything here. We pass the
+        ORIGINAL objects (pre-_orig_x mutations) so the simulator starts
+        from the same level layout the player is currently attempting.
+        """
+        try:
+            from autobot import AutoBot
+            # Strip the _orig_x/_orig_y bookkeeping fields the live Player
+            # added — the solver expects clean object dicts.
+            clean = []
+            for o in objects:
+                co = {k: v for k, v in o.items()
+                      if not (isinstance(k, str) and k.startswith("_"))}
+                clean.append(co)
+            solver = AutoBot(clean)
+            wp, _inputs, won = solver.solve(screen, clock)
+            if not wp:
+                return "failed", None
+            return ("ok" if won else "partial"), list(wp)
+        except Exception:
+            return "failed", None
+
+    def _persist_win():
+        """Persist meta: verified / attempts / best_progress / coins_collected.
+
+        When this win is the *first* verification (level was published but not
+        yet verified), prompt the verifier for the final official difficulty,
+        defaulting to what the publisher requested. Subsequent wins don't
+        re-prompt.
+        """
+        nonlocal meta_persisted
+        if meta_persisted or not can_persist:
+            return
+        prev_attempts = int((meta or {}).get("attempts", 0)) if meta else 0
+        prev_coins = int((meta or {}).get("coins_collected", 0)) if meta else 0
+        prev_best = int((meta or {}).get("best_progress", 0)) if meta else 0
+        prev_best_time = int((meta or {}).get("best_time_frames", 0)) if meta else 0
+        coins_now = len(player.coins_collected)
+        # Best time: lower wins. 0 means no prior record.
+        if prev_best_time <= 0:
+            new_best_time = attempt_frames
+        else:
+            new_best_time = min(prev_best_time, attempt_frames)
+
+        prev_deaths = int((meta or {}).get("deaths", 0)) if meta else 0
+        updates = {
+            "verified": True,
+            "attempts": prev_attempts + attempts,
+            "best_progress": max(prev_best, 100),
+            "coins_collected": max(prev_coins, coins_now),
+            "best_time_frames": new_best_time,
+            "deaths": prev_deaths + deaths_this_session,
+        }
+        # First-time verification of a published level: let the verifier confirm
+        # or override the difficulty. Skip the dialog if the level was never
+        # published (editor-quick-verify path) or already verified.
+        if meta and meta.get("published") and not meta.get("verified"):
+            from menus import difficulty_picker
+            requested = meta.get("requested_difficulty", meta.get("difficulty", "Normal"))
+            chosen = difficulty_picker(
+                screen, clock,
+                prompt="You verified this level!",
+                default=requested,
+                subtitle=f"Publisher requested: {requested}.  Set the official difficulty:",
+            )
+            if chosen:
+                updates["difficulty"] = chosen
+        try:
+            update_meta(level_path, **updates)
+            meta_persisted = True
+        except OSError:
+            # If the file is gone, just skip persistence.
+            pass
+
+    while True:
+        guard.tick()
+        pulse += 1
+        mpos = pygame.mouse.get_pos()
+        mouse_pressed_this_frame = False
+        clicked_pos = None
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if ev.type == pygame.KEYDOWN:
+                if ev.key == pygame.K_ESCAPE:
+                    if paused:
+                        paused = False
+                        guard.reset()
+                    elif player.won:
+                        return _stop_music_and_return("menu")
+                    else:
+                        return _stop_music_and_return("quit")
+                elif ev.key == pygame.K_p and not player.won:
+                    paused = not paused
+                    guard.reset()
+                elif ev.key == pygame.K_m:
+                    _toggle_music_mute()
+                elif ev.key == pygame.K_n:
+                    sfx.toggle_mute()
+                elif ev.key == pygame.K_r and not player.won:
+                    _full_reset()
+                elif ev.key == pygame.K_b and not is_sim_run and not player.won:
+                    # Bot menu: opens the dedicated bot UI for solving / replay.
+                    from bot_menu import run_bot_menu
+                    result = run_bot_menu(
+                        screen, clock, [dict(o) for o in objects],
+                        precomputed_path=hint_path,
+                    )
+                    if result is not None:
+                        # The bot menu may return new waypoints to use as
+                        # the hint overlay. Subsequent H toggles will use
+                        # this path instead of recomputing.
+                        new_path, new_status = result
+                        if new_path:
+                            hint_path = new_path
+                            hint_status = new_status
+                            hint_visible = True
+                    guard.reset()
+                elif ev.key == pygame.K_h and not is_sim_run and not player.won:
+                    # Hint mode: toggle the autobot ghost overlay. First
+                    # press blocks while the solver runs (its built-in
+                    # progress UI takes the screen). Subsequent presses
+                    # toggle visibility instantly.
+                    if hint_path is None and not hint_solving:
+                        hint_solving = True
+                        hint_status, new_path = _compute_hint_path()
+                        hint_path = new_path
+                        hint_visible = (hint_path is not None)
+                        hint_solving = False
+                        guard.reset()
+                    elif hint_path is not None:
+                        hint_visible = not hint_visible
+                elif editor_test and ev.key in (pygame.K_LEFTBRACKET, pygame.K_MINUS):
+                    test_speed_idx = max(0, test_speed_idx - 1)
+                elif editor_test and ev.key in (pygame.K_RIGHTBRACKET, pygame.K_EQUALS):
+                    test_speed_idx = min(len(test_speeds) - 1, test_speed_idx + 1)
+                elif editor_test and ev.key in (pygame.K_0, pygame.K_BACKQUOTE):
+                    test_speed_idx = len(test_speeds) - 1
+            if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                if not guard.consume_click(ev):
+                    continue
+                clicked_pos = ev.pos
+                mouse_pressed_this_frame = True
+            # Gamepad: Start toggles pause; B button acts like Esc.
+            if ev.type == pygame.JOYBUTTONDOWN:
+                if ev.button == gamepad.BTN_PAUSE and not player.won:
+                    paused = not paused
+                    guard.reset()
+                    gamepad.reset_edge_state()
+                elif ev.button == gamepad.BTN_BACK:
+                    if paused:
+                        paused = False
+                        guard.reset()
+                    elif player.won:
+                        return _stop_music_and_return("menu")
+
+        keys = pygame.key.get_pressed()
+        # mouse_held() is the guard-aware version of get_pressed()[0] — it
+        # returns False until the user has released the entry click, so a
+        # button press that opened this screen never doubles as a jump.
+        jump_held = (keys[pygame.K_SPACE] or keys[pygame.K_UP]
+                     or keys[pygame.K_w] or guard.mouse_held()
+                     or gamepad.jump_held())
+
+        jump_pressed = mouse_pressed_this_frame or (jump_held and not prev_input_held)
+        prev_input_held = jump_held
+        if jump_pressed:
+            pending_jump_press = True
+
+        # Pause menu clicks — these are handled BEFORE passing input to physics,
+        # and we reset the guard on every state transition out of pause so
+        # the click doesn't leak into the physics tick.
+        if paused and clicked_pos:
+            if r_mute_music.collidepoint(clicked_pos):
+                _toggle_music_mute()
+            elif r_mute_sfx.collidepoint(clicked_pos):
+                sfx.toggle_mute()
+            elif pause_menu_buttons["resume"].collidepoint(clicked_pos):
+                paused = False
+                guard.reset()
+            elif pause_menu_buttons["restart"].collidepoint(clicked_pos):
+                _full_reset()
+                paused = False
+                guard.reset()
+            elif pause_menu_buttons["practice_toggle"].collidepoint(clicked_pos):
+                practice_mode = not practice_mode
+                player.practice_mode = practice_mode
+                guard.reset()
+            elif pause_menu_buttons["menu"].collidepoint(clicked_pos):
+                return _stop_music_and_return("menu")
+            # A paused click should never trigger a jump — swallow it.
+            jump_pressed = False
+            pending_jump_press = False
+
+        # Win-screen buttons
+        if player.won and clicked_pos:
+            if rc_menu.collidepoint(clicked_pos):
+                return _stop_music_and_return("menu")
+            if rc_replay.collidepoint(clicked_pos):
+                player.reset()
+                attempts = 1
+                death_timer = 0
+                death_slowmo_timer = 0
+                death_flash_timer = 0
+                prev_input_held = False
+                pending_jump_press = False
+                if bot_controller:
+                    bot_controller.reset()
+                bot_frame = 0
+                cam_y = 0.0
+                bg_top[:] = [float(c) for c in C_BG_TOP]
+                bg_bot[:] = [float(c) for c in C_BG_BOT]
+                last_passed = set()
+                last_pad_count = 0
+                last_coin_count = 0
+                win_sfx_played = False
+                guard.reset()
+                _restart_level_music()
+
+        step_scale = test_speeds[test_speed_idx] if editor_test else 1.0
+        if death_slowmo_timer > 0:
+            step_scale *= 0.2  # slower slow-mo makes the moment punchier
+            death_slowmo_timer -= 1
+
+        sim_accum += step_scale
+        while sim_accum >= 1.0:
+            sim_accum -= 1.0
+            if death_timer > 0:
+                death_timer -= 1
+                if death_timer <= 0:
+                    if practice_mode and player.practice_mode and player.checkpoints:
+                        player.load_checkpoint()
+                        last_passed = set(player.passed)
+                        prev_input_held = False
+                        pending_jump_press = False
+                    else:
+                        _full_reset()
+            elif player.alive and not player.won and not paused:
+                before_passed = set(player.passed)
+                before_pads = sum(1 for k in before_passed if k[0] in PAD_TYPES)
+                before_coins = len(player.coins_collected)
+                if bot_controller is not None:
+                    b_held, b_pressed = bot_controller.compute_input(player)
+                    player.update(b_held, b_pressed)
+                elif playback_inputs is not None:
+                    if bot_frame < len(playback_inputs):
+                        b_held, b_pressed = playback_inputs[bot_frame]
+                    else:
+                        b_held, b_pressed = False, False
+                    bot_frame += 1
+                    player.update(b_held, b_pressed)
+                else:
+                    player.update(jump_held, pending_jump_press)
+                pending_jump_press = False
+                # Speedrun timer ticks once per physics frame (60 Hz).
+                attempt_frames += 1
+                # Ghost replay: sample every 2 frames to keep the list modest.
+                if attempt_frames % 2 == 0:
+                    current_run.append((attempt_frames, player.x, player.y))
+                # Hitbox trace for the editor's overlay. Sample every frame
+                # so tight saw/spike sequences keep their full resolution —
+                # the editor needs to see exactly where the corners were.
+                if out_hitboxes is not None:
+                    current_hitboxes.append(
+                        (player.x, player.y, player.size))
+                cam_x = max(0, player.x - 200)
+
+                after_passed = set(player.passed)
+                after_pads = sum(1 for k in after_passed if k[0] in PAD_TYPES)
+                after_coins = len(player.coins_collected)
+                _play_interaction_sounds(
+                    before_passed, after_passed,
+                    before_pads, after_pads,
+                    before_coins, after_coins,
+                )
+                last_passed = after_passed
+                last_pad_count = after_pads
+                last_coin_count = after_coins
+
+                # Handle checkpoint-request from player (practice-mode flag
+                # triggers or T_CHECKPOINT pickup). Only save when practice
+                # mode is actually on.
+                if getattr(player, "_checkpoint_request", False):
+                    player._checkpoint_request = False
+                    if practice_mode and player.practice_mode:
+                        player.save_checkpoint()
+                        checkpoint_flash_timer = 20
+                        sfx.play("checkpoint", 0.4)
+
+                # Track best progress for persistence.
+                progress_now = int(max(0.0, min(1.0, player.x / max_x)) * 100)
+                if progress_now > best_progress:
+                    best_progress = progress_now
+                if len(player.coins_collected) > best_coins_this_run:
+                    best_coins_this_run = len(player.coins_collected)
+
+            elif not player.alive and death_timer == 0:
+                particles.explosion(player.x + 22, player.y + 22, C_PLAYER)
+                apply_shake(12)
+                sfx.play("death", 0.6)
+                if level_music:
+                    music.stop()
+                death_timer = 45
+                # Slow-mo on the last dying moment — longer + slower than
+                # before so the death is more visually punchy. 30 frames
+                # at 0.2x = 2.5 seconds of slow-mo.
+                death_slowmo_timer = 30
+                death_flash_timer = 30
+                deaths_this_session += 1
+                pending_jump_press = False
+            particles.update()
+            # Exponential ease toward target, clamped to a max step so a
+            # big jump (ball flip, gravity portal, spider teleport) doesn't
+            # snap the camera by tens of pixels in one frame.
+            _dy = (player.target_cam_y - cam_y) * 0.08
+            _CAM_Y_MAX_STEP = 14.0  # pixels per frame
+            if _dy > _CAM_Y_MAX_STEP:
+                _dy = _CAM_Y_MAX_STEP
+            elif _dy < -_CAM_Y_MAX_STEP:
+                _dy = -_CAM_Y_MAX_STEP
+            cam_y += _dy
+            target_top, target_bot = BG_PRESETS[player.bg_preset % len(BG_PRESETS)]
+            for i in range(3):
+                bg_top[i] += (target_top[i] - bg_top[i]) * 0.06
+                bg_bot[i] += (target_bot[i] - bg_bot[i]) * 0.06
+
+        update_shake()
+        cur_top = tuple(int(c) for c in bg_top)
+        cur_bot = tuple(int(c) for c in bg_bot)
+        shake_x, shake_y = shake_offset
+        draw_bg(screen, cam_x + shake_x, stars, mountains,
+                cam_y=cam_y + shake_y, bg_top=cur_top, bg_bot=cur_bot)
+        left_gx = int(cam_x // CELL) - 1
+        right_gx = left_gx + WIDTH // CELL + 3
+        for o in sorted_objects:
+            ox = o.get("_fx", o["x"])
+            oy = o.get("_fy", o["y"])
+            if left_gx - 1 <= ox <= right_gx + 1:
+                # Skip collected coins so they disappear on pickup.
+                if o["t"] == T_COIN and o.get("coin_id", 0) in player.coins_collected:
+                    continue
+                if o["t"] == T_END:
+                    # Win line is an infinite-height wall, not a 50x50 sprite.
+                    draw_end_wall(screen, ox * CELL - cam_x + shake_x,
+                                  oy * CELL - cam_y + shake_y, CELL, pulse)
+                    continue
+                draw_obj(screen, o["t"], ox * CELL - cam_x + shake_x,
+                         oy * CELL - cam_y + shake_y, CELL, pulse, o.get("r", 0),
+                         o if o["t"] == T_TELEPORT_ORB else None)
+        # Hint path overlay: when the player has toggled hint mode on, draw
+        # the autobot's solved waypoints as a translucent dotted line so
+        # they can preview the optimal route. Drawn BEFORE the per-run
+        # ghost so the live ghost (player's own best) sits on top.
+        if hint_visible and hint_path:
+            hint_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            prev_pt = None
+            for wx, wy in hint_path:
+                sx = int(wx - cam_x - shake_x)
+                sy = int(wy - cam_y - shake_y)
+                if -40 < sx < WIDTH + 40 and -200 < sy < HEIGHT + 200:
+                    # Tinted dot per waypoint — orange so it visually reads
+                    # as "guidance" without blending into the player trail.
+                    pygame.draw.circle(hint_surf, (255, 200, 80, 120),
+                                       (sx, sy), 4)
+                    if prev_pt is not None:
+                        pygame.draw.line(hint_surf, (255, 200, 80, 70),
+                                         prev_pt, (sx, sy), 2)
+                    prev_pt = (sx, sy)
+                else:
+                    prev_pt = None
+            screen.blit(hint_surf, (0, 0))
+        # Ghost overlay: draw a fading trail of the best prior run so the
+        # player can see where they previously got further.
+        if best_run:
+            ghost_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            # Find the segment near current time +/- some window so the ghost
+            # "runs alongside" rather than rendering the entire track.
+            window = 120  # frames before and after
+            lo = attempt_frames - window
+            hi = attempt_frames + window
+            for gf, gx, gy in best_run:
+                if gf < lo or gf > hi:
+                    continue
+                sx = int(gx - cam_x - shake_x)
+                sy = int(gy - cam_y - shake_y)
+                if -30 < sx < WIDTH + 30 and -30 < sy < HEIGHT + 30:
+                    # Alpha fades with distance from current frame.
+                    dist = abs(gf - attempt_frames)
+                    a = max(0, int(110 * (1.0 - dist / window)))
+                    pygame.draw.circle(ghost_surf, (200, 200, 255, a),
+                                       (sx + 22, sy + 22), 10)
+            screen.blit(ghost_surf, (0, 0))
+        if player.alive and death_timer == 0:
+            player.draw(screen, cam_x + shake_x, cam_y + shake_y)
+        particles.draw(screen, cam_x + shake_x, cam_y + shake_y)
+
+        if death_flash_timer > 0:
+            flash_intensity = int(255 * (death_flash_timer / 30))
+            flash_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            flash_surf.fill((255, 0, 0, flash_intensity))
+            screen.blit(flash_surf, (0, 0))
+
+        # Slow-mo vignette: radial darkening when death_slowmo_timer is active.
+        if death_slowmo_timer > 0:
+            alpha = int(120 * (death_slowmo_timer / 30.0))
+            if alpha > 0:
+                vig = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+                # Simple bordered darkening — cheaper than a real radial gradient.
+                border = 120
+                top = pygame.Surface((WIDTH, border), pygame.SRCALPHA)
+                top.fill((0, 0, 0, alpha))
+                vig.blit(top, (0, 0))
+                vig.blit(pygame.transform.flip(top, False, True),
+                         (0, HEIGHT - border))
+                side = pygame.Surface((border, HEIGHT), pygame.SRCALPHA)
+                side.fill((0, 0, 0, alpha))
+                vig.blit(side, (0, 0))
+                vig.blit(pygame.transform.flip(side, True, False),
+                         (WIDTH - border, 0))
+                screen.blit(vig, (0, 0))
+
+        # Pulse trigger: brief screen-tinted flash modulated by BPM.
+        pulse_amp = player.pulse_intensity()
+        if pulse_amp > 0.01:
+            pulse_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            pulse_surf.fill((255, 240, 255, int(60 * pulse_amp)))
+            screen.blit(pulse_surf, (0, 0))
+            death_flash_timer -= 1
+        if checkpoint_flash_timer > 0:
+            flash_intensity = int(100 * (checkpoint_flash_timer / 20))
+            flash_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            flash_surf.fill((0, 255, 0, flash_intensity))
+            screen.blit(flash_surf, (0, 0))
+            checkpoint_flash_timer -= 1
+
+        # ---- HUD ----------------------------------------------------------
+        progress = max(0.0, min(1.0, player.x / max_x))
+        bw = WIDTH - 100
+        if progress < 0.5:
+            bar_color = (255, int(255 * (progress / 0.5)), 0)
+        else:
+            bar_color = (int(255 * (1 - (progress - 0.5) / 0.5)), 255, 0)
+        pygame.draw.rect(screen, C_DARK, (50, 12, bw, 8), border_radius=4)
+        pygame.draw.rect(screen, bar_color, (50, 12, max(1, int(bw * progress)), 8),
+                         border_radius=4)
+        progress_percent = int(progress * 100)
+        txt(screen, f"{progress_percent}%", 50 + int(bw * progress) + 10, 6, 14,
+            C_GRAY, shadow=True)
+
+        txt(screen, f"Attempt {attempts}", 20, 28, 17, C_GRAY, shadow=True)
+        # Speedrun timer + best time (mm:ss.cc) — small, beside attempt count.
+        cur_time_s = attempt_frames / 60.0
+        timer_label = f"Time {int(cur_time_s // 60):d}:{cur_time_s % 60:05.2f}"
+        txt(screen, timer_label, 20, 46, 14, C_GRAY, shadow=True)
+        prev_best_time = int((meta or {}).get("best_time_frames", 0)) if meta else 0
+        if prev_best_time > 0:
+            best_s = prev_best_time / 60.0
+            best_label = f"Best {int(best_s // 60):d}:{best_s % 60:05.2f}"
+            txt(screen, best_label, 20, 62, 13, C_SUCCESS, shadow=True)
+        txt(screen, level_name, WIDTH // 2, 8, 15, C_WHITE, True, shadow=True)
+        txt(screen, f"{player.mode.title()} · {player.move_speed:.1f}x",
+            WIDTH - 170, 28, 14, C_GRAY, shadow=True)
+
+        # Coin HUD (top-right)
+        if total_coins > 0:
+            got = len(player.coins_collected)
+            coin_y = 52
+            for i in range(total_coins):
+                cx = WIDTH - 30 - (total_coins - 1 - i) * 28
+                filled = i < got
+                col = C_COIN if filled else darker(C_COIN, 120)
+                pygame.draw.circle(screen, darker(col, 40), (cx + 1, coin_y + 1), 10)
+                pygame.draw.circle(screen, col, (cx, coin_y), 10)
+                if filled:
+                    pygame.draw.circle(screen, lighter(C_COIN, 70), (cx, coin_y), 6, 2)
+            txt(screen, f"{got}/{total_coins}", WIDTH - 30 - total_coins * 28 - 8,
+                coin_y - 8, 14, C_WHITE, shadow=True)
+
+        if practice_mode:
+            txt(screen, "PRACTICE MODE", WIDTH // 2, HEIGHT - 22, 15, (0, 255, 0),
+                True, shadow=True)
+        # Hint-mode status: a subtle top-left line the player can ignore
+        # unless they've opted in by pressing H.
+        if hint_visible and hint_path:
+            badge = "HINT · autobot path"
+            if hint_status == "partial":
+                badge += " (partial)"
+            txt(screen, badge, 20, 78, 13, (255, 200, 80), shadow=True)
+        elif hint_path is not None and not hint_visible:
+            txt(screen, "HINT off — press H", 20, 78, 12, C_GRAY, shadow=True)
+        if editor_test:
+            txt(screen, f"Test {test_speeds[test_speed_idx]:.2f}x",
+                WIDTH - 85, 26, 15, C_GRAY, shadow=True)
+            if bot_controller is not None:
+                txt(screen, "BOT", WIDTH // 2 - 220, HEIGHT - 22, 18,
+                    (255, 180, 60), True, shadow=True)
+            elif playback_inputs is not None:
+                pb_pct = min(100, int(bot_frame / max(1, len(playback_inputs)) * 100))
+                txt(screen, f"PLAYBACK {pb_pct}%", WIDTH // 2 - 220, HEIGHT - 22,
+                    18, (100, 220, 255), True, shadow=True)
+            txt(screen, "[/- slower  ]/= faster  0 reset", WIDTH // 2,
+                HEIGHT - 22, 15, C_GRAY, True, shadow=True)
+
+        # ---- Pause overlay ------------------------------------------------
+        if paused:
+            ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            ov.fill((0, 0, 0, 180))
+            screen.blit(ov, (0, 0))
+            txt(screen, "PAUSED", WIDTH // 2, HEIGHT // 2 - 110, 56, C_PLAYER, True)
+            btn(screen, "Resume", pause_menu_buttons["resume"].centerx,
+                pause_menu_buttons["resume"].centery, 220, 50, C_BTN, mpos)
+            btn(screen, "Restart", pause_menu_buttons["restart"].centerx,
+                pause_menu_buttons["restart"].centery, 220, 50, C_BTN, mpos)
+            practice_label = "Practice: ON" if practice_mode else "Practice: OFF"
+            practice_col = C_SUCCESS if practice_mode else C_BTN
+            btn(screen, practice_label, pause_menu_buttons["practice_toggle"].centerx,
+                pause_menu_buttons["practice_toggle"].centery, 220, 50, practice_col, mpos)
+            btn(screen, "Main Menu", pause_menu_buttons["menu"].centerx,
+                pause_menu_buttons["menu"].centery, 220, 50, C_DANGER, mpos)
+            # Mute toggles — bottom row, centered below menu button
+            r_mute_music = icon_button(
+                screen, speaker_icon(22, music.is_muted()),
+                WIDTH // 2 - 30, HEIGHT // 2 + 220, 44, 44, C_BTN, mpos,
+                active=music.is_muted(),
+            )
+            r_mute_sfx = icon_button(
+                screen, speaker_icon(20, sfx.is_muted()),
+                WIDTH // 2 + 30, HEIGHT // 2 + 220, 44, 44, (80, 60, 140), mpos,
+                active=sfx.is_muted(),
+            )
+            txt(screen, "Music", r_mute_music.centerx, r_mute_music.bottom + 4,
+                11, C_GRAY, True)
+            txt(screen, "SFX", r_mute_sfx.centerx, r_mute_sfx.bottom + 4, 11,
+                C_GRAY, True)
+            txt(screen, "M: mute music  ·  N: mute SFX  ·  H: toggle hint path",
+                WIDTH // 2, HEIGHT // 2 + 280, 13, C_GRAY, True)
+        else:
+            # Prevent stale pause-overlay rects from catching clicks outside pause.
+            r_mute_music = pygame.Rect(0, 0, 0, 0)
+            r_mute_sfx = pygame.Rect(0, 0, 0, 0)
+
+        # ---- Win overlay --------------------------------------------------
+        if player.won:
+            if not win_sfx_played:
+                sfx.play("win", 0.6)
+                win_sfx_played = True
+                if level_music:
+                    music.fadeout(1500)
+                _persist_win()
+            ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            ov.fill((0, 0, 0, 160))
+            screen.blit(ov, (0, 0))
+            txt(screen, "LEVEL COMPLETE!", WIDTH // 2, HEIGHT // 2 - 110, 54,
+                C_PLAYER, True)
+            # Stats panel: attempts, deaths, time, best time, coins.
+            cur_time_s_win = attempt_frames / 60.0
+            cur_time_str = (f"{int(cur_time_s_win // 60):d}:"
+                            f"{cur_time_s_win % 60:05.2f}")
+            best_t_frames = int((meta or {}).get("best_time_frames", 0)) if meta else 0
+            best_str = "—"
+            if best_t_frames > 0:
+                bts = best_t_frames / 60.0
+                best_str = f"{int(bts // 60):d}:{bts % 60:05.2f}"
+            row_y = HEIGHT // 2 - 50
+            txt(screen, f"Attempts: {attempts}", WIDTH // 2 - 130, row_y, 20,
+                C_WHITE, True)
+            txt(screen, f"Deaths: {deaths_this_session}", WIDTH // 2 + 130, row_y,
+                20, C_DANGER, True)
+            txt(screen, f"Time: {cur_time_str}", WIDTH // 2 - 130, row_y + 28, 20,
+                C_WHITE, True)
+            txt(screen, f"Best: {best_str}", WIDTH // 2 + 130, row_y + 28, 20,
+                C_SUCCESS, True)
+            if total_coins > 0:
+                coins = len(player.coins_collected)
+                colour = C_COIN if coins == total_coins else C_GRAY
+                txt(screen, f"Coins: {coins} / {total_coins}", WIDTH // 2,
+                    row_y + 60, 22, colour, True)
+            if meta_persisted:
+                txt(screen, "Verified!", WIDTH // 2, row_y + 90, 18,
+                    C_SUCCESS, True)
+            elif is_sim_run:
+                txt(screen, "(Bot run -- not verified)", WIDTH // 2,
+                    row_y + 90, 16, C_GRAY, True)
+            btn(screen, "Menu", rc_menu.centerx, rc_menu.centery, rc_menu.w,
+                rc_menu.h, C_BTN, mpos)
+            btn(screen, "Replay", rc_replay.centerx, rc_replay.centery,
+                rc_replay.w, rc_replay.h, C_SUCCESS, mpos)
+
+        pygame.display.flip()
+        clock.tick(settings.get_fps_cap())

@@ -1,0 +1,420 @@
+"""Level loading/saving and progress tracking.
+
+Filenames beginning with an underscore are reserved (e.g. `_autosave.json`)
+and never appear in the level browser — see `list_levels()`.
+
+Level JSON schema (v5):
+    {
+      "name": "Level Name",
+      "v": 5,
+      "author": "Player",
+      "difficulty": "Normal",          # current official rating (verifier can set)
+      "requested_difficulty": "Normal",# what the publisher asked for
+      "description": "",
+      "published": false,   # set true on publish (otherwise treated as draft)
+      "verified": false,    # set true after someone beats it without the autobot
+      "music": "song.mp3",  # null if no music
+      "attempts": 0,        # best stored attempts count
+      "best_progress": 0,   # 0-100, best fraction reached
+      "coins_collected": 0, # 0..3 — max coins ever collected in one run
+      "objects": [ ... ]
+    }
+
+Older versions are migrated on load.
+"""
+
+import json
+import os
+
+from constants import (
+    LEVELS_DIR, LEVEL_FORMAT_VERSION, DIFFICULTIES,
+    T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
+    T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,
+    T_PAD, T_BLUE_PAD, T_GRAV, T_END, T_START, T_COIN,
+    T_MODE_SHIP, T_MODE_BALL, T_MODE_CUBE, T_MODE_WAVE, T_MODE_UFO, T_MODE_SPIDER,
+    T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
+    T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW,
+    T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
+    T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
+)
+
+
+# ---------------------------------------------------------------------------
+# Filesystem helpers
+# ---------------------------------------------------------------------------
+
+def ensure_dirs():
+    os.makedirs(LEVELS_DIR, exist_ok=True)
+
+
+def _safe_filename(name):
+    """Turn a human level name into a safe JSON filename (no extension).
+
+    Leading underscores are stripped because filenames starting with `_` are
+    reserved (see `list_levels()` and the autosave slot). A level whose
+    sanitized name is empty falls back to `level`.
+    """
+    base = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name)
+    base = base.strip().lower().replace(" ", "_")
+    base = base.lstrip("_") or "level"
+    return base[:60]
+
+
+# ---------------------------------------------------------------------------
+# Object normalization (migration-friendly)
+# ---------------------------------------------------------------------------
+
+def _normalize_rotation(r):
+    try:
+        return int(round(float(r) / 90.0) * 90) % 360
+    except (TypeError, ValueError):
+        return 0
+
+
+def get_group_id(o):
+    """Return an object's group id, reading either ``group_id`` (current
+    field name) or the legacy ``link`` field (for backwards compatibility
+    with levels saved before the rename). Returns 0 when neither is set.
+
+    Centralised so callers don't have to know about the old field — see the
+    teleport-orb pairing logic in :mod:`player`, sprite-variant selection
+    in :mod:`graphics`, and the editor's grouping tool.
+    """
+    gid = o.get("group_id")
+    if gid is None:
+        gid = o.get("link", 0)
+    try:
+        return int(gid) if gid else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def normalize_object(o):
+    """Produce a clean canonical object dict. Strips unknown keys, coerces ints.
+
+    Backwards-compat note: levels saved with the old ``link`` field for
+    teleport orbs are migrated forward to ``group_id`` here so the rest of
+    the engine only has to look at one field.
+    """
+    out = {
+        "t": o["t"],
+        "x": int(o.get("x", 0)),
+        "y": int(o.get("y", 0)),
+        "r": _normalize_rotation(o.get("r", 0)),
+    }
+    if o["t"] == T_TELEPORT_ORB:
+        out["group_id"] = get_group_id(o)
+        if o.get("dest"):
+            out["dest"] = 1
+    if o["t"] == T_CAMERA_TRIGGER:
+        out["cy"] = int(o.get("cy", out["y"]))
+    if o["t"] == T_BG_TRIGGER:
+        out["bg"] = int(o.get("bg", 0))
+    if o["t"] == T_COLOR_TRIGGER:
+        out["col_idx"] = int(o.get("col_idx", 0))
+    if o["t"] == T_MOVE_TRIGGER:
+        out["target_oid"] = int(o.get("target_oid", 0))
+        target_oids = o.get("target_oids")
+        if isinstance(target_oids, list) and target_oids:
+            out["target_oids"] = [int(t) for t in target_oids if int(t) > 0]
+        out["tx"] = int(o.get("tx", out["x"]))
+        out["ty"] = int(o.get("ty", out["y"]))
+        out["duration"] = max(1, int(o.get("duration", 30)))
+        curve = o.get("curve")
+        if isinstance(curve, list) and len(curve) >= 2:
+            out["curve"] = [[float(p[0]), float(p[1])] for p in curve]
+    if o["t"] == T_COIN:
+        out["coin_id"] = int(o.get("coin_id", 0)) or 0  # 0 = unassigned
+    if o["t"] == T_PULSE_TRIGGER:
+        out["bpm"] = max(30, min(300, int(o.get("bpm", 128))))
+        out["duration"] = max(0.1, min(20.0, float(o.get("duration", 2.0))))
+    if o["t"] == T_ROTATE_TRIGGER:
+        out["target_oid"] = int(o.get("target_oid", 0))
+        target_oids = o.get("target_oids")
+        if isinstance(target_oids, list) and target_oids:
+            out["target_oids"] = [int(t) for t in target_oids if int(t) > 0]
+        # Degrees per second; positive = clockwise.
+        out["spin"] = float(o.get("spin", 90.0))
+        out["duration"] = max(0.1, min(60.0, float(o.get("duration", 4.0))))
+    if o.get("oid"):
+        out["oid"] = int(o["oid"])
+    if o.get("group"):
+        out["group"] = int(o["group"])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Level (full metadata) I/O
+# ---------------------------------------------------------------------------
+
+def _default_meta(name="Untitled"):
+    return {
+        "name": name,
+        "v": LEVEL_FORMAT_VERSION,
+        "author": "Player",
+        "difficulty": "Normal",
+        "requested_difficulty": "Normal",
+        "description": "",
+        "published": False,
+        "verified": False,
+        "music": None,
+        "attempts": 0,
+        "best_progress": 0,
+        "coins_collected": 0,
+        "best_time_frames": 0,  # 0 = no record yet
+        "deaths": 0,            # total deaths across all attempts
+    }
+
+
+def _migrate(data):
+    """Upgrade any older level dict in-place to the current schema."""
+    meta = _default_meta(data.get("name", "Untitled"))
+    for k, v in data.items():
+        if k != "objects":
+            meta[k] = v
+    # Normalize fields
+    if meta.get("difficulty") not in DIFFICULTIES:
+        meta["difficulty"] = "Normal"
+    # `requested_difficulty` defaults to whatever the current difficulty is,
+    # so older levels migrated forward don't suddenly advertise a different
+    # "requested" rating than what's already shown.
+    if meta.get("requested_difficulty") not in DIFFICULTIES:
+        meta["requested_difficulty"] = meta["difficulty"]
+    meta["published"] = bool(meta.get("published", False))
+    meta["verified"] = bool(meta.get("verified", False))
+    try:
+        meta["attempts"] = max(0, int(meta.get("attempts", 0)))
+    except (TypeError, ValueError):
+        meta["attempts"] = 0
+    try:
+        meta["best_progress"] = max(0, min(100, int(meta.get("best_progress", 0))))
+    except (TypeError, ValueError):
+        meta["best_progress"] = 0
+    try:
+        meta["coins_collected"] = max(0, min(3, int(meta.get("coins_collected", 0))))
+    except (TypeError, ValueError):
+        meta["coins_collected"] = 0
+    try:
+        meta["best_time_frames"] = max(0, int(meta.get("best_time_frames", 0)))
+    except (TypeError, ValueError):
+        meta["best_time_frames"] = 0
+    try:
+        meta["deaths"] = max(0, int(meta.get("deaths", 0)))
+    except (TypeError, ValueError):
+        meta["deaths"] = 0
+    music = meta.get("music")
+    if music is not None and not isinstance(music, str):
+        meta["music"] = None
+    meta["v"] = LEVEL_FORMAT_VERSION
+    return meta
+
+
+def save_level(objects, name, filename=None, music_file=None, meta=None):
+    """Write a level JSON.
+
+    `meta` may be an existing metadata dict to preserve (e.g. when editing a
+    previously published level). If absent, sensible defaults are used and
+    `music_file` overrides the meta's music.
+
+    Also refreshes the level's thumbnail (best-effort — failures don't block
+    the save). Thumbnails live in `levels/_thumbs/`.
+    """
+    ensure_dirs()
+    file_meta = dict(meta) if meta else _default_meta(name)
+    file_meta["name"] = name
+    file_meta["v"] = LEVEL_FORMAT_VERSION
+    if music_file is not None:
+        file_meta["music"] = music_file
+    file_meta = _migrate(file_meta)
+
+    data = dict(file_meta)
+    data["objects"] = [normalize_object(o) for o in objects]
+
+    fn = filename or _safe_filename(name)
+    if not fn.endswith(".json"):
+        fn += ".json"
+    path = os.path.join(LEVELS_DIR, fn)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    # Best-effort thumbnail refresh — kept lazy-imported so headless callers
+    # that haven't initialized pygame display can still save levels.
+    try:
+        from thumbnails import save_thumbnail
+        save_thumbnail(fn, data["objects"])
+    except Exception:
+        pass
+
+    return path
+
+
+# ---------------------------------------------------------------------------
+# Editor autosave (separate slot, never appears in the level browser)
+# ---------------------------------------------------------------------------
+
+AUTOSAVE_FILENAME = "_autosave.json"
+
+
+def _autosave_path():
+    return os.path.join(LEVELS_DIR, AUTOSAVE_FILENAME)
+
+
+def save_autosave(objects, name, music_file=None, meta=None,
+                  source_filename=None):
+    """Write the editor's auto-save snapshot.
+
+    Mirrors `save_level` but writes to a fixed reserved filename and tags the
+    snapshot with the original filename (if any) so recovery can restore it
+    to the same slot. The autosave file is filtered out of `list_levels()`.
+    """
+    ensure_dirs()
+    file_meta = dict(meta) if meta else _default_meta(name)
+    file_meta["name"] = name
+    file_meta["v"] = LEVEL_FORMAT_VERSION
+    if music_file is not None:
+        file_meta["music"] = music_file
+    file_meta = _migrate(file_meta)
+    # Tag so recovery knows where to restore.
+    file_meta["_autosave_source"] = source_filename or ""
+    file_meta["_autosave_ts"] = int(__import__("time").time())
+
+    data = dict(file_meta)
+    data["objects"] = [normalize_object(o) for o in objects]
+
+    path = _autosave_path()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    return path
+
+
+def has_autosave():
+    return os.path.isfile(_autosave_path())
+
+
+def load_autosave():
+    """Return (meta, objects) for the autosave slot, or (None, None)."""
+    path = _autosave_path()
+    if not os.path.isfile(path):
+        return None, None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None, None
+    meta = _migrate(data)
+    # Carry the autosave-private fields across the migration, since
+    # _migrate ignores keys not in the default schema.
+    if "_autosave_source" in data:
+        meta["_autosave_source"] = data["_autosave_source"]
+    if "_autosave_ts" in data:
+        meta["_autosave_ts"] = data["_autosave_ts"]
+    objects = [normalize_object(o) for o in data.get("objects", [])]
+    return meta, objects
+
+
+def clear_autosave():
+    """Remove the autosave file if present. Safe to call when none exists."""
+    path = _autosave_path()
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def load_level(path):
+    """Return (name, objects, music_file). Kept backward-compatible with old callers."""
+    meta, objects = load_level_full(path)
+    return meta["name"], objects, meta.get("music")
+
+
+def load_level_full(path):
+    """Return (meta, objects) — meta contains all level metadata."""
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    meta = _migrate(data)
+    objects = [normalize_object(o) for o in data.get("objects", [])]
+    # Assign missing coin_ids deterministically so progress tracks them stably.
+    next_cid = 1
+    used = {o.get("coin_id", 0) for o in objects if o["t"] == T_COIN}
+    for o in objects:
+        if o["t"] == T_COIN and not o.get("coin_id"):
+            while next_cid in used:
+                next_cid += 1
+            o["coin_id"] = next_cid
+            used.add(next_cid)
+    return meta, objects
+
+
+def update_meta(path, **updates):
+    """Merge updates into a level's meta, leaving objects untouched."""
+    meta, objects = load_level_full(path)
+    meta.update(updates)
+    save_level(objects, meta["name"], os.path.basename(path), meta=meta)
+
+
+def list_levels():
+    """Return sorted list of JSON filenames in the levels dir.
+
+    Filenames starting with `_` are reserved (e.g. the editor autosave slot)
+    and never surface in the level browser.
+    """
+    ensure_dirs()
+    return sorted(
+        f for f in os.listdir(LEVELS_DIR)
+        if f.endswith(".json") and not f.startswith("_")
+    )
+
+
+def list_level_summaries():
+    """Return list of (filename, meta) tuples for all stored levels."""
+    out = []
+    for f in list_levels():
+        path = os.path.join(LEVELS_DIR, f)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            meta = _migrate(data)
+            out.append((f, meta))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Object-id helpers (used by the editor)
+# ---------------------------------------------------------------------------
+
+def next_group_id(objects):
+    """Return the smallest unused group_id among teleport orbs (1-based).
+
+    Reads both the new ``group_id`` field and the legacy ``link`` field so
+    fresh ids never collide with already-loaded levels.
+    """
+    used = {get_group_id(o) for o in objects
+            if o["t"] == T_TELEPORT_ORB and get_group_id(o) > 0}
+    i = 1
+    while i in used:
+        i += 1
+    return i
+
+
+# Legacy alias — older code (and the editor's import line) still references
+# the original name. Removed once all call-sites migrate.
+next_teleport_link = next_group_id
+
+
+def next_object_id(objects):
+    used = {o.get("oid", 0) for o in objects if o.get("oid", 0) > 0}
+    i = 1
+    while i in used:
+        i += 1
+    return i
+
+
+def next_coin_id(objects):
+    used = {o.get("coin_id", 0) for o in objects if o["t"] == T_COIN and o.get("coin_id", 0) > 0}
+    i = 1
+    while i in used:
+        i += 1
+    return i
+
