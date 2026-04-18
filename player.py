@@ -112,6 +112,7 @@ class Player:
         self.grav = 1
         self.trail = []
         self.passed = set()
+        self.mirror_passed = set()
         self.frame = 0
         self.mode = MODE_CUBE
         self.move_speed = BASE_MOVE_SPEED
@@ -135,8 +136,13 @@ class Player:
         self.size = PLAYER_SIZE
         self.coins_collected = set()  # coin_ids picked up this attempt
         # Dual-mode mirror body. None when single-player. A dict with y/vy/
-        # grav/on_ground/angle/alive when a dual portal is active.
+        # grav/on_ground/angle/alive/mode/size when a dual portal is active.
         self.mirror = None
+        # Portals/grav-flips that the mirror has consumed independently of
+        # the main player. Mode and size portals fire per-body so each can
+        # have its own loadout — kept separate from `passed` (which is
+        # shared for one-shot physical objects like orbs / pads / coins).
+        self.mirror_passed = set()
         # Active pulse triggers — list of dicts {start_frame, bpm, end_frame}.
         # play.py reads this to compute a pulse intensity for visual flash.
         self.active_pulses = []
@@ -517,6 +523,12 @@ class Player:
             # mirror image of the player.
             "angle": -float(getattr(self, "angle", 0.0)),
             "alive": True,
+            # Mode and size start as cube + main's current size. Mode and
+            # mini/big portals the mirror crosses change THESE fields only
+            # — they don't sync to the main body. (See _handle_mirror_
+            # interactions for the per-body portal handlers.)
+            "mode": MODE_CUBE,
+            "size": int(self.size),
         }
 
     # ---- collision -------------------------------------------------------
@@ -724,27 +736,59 @@ class Player:
     def _step_mirror(self, input_held, input_pressed):
         """Update the dual-mode mirror body. The mirror shares x with the
         main player (its x always equals self.x) and has independent y
-        physics with opposite gravity. It uses cube-mode jumps only — other
-        modes are not mirrored to keep implementation tractable. If it
-        hits a hazard or falls off-screen, sets mirror["alive"]=False so
-        the main update loop can kill the player."""
+        physics, gravity, mode, and size. Mode portals the mirror crosses
+        change `m["mode"]` only — they don't sync to the main body.
+
+        If the mirror hits a hazard or falls off-screen, sets
+        mirror["alive"]=False so the main update loop can kill the player.
+        """
         m = self.mirror
         if not m["alive"]:
             return
-        # Gravity
-        m["vy"] += GRAVITY * m["grav"]
-        m["vy"] = clamp(m["vy"], -18.0, 18.0)
-        # Cube-like jump on input when on ground
-        if input_held and m["on_ground"]:
-            m["vy"] = JUMP_FORCE * m["grav"]
-            m["on_ground"] = False
+        msize = int(m["size"])
+        mmode = m.get("mode", MODE_CUBE)
+        # ---- per-mode vy and input handling ----
+        # Mirrors update()'s mode dispatch but writes into m["vy"] /
+        # m["on_ground"] instead of self.vy / self.on_ground.
+        if mmode == MODE_SHIP:
+            m["vy"] += SHIP_GRAVITY * m["grav"]
+            if input_held:
+                m["vy"] -= SHIP_THRUST * m["grav"]
+            m["vy"] = clamp(m["vy"], -13.0, 13.0)
+        elif mmode == MODE_WAVE:
+            direction = -1 if input_held else 1
+            m["vy"] = self.move_speed * direction * m["grav"]
+        elif mmode == MODE_UFO:
+            m["vy"] += GRAVITY * m["grav"]
+            m["vy"] = clamp(m["vy"], -18.0, 18.0)
+            if input_pressed:
+                m["vy"] = UFO_JUMP_FORCE * m["grav"]
+                m["on_ground"] = False
+        elif mmode == MODE_SPIDER:
+            m["vy"] += GRAVITY * m["grav"]
+            m["vy"] = clamp(m["vy"], -18.0, 18.0)
+            if input_pressed and m["on_ground"]:
+                self._mirror_spider_teleport()
+        elif mmode == MODE_BALL:
+            m["vy"] += GRAVITY * m["grav"]
+            m["vy"] = clamp(m["vy"], -18.0, 18.0)
+            if input_pressed and m["on_ground"]:
+                m["grav"] = -m["grav"]
+                m["vy"] = BALL_FLIP_FORCE * m["grav"]
+                m["on_ground"] = False
+        else:  # MODE_CUBE (default)
+            m["vy"] += GRAVITY * m["grav"]
+            m["vy"] = clamp(m["vy"], -18.0, 18.0)
+            if input_held and m["on_ground"]:
+                m["vy"] = JUMP_FORCE * m["grav"]
+                m["on_ground"] = False
         m["on_ground"] = False
         # Step y in small substeps so we don't tunnel through thin platforms
         steps = max(1, int(math.ceil(abs(m["vy"]) / 4.0)))
         dy_step = m["vy"] / steps
         for _ in range(steps):
             m["y"] += dy_step
-            mrect = pygame.Rect(round(self.x), round(m["y"]), self.size, self.size)
+            mrect = pygame.Rect(round(self.x), round(m["y"]), msize, msize)
             # Block collision (y only)
             for o in self.nearby_for_rect(mrect):
                 br = self._solid_rect(o)
@@ -753,7 +797,7 @@ class Player:
                 if mrect.colliderect(br):
                     if m["grav"] == 1:
                         if dy_step >= 0:
-                            m["y"] = br.top - self.size
+                            m["y"] = br.top - msize
                             m["vy"] = 0.0
                             m["on_ground"] = True
                         else:
@@ -765,20 +809,20 @@ class Player:
                             m["vy"] = 0.0
                             m["on_ground"] = True
                         else:
-                            m["y"] = br.top - self.size
+                            m["y"] = br.top - msize
                             m["vy"] = 0.0
                     mrect = pygame.Rect(round(self.x), round(m["y"]),
-                                        self.size, self.size)
+                                        msize, msize)
         # Off-screen kill
         if m["y"] > HEIGHT + 300 or m["y"] < -500:
             m["alive"] = False
             return
-        # Hazard collision (spikes, saws) using mirror's hitbox
-        shrink = max(2, int(6 * self.size / PLAYER_SIZE))
+        # Hazard collision (spikes, saws) using mirror's hitbox.
+        shrink = max(2, int(6 * msize / PLAYER_SIZE))
         hazard_rect = pygame.Rect(round(self.x) + shrink, round(m["y"]) + shrink,
-                                  self.size - shrink * 2, self.size - shrink * 2)
+                                  msize - shrink * 2, msize - shrink * 2)
         trigger_rect = pygame.Rect(round(self.x), round(m["y"]),
-                                   self.size, self.size).inflate(6, 6)
+                                   msize, msize).inflate(6, 6)
         for o in self.nearby_for_rect(trigger_rect, 2):
             t = o["t"]
             if t in (T_SPIKE, T_HALF_SPIKE):
@@ -791,24 +835,114 @@ class Player:
                 if hazard_rect.colliderect(saw_hitbox(o["x"], o["y"])):
                     m["alive"] = False
                     return
-        # Pads / orbs / gravity portal / triggers / solo portal collapse.
+        # Pads / orbs / gravity portal / mode portals / solo portal collapse.
         # Returns True if the mirror collapsed back into the main player —
         # in that case stop touching m (it's None now) and skip rotation.
-        if self._handle_mirror_interactions(trigger_rect):
+        input_active = input_held or self.input_buffer > 0
+        if self._handle_mirror_interactions(trigger_rect, input_active,
+                                            input_pressed):
             return
-        # Mirror rotation (visual only, cube-style)
-        if not m["on_ground"]:
-            m["angle"] = m.get("angle", 0.0) - 5 * m["grav"]
-        else:
-            m["angle"] = round(m.get("angle", 0.0) / 90) * 90
+        # ---- visual rotation (mode-specific, mirrors update()'s logic) ----
+        cur_angle = m.get("angle", 0.0)
+        mmode = m.get("mode", MODE_CUBE)  # may have changed via portal above
+        if mmode == MODE_SHIP:
+            m["angle"] = clamp(-m["vy"] * 4.2, -55, 55)
+        elif mmode == MODE_UFO:
+            m["angle"] = clamp(-m["vy"] * 2.8, -30, 30)
+        elif mmode == MODE_WAVE:
+            m["angle"] = WAVE_ANGLE * (-1 if (input_held and m["grav"] == 1) or
+                                       (not input_held and m["grav"] == -1) else 1)
+        elif mmode == MODE_BALL:
+            if m["on_ground"]:
+                m["angle"] = round(cur_angle / 90) * 90
+            else:
+                m["angle"] = cur_angle - 10 * m["grav"]
+        elif mmode == MODE_SPIDER:
+            if m["on_ground"]:
+                m["angle"] = 0
+            else:
+                m["angle"] = cur_angle - 6 * m["grav"]
+        else:  # cube
+            if not m["on_ground"]:
+                m["angle"] = cur_angle - 5 * m["grav"]
+            else:
+                m["angle"] = round(cur_angle / 90) * 90
 
-    def _handle_mirror_interactions(self, trigger_rect):
-        """Mirror-side interaction pass: pads, orbs, gravity portals, the
-        solo portal (which collapses the mirror state into the main player),
-        and global triggers. Hazards are handled in _step_mirror; mode
-        portals (mini/big/wave/etc) and dash/teleport orbs are intentionally
-        skipped to keep mirror physics simple. Returns True if the mirror
-        was just collapsed (caller must stop touching ``self.mirror``)."""
+    def _mirror_spider_teleport(self):
+        """Spider teleport for the mirror body — vertical teleport against
+        the mirror's gravity, then flip the mirror's gravity so it clings
+        to the new surface. Mirrors `_spider_teleport` but operates on
+        m["y"] / m["grav"] / m["size"] instead of self.* fields."""
+        m = self.mirror
+        msize = int(m["size"])
+        probe = pygame.Rect(round(self.x), round(m["y"]), msize, msize)
+        best = None
+        max_dist = SPIDER_TELEPORT_RANGE * CELL
+        for o in self.nearby_for_rect(probe, extra=SPIDER_TELEPORT_RANGE + 1):
+            if o["t"] != T_BLOCK:
+                continue
+            br = cell_rect(o["x"], o["y"])
+            if not (br.left < probe.right and br.right > probe.left):
+                continue
+            if m["grav"] == 1:
+                if br.bottom <= probe.top:
+                    dist = probe.top - br.bottom
+                    if dist <= max_dist and (best is None or dist < best[0]):
+                        best = (dist, br.bottom)
+            else:
+                if br.top >= probe.bottom:
+                    dist = br.top - probe.bottom
+                    if dist <= max_dist and (best is None or dist < best[0]):
+                        best = (dist, br.top - msize)
+        if best is not None:
+            m["y"] = float(best[1])
+            m["grav"] = -m["grav"]
+            m["vy"] = 0.0
+            m["on_ground"] = False
+
+    def _set_mirror_size(self, new_size):
+        """Resize the mirror body while keeping its gravity-facing edge
+        anchored — same trick as `_set_size` but on m["size"] / m["y"]."""
+        m = self.mirror
+        if m is None or new_size == m["size"]:
+            return
+        delta = m["size"] - new_size
+        # For grav=1 the feet are at y+size, so y shifts by +delta to keep
+        # them planted; for grav=-1 the head is at y, already anchored.
+        if m["grav"] == 1:
+            m["y"] += delta
+        m["size"] = int(new_size)
+
+    def _set_mirror_mode(self, new_mode):
+        """Change the mirror's mode with the same per-mode entry tweaks
+        `set_mode` applies to the main body — snap angle to a right angle
+        for cube/ball, zero vy for wave so it doesn't keep falling."""
+        m = self.mirror
+        if m is None:
+            return
+        m["mode"] = new_mode
+        if new_mode in (MODE_CUBE, MODE_BALL):
+            m["angle"] = round(m.get("angle", 0.0) / 90) * 90
+        elif new_mode == MODE_WAVE:
+            m["vy"] = 0.0
+
+    def _handle_mirror_interactions(self, trigger_rect, input_active,
+                                    input_pressed):
+        """Mirror-side interaction pass: pads, orbs, gravity / mode / size
+        portals, the solo portal (which collapses the mirror state into the
+        main player), and global triggers. Hazards are handled in
+        _step_mirror.
+
+        Mode and size portals (mini/big/cube/ship/ball/wave/ufo/spider) and
+        the gravity portal are tracked in ``self.mirror_passed`` so they
+        fire independently for the mirror — the main body still consumes
+        them via ``self.passed``. Triggers, orbs, pads and coins remain in
+        the shared ``self.passed`` set since they represent global one-shot
+        effects (a coin can only be collected once; a colour trigger only
+        flips the palette once).
+
+        Returns True if the mirror was just collapsed (caller must stop
+        touching ``self.mirror``)."""
         m = self.mirror
         activated_orb_cell = None
         for o in self.nearby_for_rect(trigger_rect, 2):
@@ -858,10 +992,22 @@ class Player:
                 m["on_ground"] = False
                 self.passed.add(key)
                 continue
-            if t == T_GRAV and key not in self.passed:
+            # Per-body portals: tracked in mirror_passed so the main body's
+            # `passed` doesn't gate them. Each clone consumes the portal
+            # once for itself.
+            if t == T_GRAV and key not in self.mirror_passed:
                 m["grav"] *= -1
                 m["on_ground"] = False
-                self.passed.add(key)
+                self.mirror_passed.add(key)
+            elif t in MODE_FROM_TYPE and key not in self.mirror_passed:
+                self._set_mirror_mode(MODE_FROM_TYPE[t])
+                self.mirror_passed.add(key)
+            elif t == T_MODE_MINI and key not in self.mirror_passed:
+                self._set_mirror_size(MINI_PLAYER_SIZE)
+                self.mirror_passed.add(key)
+            elif t == T_MODE_BIG and key not in self.mirror_passed:
+                self._set_mirror_size(PLAYER_SIZE)
+                self.mirror_passed.add(key)
             elif t == T_MODE_SOLO and key not in self.passed:
                 # Collapse: the mirror "becomes" the main player. Adopt its
                 # y/vy/grav/on_ground/angle so the player keeps the mirror's
@@ -1167,18 +1313,29 @@ class Player:
         rot = pygame.transform.rotate(ps, self.angle)
         rr = rot.get_rect(center=(sx + size // 2, sy + size // 2))
         surf.blit(rot, rr)
-        # Dual-mode mirror — render as a cube in the same colour, flipped
+        # Dual-mode mirror — render in the mirror's own mode/size, flipped
         # vertically, at mirror["y"]. Alive-dimming if the mirror died.
         if self.mirror is not None:
-            my = self.mirror["y"] - cam_y
-            msurf = self._draw_player_surface()
-            if size != PLAYER_SIZE:
-                msurf = pygame.transform.smoothscale(msurf, (size, size))
+            m = self.mirror
+            msize = int(m.get("size", size))
+            my = m["y"] - cam_y
+            # _draw_player_surface() reads self.mode/self.size, so swap them
+            # in for the mirror render and restore right after. Cleaner than
+            # threading a mode arg through the cube/ball/wave/etc branches.
+            saved_mode, saved_size = self.mode, self.size
+            self.mode = m.get("mode", MODE_CUBE)
+            self.size = msize
+            try:
+                msurf = self._draw_player_surface()
+            finally:
+                self.mode, self.size = saved_mode, saved_size
+            if msize != PLAYER_SIZE:
+                msurf = pygame.transform.smoothscale(msurf, (msize, msize))
             # Flip vertically so the mirror reads as upside-down (matches
             # its inverted gravity).
             msurf = pygame.transform.flip(msurf, False, True)
-            if not self.mirror["alive"]:
+            if not m["alive"]:
                 msurf.set_alpha(90)
-            mrot = pygame.transform.rotate(msurf, self.mirror.get("angle", 0.0))
-            mrr = mrot.get_rect(center=(sx + size // 2, my + size // 2))
+            mrot = pygame.transform.rotate(msurf, m.get("angle", 0.0))
+            mrr = mrot.get_rect(center=(sx + size // 2, my + msize // 2))
             surf.blit(mrot, mrr)

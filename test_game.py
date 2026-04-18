@@ -1053,9 +1053,9 @@ if _sp.mirror is not None:
     expected_y = snap_mirror["y"]
     expected_grav = snap_mirror["grav"]
     snap = _ab_snap(_sp)
-    # snap layout: (vals, passed, anims, obj_pos, mirror)
-    check("Snapshot is 5-tuple (mirror slot present)",
-          isinstance(snap, tuple) and len(snap) == 5)
+    # snap layout: (vals, passed, anims, obj_pos, mirror, mirror_passed)
+    check("Snapshot is 6-tuple (mirror + mirror_passed slots present)",
+          isinstance(snap, tuple) and len(snap) == 6)
     check("Snapshot mirror is non-None when player has a mirror",
           snap[4] is not None)
     # Now corrupt the live mirror, restore, and confirm we got the snapshot's
@@ -1067,7 +1067,7 @@ if _sp.mirror is not None:
     check("Restored mirror grav matches snapshot",
           _sp.mirror["grav"] == expected_grav)
     # Restoring a None-mirror snapshot should clear the mirror.
-    pre_dual_snap = (snap[0], snap[1], snap[2], snap[3], None)
+    pre_dual_snap = (snap[0], snap[1], snap[2], snap[3], None, frozenset())
     _ab_restore(_sp, pre_dual_snap)
     check("Restore clears mirror when snapshot mirror is None",
           _sp.mirror is None)
@@ -1139,6 +1139,84 @@ check("Mirror collects coins along its path",
       7 in _mp.coins_collected)
 check("Mirror fires global triggers (bg_preset changed)",
       _mp.bg_preset == 3)
+
+# 7) Per-body mode/size portals: a portal in the MIRROR's path (cell y=3,
+#    just below the ceiling) should change the mirror's mode/size only,
+#    leaving the main player untouched. And vice-versa.
+from constants import (
+    T_MODE_WAVE, T_MODE_BALL, T_MODE_MINI, T_MODE_BIG,
+    MODE_CUBE as _MC, MODE_WAVE as _MW, MODE_BALL as _MB,
+    MINI_PLAYER_SIZE as _MINI, PLAYER_SIZE as _BIG,
+)
+
+# 7a. Wave portal in MIRROR's path — main stays cube, mirror becomes wave.
+_mirror_mode_objs = _make_dual_corridor(60, extras=[
+    {"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0},
+    {"t": T_MODE_WAVE, "x": 14, "y": 3, "r": 0},
+])
+_mp = Player(_mirror_mode_objs)
+for _ in range(180):
+    _mp.update(False, False)
+    if _mp.mirror is not None and _mp.mirror.get("mode") == _MW:
+        break
+    if not _mp.alive:
+        break
+check("Mirror-path mode portal changes mirror mode (wave)",
+      _mp.mirror is not None and _mp.mirror.get("mode") == _MW)
+check("Mirror-path mode portal does NOT sync to main player",
+      _mp.mode == _MC)
+
+# 7b. Wave portal in MAIN's path — main becomes wave, mirror stays cube.
+_main_mode_objs = _make_dual_corridor(60, extras=[
+    {"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0},
+    {"t": T_MODE_WAVE, "x": 14, "y": 9, "r": 0},
+])
+_mp = Player(_main_mode_objs)
+for _ in range(180):
+    _mp.update(False, False)
+    if _mp.mode == _MW:
+        break
+    if not _mp.alive:
+        break
+check("Main-path mode portal changes main mode (wave)",
+      _mp.mode == _MW)
+check("Main-path mode portal does NOT sync to mirror",
+      _mp.mirror is not None and _mp.mirror.get("mode") == _MC)
+
+# 7c. Mini portal in MIRROR's path — mirror shrinks, main stays big.
+_mirror_mini_objs = _make_dual_corridor(60, extras=[
+    {"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0},
+    {"t": T_MODE_MINI, "x": 14, "y": 3, "r": 0},
+])
+_mp = Player(_mirror_mini_objs)
+for _ in range(180):
+    _mp.update(False, False)
+    if _mp.mirror is not None and _mp.mirror.get("size") == _MINI:
+        break
+    if not _mp.alive:
+        break
+check("Mirror-path mini portal shrinks mirror only",
+      _mp.mirror is not None and _mp.mirror.get("size") == _MINI)
+check("Mirror-path mini portal does NOT shrink main player",
+      _mp.size == _BIG)
+
+# 7d. Mode-portal key lands in mirror_passed (not the shared `passed`),
+#     so the main body remains free to consume an identical portal later.
+_dup_key = (T_MODE_WAVE, 14, 3)
+_mp = Player(_make_dual_corridor(60, extras=[
+    {"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0},
+    {"t": T_MODE_WAVE, "x": 14, "y": 3, "r": 0},
+]))
+for _ in range(180):
+    _mp.update(False, False)
+    if _mp.mirror is not None and _dup_key in _mp.mirror_passed:
+        break
+    if not _mp.alive:
+        break
+check("Mirror portal consumption goes into mirror_passed",
+      _dup_key in _mp.mirror_passed)
+check("Mirror portal consumption stays out of shared passed",
+      _dup_key not in _mp.passed)
 
 
 # ---------------------------------------------------------------------------
