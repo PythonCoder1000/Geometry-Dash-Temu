@@ -45,6 +45,7 @@ _bot_max_frames_idx = 1      # default = 10000
 # Last solve result (kept for "Replay last" so re-opening the menu doesn't
 # force a re-solve on the same level).
 _last_waypoints = None
+_last_mirror_waypoints = None
 _last_inputs = None
 _last_status = ""            # "" | "ok" | "partial" | "failed"
 
@@ -54,10 +55,17 @@ def get_last_inputs():
     return list(_last_inputs) if _last_inputs else []
 
 
+def get_last_mirror_waypoints():
+    """Editor / play overlay reads this to draw the dual mirror's path in
+    blue alongside the main yellow path. Empty list when no dual segment."""
+    return list(_last_mirror_waypoints) if _last_mirror_waypoints else []
+
+
 def clear_last_solve():
     """Discard the cached solution. Call after edits invalidate the path."""
-    global _last_waypoints, _last_inputs, _last_status
+    global _last_waypoints, _last_mirror_waypoints, _last_inputs, _last_status
     _last_waypoints = None
+    _last_mirror_waypoints = None
     _last_inputs = None
     _last_status = ""
 
@@ -76,12 +84,14 @@ def _strip_internal(objects):
 def _run_solver(screen, clock, objects):
     """Invoke the autobot with the current beam-width / max-frames knobs.
 
-    Returns ``(waypoints, inputs, status, error)``. ``error`` is a short
-    string describing why the solver returned no path (or empty when it
-    succeeded / partially succeeded). Wraps the solver in a try/except so a
-    malformed level can't crash the menu — but the exception class is
-    surfaced via ``error`` so the user has *something* to act on instead of
-    a silent "failed".
+    Returns ``(waypoints, mirror_waypoints, inputs, status, error)``.
+    ``mirror_waypoints`` is the parallel path of the dual mirror (empty
+    list if the level never enters dual mode). ``error`` is a short string
+    describing why the solver returned no path (or empty when it succeeded
+    / partially succeeded). Wraps the solver in a try/except so a malformed
+    level can't crash the menu — but the exception class is surfaced via
+    ``error`` so the user has *something* to act on instead of a silent
+    "failed".
 
     Passes the previously-solved input sequence to the solver as ``seed_inputs``
     so unchanged regions of the level don't have to be re-explored. The solver
@@ -95,19 +105,19 @@ def _run_solver(screen, clock, objects):
         solver.BEAM_WIDTH = _bot_beam_widths[_bot_beam_idx]
         max_frames = _bot_max_frames_opts[_bot_max_frames_idx]
         seed = list(_last_inputs) if _last_inputs else None
-        wp, inputs, won = solver.solve(screen, clock, max_frames=max_frames,
-                                       seed_inputs=seed)
+        wp, mwp, inputs, won = solver.solve(screen, clock, max_frames=max_frames,
+                                            seed_inputs=seed)
         if not wp:
             # Solver ran but couldn't even produce a partial path. This
             # usually means every beam candidate died on frame 1 (e.g.
             # spike at spawn) — tell the user, don't just silently fail.
-            return None, [], "failed", "no path found (level may be unsolvable)"
-        return list(wp), list(inputs), ("ok" if won else "partial"), ""
+            return None, [], [], "failed", "no path found (level may be unsolvable)"
+        return list(wp), list(mwp), list(inputs), ("ok" if won else "partial"), ""
     except Exception as exc:
         # Surface the exception class — full traceback would be unreadable
         # in a one-line status, but the type name often points at the bug
         # (KeyError on object dict, AttributeError on missing field, etc.)
-        return None, [], "failed", f"crash: {type(exc).__name__}: {exc}"
+        return None, [], [], "failed", f"crash: {type(exc).__name__}: {exc}"
 
 
 def run_bot_menu(screen, clock, objects, precomputed_path=None,
@@ -137,7 +147,7 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
     ``(waypoints, status)`` — caller installs as the hint overlay.
     """
     global _bot_beam_idx, _bot_max_frames_idx
-    global _last_waypoints, _last_inputs, _last_status
+    global _last_waypoints, _last_mirror_waypoints, _last_inputs, _last_status
 
     if precomputed_path is not None and not _last_waypoints:
         # Adopt the caller's path so "View overlay" works immediately.
@@ -172,10 +182,11 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                     return return_value
                 if ev.key == pygame.K_RETURN:
                     # Quick-action: re-solve.
-                    wp, inputs, status, err = _run_solver(
+                    wp, mwp, inputs, status, err = _run_solver(
                         screen, clock, objects)
                     if wp:
                         _last_waypoints = wp
+                        _last_mirror_waypoints = mwp
                         _last_inputs = inputs
                         _last_status = status
                         return_value = (wp, status)
@@ -265,9 +276,10 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
         b_solve = btn(screen, "Find Path (Solve)",
                       panel.centerx, row_y + 16, 320, 44, C_BTN, mpos)
         if click_pos and b_solve.collidepoint(click_pos):
-            wp, inputs, status, err = _run_solver(screen, clock, objects)
+            wp, mwp, inputs, status, err = _run_solver(screen, clock, objects)
             if wp:
                 _last_waypoints = wp
+                _last_mirror_waypoints = mwp
                 _last_inputs = inputs
                 _last_status = status
                 return_value = (wp, status)

@@ -255,8 +255,10 @@ class AutoBot:
 
     def solve(self, screen=None, clock=None, max_frames=10000,
               seed_inputs=None):
-        """Return (waypoints, inputs, won).
+        """Return (waypoints, mirror_waypoints, inputs, won).
         - waypoints: list of (x, y) world-pixel coords for the bot path
+        - mirror_waypoints: parallel list for the dual mirror, empty if the
+          level never enters dual mode
         - inputs: list of (held, pressed) per physics frame for exact replay
         - won: True if solution reaches the end
 
@@ -276,17 +278,22 @@ class AutoBot:
         # Track the best (highest-x) failed attempt across retries so we can
         # return *something* informative even if no attempt fully solves.
         best_failed_waypoints = []
+        best_failed_mirror_waypoints = []
         best_failed_inputs = []
         best_failed_x = -1.0
+        waypoints = []
+        mirror_waypoints = []
+        inputs = []
+        won = False
 
         try:
             # 1) Cache verification: replay seed_inputs against the current
             #    level. If it still wins, we're done.
             prefix_inputs = None
             if seed_inputs:
-                wp, won_replay, last_alive = self._verify_inputs(seed_inputs)
+                wp, mwp, won_replay, last_alive = self._verify_inputs(seed_inputs)
                 if won_replay:
-                    return wp, list(seed_inputs), True
+                    return wp, mwp, list(seed_inputs), True
                 # Truncate to last-safe frame so beam search has somewhere
                 # solid to resume from. last_alive is the last input index
                 # the player survived; back off by the safety margin so the
@@ -310,7 +317,7 @@ class AutoBot:
                 # Last attempt also gets 50% more frames.
                 attempt_frames = max_frames if attempt < 3 else int(max_frames * 1.5)
                 attempt_prefix = prefix_inputs if attempt == 0 else None
-                waypoints, inputs, won = self._beam_search(
+                waypoints, mirror_waypoints, inputs, won = self._beam_search(
                     width, attempt_frames, screen, clock, attempt,
                     prefix_inputs=attempt_prefix)
                 if won:
@@ -322,22 +329,26 @@ class AutoBot:
                     if farthest > best_failed_x:
                         best_failed_x = farthest
                         best_failed_waypoints = waypoints
+                        best_failed_mirror_waypoints = mirror_waypoints
                         best_failed_inputs = inputs
             if not won and best_failed_waypoints:
                 waypoints = best_failed_waypoints
+                mirror_waypoints = best_failed_mirror_waypoints
                 inputs = best_failed_inputs
         finally:
             if was_enabled:
                 sfx.toggle()
 
-        return waypoints, inputs, won
+        return waypoints, mirror_waypoints, inputs, won
 
     def _verify_inputs(self, inputs):
         """Replay ``inputs`` against a fresh sim of the current level.
 
-        Returns ``(waypoints, won, last_alive_frame)``. ``last_alive_frame``
-        is the highest index in ``inputs`` for which the player was still
-        alive after that frame, or -1 if the player died on frame 0.
+        Returns ``(waypoints, mirror_waypoints, won, last_alive_frame)``.
+        ``last_alive_frame`` is the highest index in ``inputs`` for which
+        the player was still alive after that frame, or -1 if the player
+        died on frame 0. ``mirror_waypoints`` is empty unless a dual portal
+        was active during the replay.
         """
         work_objects = [dict(o) for o in self.objects]
         player = _SimPlayer(work_objects)
@@ -345,20 +356,27 @@ class AutoBot:
 
         size = getattr(player, "size", PLAYER_SIZE)
         waypoints = [(player.x + size / 2, player.y + size / 2)]
+        mirror_waypoints = []
         last_alive = -1
         for i, (held, pressed) in enumerate(inputs):
             player.update(held, pressed)
             size = getattr(player, "size", PLAYER_SIZE)
-            if i % 4 == 0 or not player.alive or player.won:
+            sample = i % 4 == 0 or not player.alive or player.won
+            if sample:
                 waypoints.append((
                     player.x + size / 2,
                     player.y + size / 2,
                 ))
+                if player.mirror is not None and player.mirror.get("alive"):
+                    mirror_waypoints.append((
+                        player.x + size / 2,
+                        player.mirror["y"] + size / 2,
+                    ))
             if player.alive:
                 last_alive = i
             if not player.alive or player.won:
                 break
-        return waypoints, player.won, last_alive
+        return waypoints, mirror_waypoints, player.won, last_alive
 
     def _beam_search(self, beam_width, max_frames, screen, clock, attempt,
                      prefix_inputs=None):
@@ -398,10 +416,10 @@ class AutoBot:
                 total_frames += 1
                 if player.won:
                     inputs = self._reconstruct(history, 0)
-                    waypoints, verified_won = self._replay_for_waypoints(inputs)
-                    return waypoints, inputs, verified_won
+                    waypoints, mwp, verified_won = self._replay_for_waypoints(inputs)
+                    return waypoints, mwp, inputs, verified_won
                 if not player.alive:
-                    return [], [], False
+                    return [], [], [], False
 
         # Initial state
         init_snap = _snap(player)
@@ -564,9 +582,9 @@ class AutoBot:
             inputs = []
 
         # Build waypoints by replaying inputs with a fresh player
-        waypoints, verified_won = self._replay_for_waypoints(inputs)
+        waypoints, mirror_waypoints, verified_won = self._replay_for_waypoints(inputs)
 
-        return waypoints, inputs, verified_won
+        return waypoints, mirror_waypoints, inputs, verified_won
 
     def _reconstruct(self, history, final_idx):
         """Walk parent chain backwards to build input sequence."""
@@ -581,7 +599,11 @@ class AutoBot:
 
     def _replay_for_waypoints(self, inputs):
         """Replay the solved inputs with a real Player to get waypoints
-        and verify the solution works (including move triggers)."""
+        and verify the solution works (including move triggers).
+
+        Returns ``(waypoints, mirror_waypoints, won)``. Mirror waypoints are
+        only sampled while the dual mirror is active, so the list may be
+        empty for levels that never use a dual portal."""
         work_objects = [dict(o) for o in self.objects]
         player = Player(work_objects)
         player.trail = []
@@ -594,21 +616,28 @@ class AutoBot:
         try:
             size = getattr(player, "size", PLAYER_SIZE)
             waypoints = [(player.x + size / 2, player.y + size / 2)]
+            mirror_waypoints = []
             for i, (held, pressed) in enumerate(inputs):
                 player.update(held, pressed)
                 size = getattr(player, "size", PLAYER_SIZE)
-                if i % 4 == 0 or not player.alive or player.won:
+                sample = i % 4 == 0 or not player.alive or player.won
+                if sample:
                     waypoints.append((
                         player.x + size / 2,
                         player.y + size / 2,
                     ))
+                    if player.mirror is not None and player.mirror.get("alive"):
+                        mirror_waypoints.append((
+                            player.x + size / 2,
+                            player.mirror["y"] + size / 2,
+                        ))
                 if not player.alive or player.won:
                     break
         finally:
             if was_enabled:
                 sfx.toggle()
 
-        return waypoints, player.won
+        return waypoints, mirror_waypoints, player.won
 
     def _clearance_bonus(self, player):
         """Small bonus for distance from hazards, used as tiebreaker."""
