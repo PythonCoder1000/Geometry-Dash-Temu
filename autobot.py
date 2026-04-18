@@ -247,11 +247,26 @@ class AutoBot:
         end_xs = [o["x"] * CELL for o in objects if o["t"] == T_END]
         self._end_x = max(end_xs) if end_xs else 0
 
-    def solve(self, screen=None, clock=None, max_frames=10000):
+    # Frames of cached input we discard before resuming beam search after a
+    # divergence. Gives the beam wiggle-room around the change point — without
+    # it, the search would have to find an alternative on the very frame the
+    # cached path died, which usually requires deviating earlier.
+    _SEED_SAFETY_MARGIN = 60
+
+    def solve(self, screen=None, clock=None, max_frames=10000,
+              seed_inputs=None):
         """Return (waypoints, inputs, won).
         - waypoints: list of (x, y) world-pixel coords for the bot path
         - inputs: list of (held, pressed) per physics frame for exact replay
         - won: True if solution reaches the end
+
+        If ``seed_inputs`` is provided (e.g. the previous solve's inputs),
+        the solver tries them first against the current level. If the cached
+        sequence still wins — typical when the user only added unrelated
+        decoration — it returns instantly. Otherwise it truncates the cached
+        sequence to its last-safe frame and seeds the first beam-search
+        attempt from there, so unchanged level prefixes don't have to be
+        re-explored from scratch.
         """
         # Mute sfx during simulation
         was_enabled = sfx.is_enabled()
@@ -265,11 +280,28 @@ class AutoBot:
         best_failed_x = -1.0
 
         try:
-            # Try with increasing beam widths. Each retry doubles the beam so
-            # harder levels get more parallel exploration before giving up.
-            # The 4th attempt also extends max_frames since the bigger beam
-            # explores more states per frame and may need more frames to
-            # commit to a route.
+            # 1) Cache verification: replay seed_inputs against the current
+            #    level. If it still wins, we're done.
+            prefix_inputs = None
+            if seed_inputs:
+                wp, won_replay, last_alive = self._verify_inputs(seed_inputs)
+                if won_replay:
+                    return wp, list(seed_inputs), True
+                # Truncate to last-safe frame so beam search has somewhere
+                # solid to resume from. last_alive is the last input index
+                # the player survived; back off by the safety margin so the
+                # search has room to deviate before the divergence point.
+                if last_alive > self._SEED_SAFETY_MARGIN:
+                    cut = last_alive - self._SEED_SAFETY_MARGIN
+                    prefix_inputs = list(seed_inputs[:cut])
+
+            # 2) Try with increasing beam widths. Each retry doubles the beam
+            #    so harder levels get more parallel exploration before giving
+            #    up. The 4th attempt also extends max_frames since the bigger
+            #    beam explores more states per frame and may need more frames
+            #    to commit to a route. The seed-prefix is only used on the
+            #    first attempt — if it fails, we drop it and retry from
+            #    scratch in case the cached prefix itself was misleading.
             widths = [self.BEAM_WIDTH,
                       self.BEAM_WIDTH * 2,
                       self.BEAM_WIDTH * 4,
@@ -277,8 +309,10 @@ class AutoBot:
             for attempt, width in enumerate(widths):
                 # Last attempt also gets 50% more frames.
                 attempt_frames = max_frames if attempt < 3 else int(max_frames * 1.5)
+                attempt_prefix = prefix_inputs if attempt == 0 else None
                 waypoints, inputs, won = self._beam_search(
-                    width, attempt_frames, screen, clock, attempt)
+                    width, attempt_frames, screen, clock, attempt,
+                    prefix_inputs=attempt_prefix)
                 if won:
                     break
                 # Remember the deepest failed run so we can show it to the user
@@ -298,8 +332,45 @@ class AutoBot:
 
         return waypoints, inputs, won
 
-    def _beam_search(self, beam_width, max_frames, screen, clock, attempt):
-        """Core beam search. Returns (waypoints, inputs, won)."""
+    def _verify_inputs(self, inputs):
+        """Replay ``inputs`` against a fresh sim of the current level.
+
+        Returns ``(waypoints, won, last_alive_frame)``. ``last_alive_frame``
+        is the highest index in ``inputs`` for which the player was still
+        alive after that frame, or -1 if the player died on frame 0.
+        """
+        work_objects = [dict(o) for o in self.objects]
+        player = _SimPlayer(work_objects)
+        player.trail = []
+
+        size = getattr(player, "size", PLAYER_SIZE)
+        waypoints = [(player.x + size / 2, player.y + size / 2)]
+        last_alive = -1
+        for i, (held, pressed) in enumerate(inputs):
+            player.update(held, pressed)
+            size = getattr(player, "size", PLAYER_SIZE)
+            if i % 4 == 0 or not player.alive or player.won:
+                waypoints.append((
+                    player.x + size / 2,
+                    player.y + size / 2,
+                ))
+            if player.alive:
+                last_alive = i
+            if not player.alive or player.won:
+                break
+        return waypoints, player.won, last_alive
+
+    def _beam_search(self, beam_width, max_frames, screen, clock, attempt,
+                     prefix_inputs=None):
+        """Core beam search. Returns (waypoints, inputs, won).
+
+        If ``prefix_inputs`` is provided, the search first replays those
+        inputs as a single-candidate "beam of one" so the cached prefix
+        carries over into history with parent_idx=0. The beam then expands
+        normally from the player's post-prefix state. Reconstruction walks
+        the parent chain back through the prefix automatically because every
+        prefix frame's parent is 0.
+        """
         work_objects = [dict(o) for o in self.objects]
         player = _SimPlayer(work_objects)
         player.trail = []
@@ -309,18 +380,34 @@ class AutoBot:
         # 0=x, 1=y, 2=vy, 3=on_ground, 4=alive, 5=won, 7=grav, 9=mode
         _X = 0; _ALIVE = 4; _MODE = 9
 
-        # Initial state
-        init_snap = _snap(player)
-
-        # Beam: list of (snap, parent_index_in_prev_beam, x_progress)
-        beam = [(init_snap, -1, player.x)]
-
         # Input history: for each frame, store list parallel to beam of (parent_idx, held, pressed)
         history = []
 
         won = False
         won_idx = -1
         total_frames = 0
+
+        # Replay the seed prefix as a single-candidate beam. The prefix
+        # should already be truncated to a known-safe length by the caller,
+        # so deaths here are surprising — bail out if one happens so the
+        # outer retry loop can fall back to a from-scratch attempt.
+        if prefix_inputs:
+            for held, pressed in prefix_inputs:
+                player.update(held, pressed)
+                history.append([(0, held, pressed)])
+                total_frames += 1
+                if player.won:
+                    inputs = self._reconstruct(history, 0)
+                    waypoints, verified_won = self._replay_for_waypoints(inputs)
+                    return waypoints, inputs, verified_won
+                if not player.alive:
+                    return [], [], False
+
+        # Initial state
+        init_snap = _snap(player)
+
+        # Beam: list of (snap, parent_index_in_prev_beam, x_progress)
+        beam = [(init_snap, -1, player.x)]
 
         # Stuck detection: track best alive x and bail if it doesn't grow.
         # The player normally advances ~5px/frame, so a few hundred frames

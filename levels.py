@@ -32,6 +32,7 @@ from constants import (
     T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,
     T_PAD, T_BLUE_PAD, T_GRAV, T_END, T_START, T_COIN,
     T_MODE_SHIP, T_MODE_BALL, T_MODE_CUBE, T_MODE_WAVE, T_MODE_UFO, T_MODE_SPIDER,
+    T_MODE_DUAL,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
@@ -108,6 +109,12 @@ def normalize_object(o):
             out["dest"] = 1
     if o["t"] == T_CAMERA_TRIGGER:
         out["cy"] = int(o.get("cy", out["y"]))
+    if o["t"] == T_MODE_DUAL:
+        # Optional: cell row where the mirror player spawns. Older levels
+        # without this field fall back to the symmetric placement around
+        # screen center inside Player._enter_dual.
+        if "spawn_y" in o and o["spawn_y"] is not None:
+            out["spawn_y"] = int(o["spawn_y"])
     if o["t"] == T_BG_TRIGGER:
         out["bg"] = int(o.get("bg", 0))
     if o["t"] == T_COLOR_TRIGGER:

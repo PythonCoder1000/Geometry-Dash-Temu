@@ -479,20 +479,26 @@ class Player:
                 self.mirror["y"] += delta
             # Mirror x always follows main, so no x shift needed.
 
-    def _enter_dual(self):
+    def _enter_dual(self, obj=None):
         """Initialize a mirror body with opposite gravity. The mirror
         inherits the player's current motion state — vy, on_ground, angle —
         with vy and angle sign-flipped because the mirror runs under
         opposite gravity. That way a dual portal crossed mid-jump produces
         a symmetric arc instead of a stalled mirror that drops from rest.
 
-        Mirror y is placed symmetrically around the screen's horizontal
-        midline so the two bodies appear equidistant from center.
+        If the portal object carries a ``spawn_y`` cell row, the mirror
+        spawns at the top of that cell. Otherwise the mirror y falls back
+        to a symmetric placement around the screen's horizontal midline so
+        existing levels keep their old behaviour.
         """
         if self.mirror is not None:
             return
-        center = HEIGHT / 2.0
-        mirror_y = 2.0 * center - self.y - self.size
+        spawn_row = obj.get("spawn_y") if obj else None
+        if spawn_row is not None:
+            mirror_y = float(spawn_row) * CELL
+        else:
+            center = HEIGHT / 2.0
+            mirror_y = 2.0 * center - self.y - self.size
         self.mirror = {
             "y": float(mirror_y),
             # Sign-flip vy: a player falling at +vy under +grav corresponds
@@ -673,7 +679,7 @@ class Player:
                 self._set_size(PLAYER_SIZE)
                 self.passed.add(key)
             elif t == T_MODE_DUAL and key not in self.passed:
-                self._enter_dual()
+                self._enter_dual(o)
                 self.passed.add(key)
             elif t == T_MODE_SOLO and key not in self.passed:
                 self.mirror = None

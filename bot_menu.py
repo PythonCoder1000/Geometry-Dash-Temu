@@ -82,6 +82,11 @@ def _run_solver(screen, clock, objects):
     malformed level can't crash the menu — but the exception class is
     surfaced via ``error`` so the user has *something* to act on instead of
     a silent "failed".
+
+    Passes the previously-solved input sequence to the solver as ``seed_inputs``
+    so unchanged regions of the level don't have to be re-explored. The solver
+    verifies the cached path against the current level first; if it still wins
+    (e.g. the user only added decoration), the solve returns instantly.
     """
     try:
         from autobot import AutoBot
@@ -89,7 +94,9 @@ def _run_solver(screen, clock, objects):
         solver = AutoBot(clean)
         solver.BEAM_WIDTH = _bot_beam_widths[_bot_beam_idx]
         max_frames = _bot_max_frames_opts[_bot_max_frames_idx]
-        wp, inputs, won = solver.solve(screen, clock, max_frames=max_frames)
+        seed = list(_last_inputs) if _last_inputs else None
+        wp, inputs, won = solver.solve(screen, clock, max_frames=max_frames,
+                                       seed_inputs=seed)
         if not wp:
             # Solver ran but couldn't even produce a partial path. This
             # usually means every beam candidate died on frame 1 (e.g.

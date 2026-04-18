@@ -6,7 +6,7 @@ from constants import (
     C_PUBLISH, C_SUCCESS,
     PALETTE_CATEGORIES, TYPE_NAMES, TYPE_TIPS, ALL_TYPES, BG_PRESETS,
     T_BLOCK, T_START, T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER,
-    T_MOVE_TRIGGER, T_SAW, T_COLOR_TRIGGER, T_COIN, T_END,
+    T_MOVE_TRIGGER, T_SAW, T_COLOR_TRIGGER, T_COIN, T_END, T_MODE_DUAL,
     DEFAULT_MOVE_CURVE, MOVE_CURVE_SPEED_MAX,
 )
 from graphics import (
@@ -108,6 +108,11 @@ def _place_object(objects, gx, gy, selected_type, rotation, group_id_counter):
         obj["ty"] = gy
         obj["duration"] = 30
         obj["curve"] = [list(p) for p in DEFAULT_MOVE_CURVE]
+    elif selected_type == T_MODE_DUAL:
+        # Default the mirror's spawn row to the portal's own row so the
+        # editor immediately shows it as an editable parameter (use < / >
+        # in the edit panel to move it up or down).
+        obj["spawn_y"] = gy
     objects.append(obj)
 
 
@@ -349,7 +354,7 @@ def _panel_button_rects(obj, stack_len=1):
     rects["rot_next"] = pygame.Rect(PANEL_X + 170, y + 6, 30, 30)
     y += 44
     t = obj["t"]
-    if t in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER):
+    if t in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_MODE_DUAL):
         rects["param_prev"] = pygame.Rect(PANEL_X + 70, y + 6, 30, 30)
         rects["param_next"] = pygame.Rect(PANEL_X + 170, y + 6, 30, 30)
         y += 44
@@ -393,6 +398,8 @@ def _param_info(obj):
         return "Color Index", str(obj.get("col_idx", 0))
     if t == T_MOVE_TRIGGER:
         return "Duration", f"{obj.get('duration', 30)}f"
+    if t == T_MODE_DUAL:
+        return "Spawn Row", str(obj.get("spawn_y", obj["y"]))
     return None, None
 
 
@@ -410,6 +417,8 @@ def _adjust_param(obj, delta):
         obj["col_idx"] = max(0, obj.get("col_idx", 0) + delta)
     elif t == T_MOVE_TRIGGER:
         obj["duration"] = max(1, obj.get("duration", 30) + delta * 5)
+    elif t == T_MODE_DUAL:
+        obj["spawn_y"] = obj.get("spawn_y", obj["y"]) + delta
 
 
 def _draw_edit_panel(screen, obj, mpos, pulse, stack_info=(0, 1)):
@@ -1772,6 +1781,22 @@ def run_editor(screen, clock):
                                  (sxb + effective_cell // 2, target_y), 2)
                 pygame.draw.line(screen, (255, 225, 80),
                                  (0, target_y), (WIDTH, target_y), 1)
+            if single_selected["t"] == T_MODE_DUAL:
+                # Cyan ghost cube on the chosen spawn row so the user can
+                # see exactly where the mirror will appear.
+                spawn_row = single_selected.get("spawn_y", single_selected["y"])
+                spawn_y_top = spawn_row * effective_cell - cam_y
+                ghost = pygame.Rect(sxb, spawn_y_top, effective_cell, effective_cell)
+                ghost_layer = pygame.Surface((effective_cell, effective_cell),
+                                             pygame.SRCALPHA)
+                ghost_layer.fill((120, 220, 255, 90))
+                screen.blit(ghost_layer, ghost.topleft)
+                pygame.draw.rect(screen, (140, 230, 255), ghost, 2)
+                pygame.draw.line(screen, (140, 230, 255),
+                                 (sxb + effective_cell // 2,
+                                  syb + effective_cell // 2),
+                                 (sxb + effective_cell // 2,
+                                  spawn_y_top + effective_cell // 2), 2)
         if drag_mode == "rubber" and mb[0]:
             x0, y0 = drag_start_screen
             x1, y1 = mpos

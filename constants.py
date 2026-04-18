@@ -242,7 +242,7 @@ TYPE_TIPS = {
     T_MODE_SPIDER: "Switch to spider (teleport to ceiling/floor).",
     T_MODE_MINI: "Shrinks the player to half-size.",
     T_MODE_BIG: "Restores the player to full size.",
-    T_MODE_DUAL: "Spawns a second player flipped in gravity.",
+    T_MODE_DUAL: "Spawns a second player flipped in gravity. Edit to set spawn row.",
     T_MODE_SOLO: "Returns to a single player.",
 }
 
