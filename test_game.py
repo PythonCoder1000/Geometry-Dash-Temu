@@ -1218,6 +1218,48 @@ check("Mirror portal consumption goes into mirror_passed",
 check("Mirror portal consumption stays out of shared passed",
       _dup_key not in _mp.passed)
 
+# 8) Single-click activates BOTH bodies' orbs. Place a jump orb in mid-air
+#    on the player's path AND another in the mirror's path at the same x.
+#    With one shared input_buffer the main consumed it first and the mirror
+#    silently missed out — the fix gave the mirror its own buffer.
+from constants import T_ORB
+_dual_orb_objs = _make_dual_corridor(60, extras=[
+    {"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0},
+    # Player orb: just above the floor at the player's jump-arc height.
+    {"t": T_ORB, "x": 18, "y": 7, "r": 0},
+    # Mirror orb at the same x, just below the ceiling (mirror is upside
+    # down at cell row 3-ish). Putting them at the same x guarantees the
+    # rects overlap on the same frame so a single click should fire both.
+    {"t": T_ORB, "x": 18, "y": 4, "r": 0},
+])
+_op = Player(_dual_orb_objs)
+# Walk forward (no input) until the player rect overlaps the orb cell, then
+# click ONCE. Track whether each body's vy got the jump kick on that click.
+_main_orb_key = (T_ORB, 18, 7)
+_mirror_orb_key = (T_ORB, 18, 4)
+_clicked = False
+_main_jumped = False
+_mirror_jumped = False
+for _frame in range(220):
+    # Click only when the player is roughly under both orbs (cell x≈18).
+    do_click = (not _clicked) and 17 * CELL <= _op.x <= 18.5 * CELL
+    pressed = do_click and not _clicked
+    if do_click:
+        _clicked = True
+    _op.update(do_click, pressed)
+    if _main_orb_key in _op.passed:
+        _main_jumped = True
+    if _mirror_orb_key in _op.passed:
+        _mirror_jumped = True
+    if _main_jumped and _mirror_jumped:
+        break
+    if not _op.alive:
+        break
+check("Single click activates main player's orb",
+      _main_jumped)
+check("Same click also activates mirror's orb",
+      _mirror_jumped)
+
 
 # ---------------------------------------------------------------------------
 # Editor test-mode music wiring
