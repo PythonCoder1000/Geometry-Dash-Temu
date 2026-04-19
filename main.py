@@ -5,12 +5,14 @@ Initializes pygame/audio, seeds the levels directory with a Tutorial, and
 owns the top-level state machine (menu ↔ select ↔ play ↔ editor).
 """
 
+import os
 import sys
 
 import pygame
 
-from constants import WIDTH, HEIGHT
+from constants import WIDTH, HEIGHT, ASSETS_DIR
 from editor import run_editor
+
 from levels import ensure_dirs, load_level_full
 import music
 import sfx
@@ -19,6 +21,25 @@ import gamepad
 from menus import run_menu, run_select, run_settings, run_customize
 from music_menu import run_music_menu
 from play import run_play
+
+
+def _set_window_icon():
+    """Set the window icon from `assets/icon.png` if it's shipped.
+
+    The OS launcher / taskbar icon is controlled by the packaging step
+    (Windows `.ico`, macOS `.icns`); this only sets the in-session
+    window icon, which pygame draws in the titlebar on platforms that
+    have one. Silent on missing file so headless runs and dev checkouts
+    without the asset still boot.
+    """
+    for name in ("icon.png", "icon.bmp"):
+        path = os.path.join(ASSETS_DIR, name)
+        if os.path.isfile(path):
+            try:
+                pygame.display.set_icon(pygame.image.load(path))
+            except pygame.error:
+                pass
+            return
 
 
 def apply_display_mode():
@@ -35,6 +56,7 @@ def main():
     pygame.init()
     screen = apply_display_mode()
     pygame.display.set_caption("Geometry Dash Temu")
+    _set_window_icon()
     clock = pygame.time.Clock()
 
     # Filesystem + audio init. Built-in levels were removed — the user

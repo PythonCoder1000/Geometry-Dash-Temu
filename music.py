@@ -1,4 +1,4 @@
-"""Music system for Geometry Dish — Temu Edition.
+"""Music system for Geometry Dash — Temu Edition.
 
 Supports:
 - Loading .ogg/.mp3/.wav files from assets/music/
@@ -16,10 +16,10 @@ import shutil
 
 import pygame
 
-from constants import ASSETS_DIR
+from constants import ASSETS_DIR, USER_MUSIC_DIR
 import prefs
 
-MUSIC_DIR = os.path.join(ASSETS_DIR, "music")
+MUSIC_DIR = os.path.join(ASSETS_DIR, "music")  # Read-only (bundled)
 _initialized = False
 _current_track = None
 _volume = 0.5
@@ -40,7 +40,10 @@ def init():
     _initialized = True
     _tracks = scan_tracks()
     # Restore persisted preferences.
-    _enabled = not bool(prefs.get("music_muted", False))
+    # Music defaults to OFF on first launch — the user opts in via the
+    # Music menu. Previously this was opt-out which surprised players who
+    # just wanted to boot the game without audio.
+    _enabled = not bool(prefs.get("music_muted", True))
     _volume = float(prefs.get("music_vol", 0.5))
     _menu_track_index = int(prefs.get("menu_track", 0))
     if _menu_track_index < 0 or _menu_track_index >= len(_tracks):
@@ -49,19 +52,31 @@ def init():
 
 
 def scan_tracks():
-    """Scan the music directory for playable tracks."""
+    """Scan bundled + user music dirs for playable tracks."""
     tracks = []
-    if not os.path.isdir(MUSIC_DIR):
-        os.makedirs(MUSIC_DIR, exist_ok=True)
-    for f in sorted(os.listdir(MUSIC_DIR)):
-        if f.lower().endswith((".ogg", ".mp3", ".wav")):
+    seen_files = set()
+    # Order matters — user-imported tracks come first so they surface at
+    # the top of the picker (most recently added is the one users want).
+    for base in (USER_MUSIC_DIR, MUSIC_DIR):
+        try:
+            os.makedirs(base, exist_ok=True)
+        except OSError:
+            continue
+        if not os.path.isdir(base):
+            continue
+        for f in sorted(os.listdir(base)):
+            if not f.lower().endswith((".ogg", ".mp3", ".wav")):
+                continue
+            if f in seen_files:
+                continue  # dupe name across dirs — prefer user copy
+            seen_files.add(f)
             tracks.append({
                 "name": os.path.splitext(f)[0].replace("_", " ").title(),
                 "file": f,
-                "path": os.path.join(MUSIC_DIR, f),
+                "path": os.path.join(base, f),
                 "type": "file",
             })
-    # Always add generated tracks as fallback
+    # Always add generated tracks as fallback.
     tracks.append({"name": "Chiptune A", "file": "__chiptune_a", "type": "generated", "seed": 42})
     tracks.append({"name": "Chiptune B", "file": "__chiptune_b", "type": "generated", "seed": 99})
     tracks.append({"name": "Chiptune C", "file": "__chiptune_c", "type": "generated", "seed": 7})
@@ -99,15 +114,64 @@ def track_index_by_file(filename):
 
 
 def import_music_file(src_path):
-    """Copy a music file into assets/music/ and rescan. Returns filename."""
-    if not os.path.isdir(MUSIC_DIR):
-        os.makedirs(MUSIC_DIR, exist_ok=True)
+    """Copy a music file into USER_MUSIC_DIR and rescan. Returns the
+    basename so the level JSON / menu can reference it."""
+    try:
+        os.makedirs(USER_MUSIC_DIR, exist_ok=True)
+    except OSError:
+        return None
     basename = os.path.basename(src_path)
-    dest = os.path.join(MUSIC_DIR, basename)
+    if not basename.lower().endswith((".ogg", ".mp3", ".wav")):
+        return None
+    dest = os.path.join(USER_MUSIC_DIR, basename)
     if os.path.abspath(src_path) != os.path.abspath(dest):
-        shutil.copy2(src_path, dest)
+        try:
+            shutil.copy2(src_path, dest)
+        except (OSError, shutil.SameFileError):
+            return None
     rescan()
     return basename
+
+
+def pick_music_file_dialog(parent_title="Import music"):
+    """Open a native file-picker dialog and return the selected path, or
+    None if the user cancelled / no GUI is available. Runs tkinter in a
+    hidden root window so it doesn't steal focus from pygame.
+    """
+    try:
+        import tkinter as _tk
+        from tkinter import filedialog as _fd
+    except ImportError:
+        return None
+    try:
+        root = _tk.Tk()
+    except _tk.TclError:
+        return None
+    try:
+        root.withdraw()
+        # `-topmost` forces the dialog to appear in front of the pygame
+        # window on macOS/Linux; the attribute is silently ignored on
+        # Windows which already does the right thing.
+        try:
+            root.attributes("-topmost", True)
+        except _tk.TclError:
+            pass
+        path = _fd.askopenfilename(
+            title=parent_title,
+            filetypes=[
+                ("Audio", "*.mp3 *.ogg *.wav"),
+                ("MP3", "*.mp3"),
+                ("OGG", "*.ogg"),
+                ("WAV", "*.wav"),
+                ("All files", "*.*"),
+            ],
+        )
+    finally:
+        try:
+            root.destroy()
+        except _tk.TclError:
+            pass
+    return path or None
 
 
 def set_volume(vol):

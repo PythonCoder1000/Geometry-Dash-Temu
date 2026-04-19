@@ -28,6 +28,33 @@ import music
 import sfx
 import settings
 from input_guard import ClickGuard
+
+
+# Reusable fullscreen SRCALPHA scratch for the hitbox overlay — allocated on
+# first use and retained across editor sessions so repeated toggles don't
+# allocate a new WIDTH*HEIGHT surface each frame. Stored as a single-slot
+# list to keep the lazy-init pattern readable.
+_hb_scratch = [None]
+
+# Pre-rendered grid-line surface, keyed on effective_cell size (== CELL *
+# zoom_level rounded to int). Replaces ~48 pygame.draw.line calls per
+# frame with a single offset blit. Rebuilt lazily when the zoom changes.
+_grid_cache = {"cell": 0, "surf": None}
+
+
+def _get_grid_surface(effective_cell):
+    if (_grid_cache["cell"] != effective_cell or
+            _grid_cache["surf"] is None):
+        surf_w = WIDTH + effective_cell
+        surf_h = (BAR_Y - TOP_H) + effective_cell
+        surf = pygame.Surface((surf_w, surf_h), pygame.SRCALPHA)
+        for x in range(0, surf_w, effective_cell):
+            pygame.draw.line(surf, C_GRID, (x, 0), (x, surf_h), 1)
+        for y in range(0, surf_h, effective_cell):
+            pygame.draw.line(surf, C_GRID, (0, y), (surf_w, y), 1)
+        _grid_cache["cell"] = effective_cell
+        _grid_cache["surf"] = surf
+    return _grid_cache["surf"]
 from play import run_play
 from bot import BotController, load_bot_inputs
 # `autobot` is no longer imported here — the bot menu (`bot_menu.py`) owns
@@ -416,7 +443,7 @@ def _adjust_param(obj, delta):
     elif t == T_COLOR_TRIGGER:
         obj["col_idx"] = max(0, obj.get("col_idx", 0) + delta)
     elif t == T_MOVE_TRIGGER:
-        obj["duration"] = max(1, obj.get("duration", 30) + delta * 5)
+        obj["duration"] = max(1, min(600, obj.get("duration", 30) + delta * 5))
     elif t == T_MODE_DUAL:
         obj["spawn_y"] = obj.get("spawn_y", obj["y"]) + delta
 
@@ -596,6 +623,10 @@ def _draw_palette(screen, mpos, active_cat, selected_type, tool, pulse,
 
 
 def run_editor(screen, clock):
+    # The editor is a "quiet" screen — menu music doesn't belong here and
+    # playtest / bot replay restart music on their own. Stop on entry so
+    # the menu track doesn't keep looping under the editor UI.
+    music.stop()
     objects = _initial_objects()
     level_name = "Untitled"
     level_music = None  # filename of assigned music track
@@ -1039,7 +1070,7 @@ def run_editor(screen, clock):
                     msg, msg_timer = f"Rotation: {current_rotation}°", 60
             if ev.type == pygame.MOUSEBUTTONDOWN and not guard.consume_click(ev):
                 continue
-            if ev.type == pygame.MOUSEBUTTONUP and guard._waiting_for_release:
+            if ev.type == pygame.MOUSEBUTTONUP and not guard.is_settled():
                 continue
             if ev.type == pygame.MOUSEBUTTONDOWN:
                 panel_hit = False
@@ -1632,6 +1663,8 @@ def run_editor(screen, clock):
                 precomputed_path=bot_waypoints if bot_waypoints else None,
                 allow_replay=True,
                 replay_callback=_replay_in_editor,
+                level_filename=level_filename,
+                meta=level_meta,
             )
             guard.reset()
             if result is not None:
@@ -1648,13 +1681,16 @@ def run_editor(screen, clock):
         draw_bg(screen, cam_x, stars, mountains)
         if show_grid:
             effective_cell = int(CELL * zoom_level)
-            ox = int(-cam_x % effective_cell)
-            oy = int(-cam_y % effective_cell)
-            for x in range(ox, WIDTH, effective_cell):
-                pygame.draw.line(screen, C_GRID, (x, TOP_H), (x, BAR_Y), 1)
-            for y in range(oy, HEIGHT, effective_cell):
-                if TOP_H < y < BAR_Y:
-                    pygame.draw.line(screen, C_GRID, (0, y), (WIDTH, y), 1)
+            grid_surf = _get_grid_surface(effective_cell)
+            # Offset-and-clip blit: the grid surface is slightly larger than
+            # the viewport so any sub-cell scroll offset still covers the
+            # visible region. set_clip confines output to the grid band.
+            ox = int(-cam_x % effective_cell) - effective_cell
+            oy = int(-cam_y % effective_cell) - effective_cell
+            prev_clip = screen.get_clip()
+            screen.set_clip(pygame.Rect(0, TOP_H, WIDTH, BAR_Y - TOP_H))
+            screen.blit(grid_surf, (ox, TOP_H + oy))
+            screen.set_clip(prev_clip)
         effective_cell = int(CELL * zoom_level)
         left_gx = int(cam_x // effective_cell) - 1
         right_gx = left_gx + WIDTH // effective_cell + 3
@@ -1708,7 +1744,10 @@ def run_editor(screen, clock):
         # bot path / selection rings render on top.
         if show_hitboxes and last_run_hitboxes:
             from constants import PLAYER_SIZE as _HB_PSZ
-            hb_layer = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            if _hb_scratch[0] is None:
+                _hb_scratch[0] = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            hb_layer = _hb_scratch[0]
+            hb_layer.fill((0, 0, 0, 0))
             world_left = cam_x / zoom_level - 60
             world_right = (cam_x + WIDTH) / zoom_level + 60
             world_top = cam_y / zoom_level - 60

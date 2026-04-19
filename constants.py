@@ -5,6 +5,7 @@ must be paired with a migration in ``levels.normalize_object`` so existing
 levels keep loading.
 """
 import os
+import sys
 
 # ---------------------------------------------------------------------------
 # Window / grid
@@ -13,6 +14,15 @@ WIDTH, HEIGHT = 1200, 700
 CELL = 50
 FPS = 60
 GROUND_Y = 550
+
+# Design spacing scale — use these instead of hard-coded magic numbers
+# so any future theme pass can rescale everything by editing one file.
+# Mnemonic: 4/8/16/24/48 — powers-of-two + double-sized gutter.
+SPACING_XS = 4
+SPACING_SM = 8
+SPACING_MD = 16
+SPACING_LG = 24
+SPACING_XL = 48
 
 # ---------------------------------------------------------------------------
 # Player tunables
@@ -34,12 +44,85 @@ UFO_JUMP_FORCE = -13.5
 SPIDER_TELEPORT_RANGE = 6  # cells
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths — split between app-root (read-only in a packaged build) and the
+# per-user writable data dir. Editable dev checkouts still write to the
+# repo when `GDT_DEV_LOCAL=1` is set, so the workflow of "clone, run,
+# mess with levels" doesn't change. Packaged builds bounce writes to
+# the OS's standard per-user data directory.
 # ---------------------------------------------------------------------------
-_ROOT = os.path.dirname(os.path.abspath(__file__))
-LEVELS_DIR = os.path.join(_ROOT, "levels")
+
+def _app_root():
+    """Directory of the app's read-only assets. Inside a PyInstaller
+    --onefile bundle this is the extracted temp dir (``sys._MEIPASS``)."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return meipass
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _is_frozen():
+    """True when running from a PyInstaller / Nuitka frozen bundle.
+    Those builds ship a read-only app dir, so all writes must go
+    elsewhere. A plain `python main.py` checkout returns False.
+    """
+    return getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS")
+
+
+def _user_data_dir():
+    """OS-standard per-user directory for level files, prefs, progress,
+    bot saves. Kept outside the bundle so writes work in frozen builds.
+
+    Dev override: setting ``GDT_DEV_LOCAL=1`` forces writes back into
+    the repo. It's also implied automatically for non-frozen runs so
+    "clone the repo, python main.py, edit levels" keeps working without
+    an extra env var. Set ``GDT_DEV_LOCAL=0`` to opt a dev build into
+    the per-user dir explicitly.
+    """
+    override = os.environ.get("GDT_DEV_LOCAL")
+    if override == "1":
+        return os.path.dirname(os.path.abspath(__file__))
+    if override != "0" and not _is_frozen():
+        # Default for dev checkouts: stay in the repo so existing
+        # workflows don't silently migrate levels to a new directory.
+        return os.path.dirname(os.path.abspath(__file__))
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_DATA_HOME",
+                              os.path.expanduser("~/.local/share"))
+    path = os.path.join(base, "GeometryDashTemu")
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        # If the user data dir is unwritable (read-only home, CI, etc.)
+        # fall back to the app root so at least in-memory state works.
+        path = os.path.dirname(os.path.abspath(__file__))
+    return path
+
+
+_ROOT = _app_root()
+_USER_DATA = _user_data_dir()
+
+# Read-only — shipped inside the bundle.
 ASSETS_DIR = os.path.join(_ROOT, "assets")
-PROGRESS_FILE = os.path.join(_ROOT, "progress.json")
+
+# Writable — per-user persistent state.
+LEVELS_DIR = os.path.join(_USER_DATA, "levels")
+PROGRESS_FILE = os.path.join(_USER_DATA, "progress.json")
+BOT_RUNS_DIR = os.path.join(_USER_DATA, "bot_runs")
+PREFS_FILE = os.path.join(_USER_DATA, "prefs.json")
+# User-imported music. Separate from the read-only bundled tracks so
+# packaged builds can accept new files without requiring write access
+# to the bundle. music.py scans both dirs; names must not collide.
+USER_MUSIC_DIR = os.path.join(_USER_DATA, "music")
+
+# Sample levels shipped with the app live under `assets/sample_levels/`;
+# on first launch a seed-copy pushes them into the user's LEVELS_DIR so
+# the level browser has something to show.
+_BUNDLED_LEVELS_DIR = os.path.join(_ROOT, "levels")
+
 LEVEL_FORMAT_VERSION = 6  # bumped: best_time_frames/deaths + group field
 
 # ---------------------------------------------------------------------------

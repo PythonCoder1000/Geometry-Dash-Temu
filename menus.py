@@ -3,6 +3,7 @@
 import math
 import os
 import sys
+from collections import OrderedDict
 
 import pygame
 
@@ -16,6 +17,7 @@ from constants import (
 from graphics import (
     draw_bg, txt, btn, make_stars, make_mountains, lighter, darker,
     speaker_icon, icon_button, draw_obj, draw_cube_icon_glyph,
+    draw_panel_footer,
 )
 from levels import list_levels, list_level_summaries, load_level_full
 import music
@@ -26,8 +28,24 @@ import thumbnails
 from input_guard import ClickGuard
 
 
+def _maybe_click_sfx(pos, rects):
+    """Play the UI click sound if `pos` lies inside any of the given
+    button rects. Used to keep sfx.play calls DRY across a menu's worth
+    of collidepoint checks without touching each call site."""
+    for r in rects:
+        if r is not None and r.collidepoint(pos):
+            sfx.play("click", 0.45)
+            return
+
+
 # Thumbnail cache — avoid hitting disk every frame for the same level.
-_THUMB_CACHE = {}
+# LRU-ordered (OrderedDict) so the raw-surface and scaled-surface caches
+# stay bounded even if the user browses through very long level lists.
+_THUMB_CACHE = OrderedDict()          # filename -> raw Surface | None
+_THUMB_SCALED_CACHE = OrderedDict()   # (filename, w, h) -> Surface
+_THUMB_CACHE_MAX = 128
+_THUMB_SCALED_CACHE_MAX = 128
+_THUMB_SENTINEL = object()
 
 
 def _get_thumb_for(filename):
@@ -36,8 +54,10 @@ def _get_thumb_for(filename):
     Lazy-regenerates if the file is missing — covers levels saved before the
     thumbnail feature shipped, and any time the cache file gets cleared.
     """
-    if filename in _THUMB_CACHE:
-        return _THUMB_CACHE[filename]
+    cached = _THUMB_CACHE.get(filename, _THUMB_SENTINEL)
+    if cached is not _THUMB_SENTINEL:
+        _THUMB_CACHE.move_to_end(filename)
+        return cached
     surf = thumbnails.load_thumbnail(filename)
     if surf is None:
         try:
@@ -47,12 +67,56 @@ def _get_thumb_for(filename):
         except (OSError, ValueError):
             surf = None
     _THUMB_CACHE[filename] = surf
+    while len(_THUMB_CACHE) > _THUMB_CACHE_MAX:
+        _THUMB_CACHE.popitem(last=False)
     return surf
 
 
+def _get_scaled_thumb(filename, w, h):
+    """Cached smoothscale of the raw thumbnail to (w, h).
+
+    `smoothscale` is expensive enough that scaling every visible card every
+    frame is a measurable cost in the level-select grid. The scaled surface
+    is keyed on (filename, w, h) so zoom / layout changes invalidate cleanly.
+    """
+    key = (filename, w, h)
+    cached = _THUMB_SCALED_CACHE.get(key)
+    if cached is not None:
+        _THUMB_SCALED_CACHE.move_to_end(key)
+        return cached
+    raw = _get_thumb_for(filename)
+    if raw is None:
+        return None
+    scaled = pygame.transform.smoothscale(raw, (w, h))
+    _THUMB_SCALED_CACHE[key] = scaled
+    while len(_THUMB_SCALED_CACHE) > _THUMB_SCALED_CACHE_MAX:
+        _THUMB_SCALED_CACHE.popitem(last=False)
+    return scaled
+
+
+# Module-global starfield / mountain silhouette — regenerated lazily so the
+# background keeps visual continuity as the user navigates between dialogs.
+_STARS_CACHE = None
+_MOUNTAINS_CACHE = None
+
+
+def _stars():
+    global _STARS_CACHE
+    if _STARS_CACHE is None:
+        _STARS_CACHE = make_stars()
+    return _STARS_CACHE
+
+
+def _mountains():
+    global _MOUNTAINS_CACHE
+    if _MOUNTAINS_CACHE is None:
+        _MOUNTAINS_CACHE = make_mountains()
+    return _MOUNTAINS_CACHE
+
+
 def run_menu(screen, clock):
-    stars = make_stars()
-    mountains = make_mountains()
+    stars = _stars()
+    mountains = _mountains()
     pulse = 0
     b_play = b_edit = b_settings = b_customize = b_quit = b_music = pygame.Rect(0, 0, 0, 0)
     r_mute_music = r_mute_sfx = pygame.Rect(0, 0, 0, 0)
@@ -74,6 +138,9 @@ def run_menu(screen, clock):
             if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if not guard.consume_click(ev):
                     continue
+                _maybe_click_sfx(ev.pos, [
+                    b_play, b_edit, b_settings, b_customize,
+                    b_music, b_quit, r_mute_music, r_mute_sfx])
                 if r_mute_music.collidepoint(ev.pos):
                     music.toggle_mute()
                     continue
@@ -173,10 +240,8 @@ def _draw_level_card(screen, rect, meta, hovered, filename=None):
     thumb_x = rect.x + 18
     thumb_y = rect.y + 8
     thumb_rect = pygame.Rect(thumb_x, thumb_y, THUMB_STRIP_W, THUMB_STRIP_H)
-    thumb_surf = _get_thumb_for(filename) if filename else None
-    if thumb_surf is not None:
-        scaled = pygame.transform.smoothscale(
-            thumb_surf, (THUMB_STRIP_W, THUMB_STRIP_H))
+    scaled = _get_scaled_thumb(filename, THUMB_STRIP_W, THUMB_STRIP_H) if filename else None
+    if scaled is not None:
         screen.blit(scaled, thumb_rect.topleft)
         pygame.draw.rect(screen, lighter(col, 30), thumb_rect, 1, border_radius=4)
     else:
@@ -223,13 +288,16 @@ def _draw_level_card(screen, rect, meta, hovered, filename=None):
     if coins > 0:
         txt(screen, f"{coins}/3", rect.right - 32, rect.y + 12, 13, C_COIN,
             shadow=True)
-    # Best time (if record exists) — bottom-right above the badge
+    # Best time (if record exists) — sits to the LEFT of the status
+    # badge. Previously this was drawn with topleft = br.x - 8, which
+    # placed the whole label inside / overlapping the badge. Center it
+    # in its own slot so it can't collide regardless of digit count.
     best_t = int(meta.get("best_time_frames", 0))
     if best_t > 0:
         bts = best_t / 60.0
         best_str = f"{int(bts // 60):d}:{bts % 60:05.2f}"
-        txt(screen, best_str, br.x - 8, br.centery - 7, 12, C_GRAY, False,
-            shadow=True)
+        txt(screen, best_str, br.x - 40, br.centery, 12, C_GRAY,
+            center=True, shadow=True)
 
 
 def run_select(screen, clock):
@@ -248,8 +316,8 @@ def run_select(screen, clock):
     summaries.sort(key=_sort_key)
 
     scroll = 0
-    stars = make_stars()
-    mountains = make_mountains()
+    stars = _stars()
+    mountains = _mountains()
     b_back = pygame.Rect(0, 0, 0, 0)
     r_mute_music = r_mute_sfx = pygame.Rect(0, 0, 0, 0)
     guard = ClickGuard()
@@ -370,7 +438,7 @@ def confirm_dialog(screen, clock, prompt, subtitle=None,
                    ok_label="OK", cancel_label="Cancel",
                    ok_color=None, cancel_color=None):
     """Modal yes/no confirmation. Returns True (OK) or False (Cancel/Esc)."""
-    stars = make_stars()
+    stars = _stars()
     guard = ClickGuard()
     if ok_color is None:
         ok_color = C_SUCCESS
@@ -420,15 +488,14 @@ def confirm_dialog(screen, clock, prompt, subtitle=None,
                              border_radius=8)
             pygame.draw.rect(screen, c, r, border_radius=8)
             txt(screen, label, r.centerx, r.centery, 16, C_WHITE, True)
-        txt(screen, "Enter/Y: yes  ·  Esc/N: no",
-            WIDTH // 2, box.bottom - 12, 12, C_GRAY, True)
+        draw_panel_footer(screen, box, "Enter/Y: yes  ·  Esc/N: no")
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())
 
 
 def text_input_dialog(screen, clock, prompt="Enter name:", default=""):
     text = default
-    stars = make_stars()
+    stars = _stars()
     guard = ClickGuard()
     while True:
         guard.tick()
@@ -461,8 +528,7 @@ def text_input_dialog(screen, clock, prompt="Enter name:", default=""):
         pygame.draw.rect(screen, (15, 15, 30), tf, border_radius=6)
         pygame.draw.rect(screen, C_BLOCK_H, tf, 1, border_radius=6)
         txt(screen, text + "|", tf.x + 10, tf.y + 10, 20, C_WHITE)
-        txt(screen, "Enter to confirm  ·  Esc to cancel",
-            WIDTH // 2, HEIGHT // 2 + 55, 15, C_GRAY, True)
+        draw_panel_footer(screen, box, "Enter to confirm  ·  Esc to cancel")
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())
 
@@ -475,7 +541,7 @@ def difficulty_picker(screen, clock, prompt="Choose difficulty:", default="Norma
     and by the play win-screen on first verification (verifier *sets* the
     final official difficulty).
     """
-    stars = make_stars()
+    stars = _stars()
     guard = ClickGuard()
     selected = default if default in DIFFICULTIES else "Normal"
     btn_h = 38
@@ -485,6 +551,7 @@ def difficulty_picker(screen, clock, prompt="Choose difficulty:", default="Norma
     rows = (len(DIFFICULTIES) + cols - 1) // cols
     box_w = cols * btn_w + (cols - 1) * gap + 60
     box_h = 130 + rows * (btn_h + gap) + 60
+    r_ok = r_cancel = pygame.Rect(0, 0, 0, 0)
     while True:
         guard.tick()
         mpos = pygame.mouse.get_pos()
@@ -540,8 +607,7 @@ def difficulty_picker(screen, clock, prompt="Choose difficulty:", default="Norma
             pygame.draw.rect(screen, darker(c, 60), r.move(0, 3), border_radius=8)
             pygame.draw.rect(screen, c, r, border_radius=8)
             txt(screen, label, r.centerx, r.centery, 16, C_WHITE, True)
-        txt(screen, "Enter: confirm  ·  Esc: cancel",
-            WIDTH // 2, box.bottom - 12, 12, C_GRAY, True)
+        draw_panel_footer(screen, box, "Enter: confirm  ·  Esc: cancel")
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())
 
@@ -562,7 +628,7 @@ def load_level_dialog(screen, clock):
     summaries = list_level_summaries()
     summaries.sort(key=lambda it: it[1].get("name", it[0]).lower())
     scroll = 0
-    stars = make_stars()
+    stars = _stars()
     guard = ClickGuard()
     while True:
         guard.tick()
@@ -604,8 +670,13 @@ def load_level_dialog(screen, clock):
                 diff = meta.get("difficulty", "Normal")
                 dc = DIFFICULTY_COLORS.get(diff, C_GRAY)
                 pygame.draw.rect(screen, dc, (r.x + 4, r.y + 4, 6, r.h - 8), border_radius=3)
+                # Clip the title so the status icon (at r.right - 22) has
+                # guaranteed room to the right; 32 chars at size 17 could
+                # bleed into the icon for wide-glyph names.
                 title = meta.get("name") or fn.replace(".json", "")
-                txt(screen, title[:32], r.x + 18, r.y + 11, 17, C_WHITE)
+                if len(title) > 26:
+                    title = title[:25] + "…"
+                txt(screen, title, r.x + 18, r.y + 11, 17, C_WHITE)
                 # Status icon
                 if meta.get("verified"):
                     txt(screen, "✓", r.right - 22, r.y + 11, 16, C_SUCCESS)
@@ -627,7 +698,7 @@ def snippet_picker(screen, clock):
     """
     from snippets import get_snippets, delete_user_snippet
 
-    stars = make_stars()
+    stars = _stars()
     guard = ClickGuard()
     scroll = 0
     box_x = WIDTH // 2 - 280
@@ -768,8 +839,8 @@ def run_settings(screen, clock, on_fullscreen_change=None):
     fullscreen toggle is flipped, so the host can re-create its surface.
     Returns when the user clicks Back or presses Esc.
     """
-    stars = make_stars()
-    mountains = make_mountains()
+    stars = _stars()
+    mountains = _mountains()
     guard = ClickGuard()
 
     panel_w = 540
@@ -805,7 +876,11 @@ def run_settings(screen, clock, on_fullscreen_change=None):
             True, shadow=True)
 
         col_x = panel.x + 32
-        val_x = panel.x + panel.w - 200
+        # Wider panel-right offset so the slider (240 wide) + percent
+        # label (+256 from val_x) stay inside the panel — the old
+        # val_x = panel.right - 200 had the slider overhang the panel by
+        # ~40 px and the percent label outside entirely.
+        val_x = panel.x + panel.w - 300
         row_y = panel.y + 80
 
         # ---- FPS cap (button cycles through options) ---------------------
@@ -960,8 +1035,8 @@ def run_customize(screen, clock):
 
     Returns when the user clicks Back or presses Esc.
     """
-    stars = make_stars()
-    mountains = make_mountains()
+    stars = _stars()
+    mountains = _mountains()
     guard = ClickGuard()
 
     panel_w = 640

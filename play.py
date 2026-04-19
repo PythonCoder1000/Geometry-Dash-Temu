@@ -6,6 +6,7 @@ legitimate win — bumps the level's ``verified`` / ``best_progress`` /
 ``coins_collected`` metadata so the playlist can mark it verified.
 """
 
+import bisect
 import sys
 
 import pygame
@@ -82,7 +83,12 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     """
     objects = [dict(o) for o in objects]
     total_coins = _total_coins(objects)
-    player = Player(objects)
+    # Per-level physics override (B5): `meta["physics"]` is a flat dict of
+    # tunables; absent → vanilla defaults. Built here rather than inside
+    # Player so bot replays / editor tests see the same per-level feel.
+    from physics import PhysicsParams
+    params = PhysicsParams.from_meta(meta)
+    player = Player(objects, params=params)
     player.practice_mode = practice_mode
     particles = Particles()
     stars = make_stars()
@@ -165,10 +171,29 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     bot_frame = 0
     test_speeds = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0]
     test_speed_idx = len(test_speeds) - 1
-    sorted_objects = sorted(
-        [o for o in objects if o["t"] not in TRIGGER_TYPES],
-        key=lambda o: (0 if o["t"] in DECORATION_TYPES else 1, o["x"]),
+    # Two lists sorted by x — decorations drawn first (behind), then the rest.
+    # Pre-extracted x arrays enable bisect to slice directly to the visible
+    # window instead of scanning every non-trigger object per frame.
+    # Sort by _orig_x (stable across moves), since move triggers mutate
+    # o["x"] during play and would desync the sorted order otherwise.
+    _draw_pool = [o for o in objects if o["t"] not in TRIGGER_TYPES]
+    _deco_layer = sorted(
+        (o for o in _draw_pool if o["t"] in DECORATION_TYPES),
+        key=lambda o: o.get("_orig_x", o["x"]),
     )
+    _main_layer = sorted(
+        (o for o in _draw_pool if o["t"] not in DECORATION_TYPES),
+        key=lambda o: o.get("_orig_x", o["x"]),
+    )
+    _deco_xs = [o.get("_orig_x", o["x"]) for o in _deco_layer]
+    _main_xs = [o.get("_orig_x", o["x"]) for o in _main_layer]
+
+    # One reusable fullscreen alpha surface for the per-frame overlays
+    # (hint path, ghost, death flash, vignette, pulse, checkpoint flash).
+    # Clear to transparent before each use — far cheaper than allocating a
+    # fresh Surface every frame.
+    _overlay_scratch = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    _CLEAR = (0, 0, 0, 0)
 
     # Pause menu state
     paused = False
@@ -195,16 +220,11 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     best_progress = 0  # % for this session (used for save)
     best_coins_this_run = 0
 
-    # SFX signal tracking (diffed every frame)
-    last_passed = set()
-    last_pad_count = 0
-    last_coin_count = 0
-
     def _full_reset():
         """Reset for a fresh attempt — resets player + all local loop state."""
         nonlocal attempts, death_timer, death_slowmo_timer, death_flash_timer
         nonlocal prev_input_held, pending_jump_press, sim_accum, bot_frame
-        nonlocal cam_y, bg_top, bg_bot, last_passed, last_pad_count, last_coin_count
+        nonlocal cam_y, bg_top, bg_bot
         nonlocal attempt_frames, current_run, best_run, best_run_progress_x
         nonlocal current_hitboxes
         # Commit the finished attempt as the new ghost if it got further.
@@ -233,9 +253,6 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         cam_y = 0.0
         bg_top[:] = [float(c) for c in C_BG_TOP]
         bg_bot[:] = [float(c) for c in C_BG_BOT]
-        last_passed = set()
-        last_pad_count = 0
-        last_coin_count = 0
         _restart_level_music()
 
     def _stop_music_and_return(result):
@@ -268,7 +285,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 co = {k: v for k, v in o.items()
                       if not (isinstance(k, str) and k.startswith("_"))}
                 clean.append(co)
-            solver = AutoBot(clean)
+            solver = AutoBot(clean, params=player.params)
             wp, mwp, _inputs, won = solver.solve(screen, clock)
             if not wp:
                 return "failed", None, None
@@ -359,9 +376,17 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 elif ev.key == pygame.K_b and not is_sim_run and not player.won:
                     # Bot menu: opens the dedicated bot UI for solving / replay.
                     from bot_menu import run_bot_menu, get_last_mirror_waypoints
+                    # Pass the level's filename (extracted from level_path)
+                    # so Save/Load bot runs key off a stable identifier.
+                    _lfn = None
+                    if level_path:
+                        import os as _os
+                        _lfn = _os.path.basename(level_path)
                     result = run_bot_menu(
                         screen, clock, [dict(o) for o in objects],
                         precomputed_path=hint_path,
+                        level_filename=_lfn,
+                        meta=meta,
                     )
                     if result is not None:
                         # The bot menu may return new waypoints to use as
@@ -456,25 +481,10 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
             if rc_menu.collidepoint(clicked_pos):
                 return _stop_music_and_return("menu")
             if rc_replay.collidepoint(clicked_pos):
-                player.reset()
-                attempts = 1
-                death_timer = 0
-                death_slowmo_timer = 0
-                death_flash_timer = 0
-                prev_input_held = False
-                pending_jump_press = False
-                if bot_controller:
-                    bot_controller.reset()
-                bot_frame = 0
-                cam_y = 0.0
-                bg_top[:] = [float(c) for c in C_BG_TOP]
-                bg_bot[:] = [float(c) for c in C_BG_BOT]
-                last_passed = set()
-                last_pad_count = 0
-                last_coin_count = 0
+                _full_reset()
+                attempts = 1  # Fresh replay session, not a continuation.
                 win_sfx_played = False
                 guard.reset()
-                _restart_level_music()
 
         step_scale = test_speeds[test_speed_idx] if editor_test else 1.0
         if death_slowmo_timer > 0:
@@ -489,7 +499,6 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 if death_timer <= 0:
                     if practice_mode and player.practice_mode and player.checkpoints:
                         player.load_checkpoint()
-                        last_passed = set(player.passed)
                         prev_input_held = False
                         pending_jump_press = False
                     else:
@@ -516,10 +525,10 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 # Ghost replay: sample every 2 frames to keep the list modest.
                 if attempt_frames % 2 == 0:
                     current_run.append((attempt_frames, player.x, player.y))
-                # Hitbox trace for the editor's overlay. Sample every frame
-                # so tight saw/spike sequences keep their full resolution —
-                # the editor needs to see exactly where the corners were.
-                if out_hitboxes is not None:
+                # Hitbox trace for the editor's overlay. Sample every other
+                # frame — matches the ghost-replay cadence and still has
+                # ample resolution for a 300 px/sec hitbox (6 px per sample).
+                if out_hitboxes is not None and attempt_frames % 2 == 0:
                     current_hitboxes.append(
                         (player.x, player.y, player.size))
                 cam_x = max(0, player.x - 200)
@@ -532,10 +541,6 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                     before_pads, after_pads,
                     before_coins, after_coins,
                 )
-                last_passed = after_passed
-                last_pad_count = after_pads
-                last_coin_count = after_coins
-
                 # Handle checkpoint-request from player (practice-mode flag
                 # triggers or T_CHECKPOINT pickup). Only save when practice
                 # mode is actually on.
@@ -591,10 +596,22 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 cam_y=cam_y + shake_y, bg_top=cur_top, bg_bot=cur_bot)
         left_gx = int(cam_x // CELL) - 1
         right_gx = left_gx + WIDTH // CELL + 3
-        for o in sorted_objects:
-            ox = o.get("_fx", o["x"])
-            oy = o.get("_fy", o["y"])
-            if left_gx - 1 <= ox <= right_gx + 1:
+        # The bisect slice keys on each object's ORIGINAL x (stable across
+        # move triggers), so give it a generous margin — objects that have
+        # been displaced far from their origin by a move trigger should
+        # still fall inside the slice. Per-object `_fx` is tested below.
+        slice_margin = 200
+        lo = left_gx - slice_margin
+        hi = right_gx + slice_margin
+        for layer, xs in ((_deco_layer, _deco_xs), (_main_layer, _main_xs)):
+            i = bisect.bisect_left(xs, lo)
+            j = bisect.bisect_right(xs, hi)
+            for k in range(i, j):
+                o = layer[k]
+                ox = o.get("_fx", o["x"])
+                oy = o.get("_fy", o["y"])
+                if not (left_gx - 1 <= ox <= right_gx + 1):
+                    continue
                 # Skip collected coins so they disappear on pickup.
                 if o["t"] == T_COIN and o.get("coin_id", 0) in player.coins_collected:
                     continue
@@ -611,7 +628,8 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         # they can preview the optimal route. Drawn BEFORE the per-run
         # ghost so the live ghost (player's own best) sits on top.
         if hint_visible and hint_path:
-            hint_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            hint_surf = _overlay_scratch
+            hint_surf.fill(_CLEAR)
             prev_pt = None
             for wx, wy in hint_path:
                 sx = int(wx - cam_x - shake_x)
@@ -647,7 +665,8 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         # Ghost overlay: draw a fading trail of the best prior run so the
         # player can see where they previously got further.
         if best_run:
-            ghost_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            ghost_surf = _overlay_scratch
+            ghost_surf.fill(_CLEAR)
             # Find the segment near current time +/- some window so the ghost
             # "runs alongside" rather than rendering the entire track.
             window = 120  # frames before and after
@@ -671,41 +690,33 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
 
         if death_flash_timer > 0:
             flash_intensity = int(255 * (death_flash_timer / 30))
-            flash_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            flash_surf.fill((255, 0, 0, flash_intensity))
-            screen.blit(flash_surf, (0, 0))
+            _overlay_scratch.fill((255, 0, 0, flash_intensity))
+            screen.blit(_overlay_scratch, (0, 0))
 
-        # Slow-mo vignette: radial darkening when death_slowmo_timer is active.
+        # Slow-mo vignette: bordered darkening when death_slowmo_timer is active.
         if death_slowmo_timer > 0:
             alpha = int(120 * (death_slowmo_timer / 30.0))
             if alpha > 0:
-                vig = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-                # Simple bordered darkening — cheaper than a real radial gradient.
                 border = 120
-                top = pygame.Surface((WIDTH, border), pygame.SRCALPHA)
-                top.fill((0, 0, 0, alpha))
-                vig.blit(top, (0, 0))
-                vig.blit(pygame.transform.flip(top, False, True),
-                         (0, HEIGHT - border))
-                side = pygame.Surface((border, HEIGHT), pygame.SRCALPHA)
-                side.fill((0, 0, 0, alpha))
-                vig.blit(side, (0, 0))
-                vig.blit(pygame.transform.flip(side, True, False),
-                         (WIDTH - border, 0))
-                screen.blit(vig, (0, 0))
+                dark = (0, 0, 0, alpha)
+                _overlay_scratch.fill(_CLEAR)
+                _overlay_scratch.fill(dark, (0, 0, WIDTH, border))
+                _overlay_scratch.fill(dark, (0, HEIGHT - border, WIDTH, border))
+                _overlay_scratch.fill(dark, (0, 0, border, HEIGHT))
+                _overlay_scratch.fill(dark, (WIDTH - border, 0, border, HEIGHT))
+                screen.blit(_overlay_scratch, (0, 0))
 
         # Pulse trigger: brief screen-tinted flash modulated by BPM.
         pulse_amp = player.pulse_intensity()
         if pulse_amp > 0.01:
-            pulse_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            pulse_surf.fill((255, 240, 255, int(60 * pulse_amp)))
-            screen.blit(pulse_surf, (0, 0))
+            _overlay_scratch.fill((255, 240, 255, int(60 * pulse_amp)))
+            screen.blit(_overlay_scratch, (0, 0))
+        if death_flash_timer > 0:
             death_flash_timer -= 1
         if checkpoint_flash_timer > 0:
             flash_intensity = int(100 * (checkpoint_flash_timer / 20))
-            flash_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            flash_surf.fill((0, 255, 0, flash_intensity))
-            screen.blit(flash_surf, (0, 0))
+            _overlay_scratch.fill((0, 255, 0, flash_intensity))
+            screen.blit(_overlay_scratch, (0, 0))
             checkpoint_flash_timer -= 1
 
         # ---- HUD ----------------------------------------------------------

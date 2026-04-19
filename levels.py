@@ -3,10 +3,12 @@
 Filenames beginning with an underscore are reserved (e.g. `_autosave.json`)
 and never appear in the level browser — see `list_levels()`.
 
-Level JSON schema (v5):
+Level JSON schema (current version — see `LEVEL_FORMAT_VERSION` in
+`constants.py` for the exact number; `_default_meta()` is the source of
+truth for field defaults). Example:
     {
       "name": "Level Name",
-      "v": 5,
+      "v": LEVEL_FORMAT_VERSION,
       "author": "Player",
       "difficulty": "Normal",          # current official rating (verifier can set)
       "requested_difficulty": "Normal",# what the publisher asked for
@@ -17,7 +19,9 @@ Level JSON schema (v5):
       "attempts": 0,        # best stored attempts count
       "best_progress": 0,   # 0-100, best fraction reached
       "coins_collected": 0, # 0..3 — max coins ever collected in one run
-      "objects": [ ... ]
+      "best_time_frames": 0,# best completion time; 0 means no record
+      "deaths": 0,          # total deaths across all attempts
+      "objects": [ ... ]    # objects may carry a "group" field (v6+)
     }
 
 Older versions are migrated on load.
@@ -46,6 +50,40 @@ from constants import (
 
 def ensure_dirs():
     os.makedirs(LEVELS_DIR, exist_ok=True)
+    _seed_bundled_levels()
+
+
+def _seed_bundled_levels():
+    """First-launch: copy any levels shipped in the bundle's read-only
+    directory into the user's writable LEVELS_DIR so the level browser
+    isn't empty on a fresh install. Skips files that already exist so
+    subsequent launches don't stomp edits.
+    """
+    try:
+        from constants import _BUNDLED_LEVELS_DIR
+    except ImportError:
+        return
+    # Same path → dev checkout, nothing to seed.
+    if os.path.abspath(_BUNDLED_LEVELS_DIR) == os.path.abspath(LEVELS_DIR):
+        return
+    if not os.path.isdir(_BUNDLED_LEVELS_DIR):
+        return
+    try:
+        entries = os.listdir(_BUNDLED_LEVELS_DIR)
+    except OSError:
+        return
+    for fn in entries:
+        if not fn.endswith(".json") or fn.startswith("_"):
+            continue
+        src = os.path.join(_BUNDLED_LEVELS_DIR, fn)
+        dst = os.path.join(LEVELS_DIR, fn)
+        if os.path.exists(dst):
+            continue
+        try:
+            with open(src, "rb") as rf, open(dst, "wb") as wf:
+                wf.write(rf.read())
+        except OSError:
+            pass
 
 
 def _safe_filename(name):
@@ -309,8 +347,10 @@ def load_autosave():
     except (OSError, ValueError):
         return None, None
     meta = _migrate(data)
-    # Carry the autosave-private fields across the migration, since
-    # _migrate ignores keys not in the default schema.
+    # `_migrate` already copies every non-"objects" key, so the autosave
+    # fields carry across automatically. These explicit re-copies are kept
+    # as a belt-and-braces guard in case `_migrate` is ever tightened to
+    # whitelist only default_meta keys.
     if "_autosave_source" in data:
         meta["_autosave_source"] = data["_autosave_source"]
     if "_autosave_ts" in data:

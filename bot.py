@@ -12,7 +12,6 @@ import os
 from constants import (
     CELL, PLAYER_SIZE,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
-    GRAVITY, SHIP_GRAVITY, JUMP_FORCE, SPIDER_TELEPORT_RANGE,
     HAZARD_TYPES, SOLID_TYPES,
 )
 
@@ -84,13 +83,25 @@ class BotController:
             (o["x"], o["y"]) for o in objects if o["t"] in SOLID_TYPES
         }
 
-    def _hazard_ahead(self, gx_from, gx_to, gy_center, y_tol=1):
-        """True if any hazard cell sits on the planned path within x-range."""
+    def _hazard_ahead(self, gx_from, gx_to, gy_center, y_tol=1,
+                       follow_path=False):
+        """True if any hazard cell sits on the planned path within x-range.
+
+        ``follow_path``: when True, the y center for each column is sampled
+        from the interpolated target path instead of fixed ``gy_center``.
+        This catches hazards on arc peaks after a pad/orb launch that would
+        otherwise sit above a flat ``gy_center ± y_tol`` window.
+        """
         if not self._hazard_cells or gx_to < gx_from:
             return False
         for gx in range(gx_from, gx_to + 1):
+            center = gy_center
+            if follow_path:
+                ty = self.get_target_y(gx * CELL + CELL // 2)
+                if ty is not None:
+                    center = int(ty // CELL)
             for dy in range(-y_tol, y_tol + 1):
-                if (gx, gy_center + dy) in self._hazard_cells:
+                if (gx, center + dy) in self._hazard_cells:
                     return True
         return False
 
@@ -174,7 +185,9 @@ class BotController:
 
         elif mode == MODE_SHIP:
             # Predict where gravity drifts us without thrust.
-            v_drift = player.vy + SHIP_GRAVITY * look * grav
+            # Use the player's own ship_gravity so per-level physics
+            # overrides still produce accurate drift predictions.
+            v_drift = player.vy + player.params.ship_gravity * look * grav
             y_drift = pcy + (player.vy + v_drift) * 0.5 * look
             drift_err = y_drift - target_future
             if grav == 1:
@@ -201,12 +214,16 @@ class BotController:
 
             # If the target dips just above a spike row, the raw threshold
             # may not fire in time — force a jump when a hazard sits directly
-            # on our planned corridor within the lookahead window.
+            # on our planned corridor within the lookahead window. Sample
+            # the interpolated path (instead of the player's current row)
+            # so arc peaks after a pad / orb launch see hazards above the
+            # current gy_center.
             if player.on_ground and self._hazard_cells:
                 gy_now = int(pcy // CELL)
                 gx_now = int(pcx // CELL)
                 gx_ahead = int(future_x // CELL) + 1
-                if self._hazard_ahead(gx_now, gx_ahead, gy_now, y_tol=1):
+                if self._hazard_ahead(gx_now, gx_ahead, gy_now,
+                                      y_tol=1, follow_path=True):
                     should_jump = True
 
             if should_jump:

@@ -9,14 +9,16 @@ disk; subsequent runs load the PNG directly. An in-memory cache keyed by
 per-frame drawing primitives are used for object sprites.
 """
 
+import functools
 import math
 import os
 import random
+from collections import OrderedDict
 
 import pygame
 
 from constants import (
-    ASSETS_DIR, CELL, WIDTH, HEIGHT, GROUND_Y,
+    ASSETS_DIR, CELL, WIDTH, HEIGHT, GROUND_Y, _USER_DATA,
     C_BG_TOP, C_BG_BOT, C_GROUND, C_GROUND_L, C_GROUND_DARK, C_WHITE, C_GRAY,
     C_BLOCK, C_BLOCK_H, C_BLOCK_D, C_SPIKE, C_ORB, C_DASH_ORB, C_TELEPORT_ORB,
     C_PAD, C_BLUE_PAD, C_GPORTAL, C_END, C_PLAYER, C_BTN, C_DARK,
@@ -169,17 +171,47 @@ def apply_shake(intensity):
 # ---------------------------------------------------------------------------
 # Text — with optional drop shadow for readability over busy backgrounds
 # ---------------------------------------------------------------------------
+# Rendered-text cache: (text, size, color_tuple) -> Surface. HUD f-strings
+# like "Attempt 42" change at most once per second — before this cache each
+# one re-ran font.render() every frame (60 Hz × 5+ lines = 300 wasted
+# renders/sec). Bounded LRU so transient labels don't grow the cache.
+@functools.lru_cache(maxsize=512)
+def _render_text_cached(text, size, col):
+    return get_font(size).render(text, True, col)
+
+
 def txt(surf, text, x, y, size=22, col=C_WHITE, center=False, shadow=False):
-    font = get_font(size)
     text = str(text)
+    col_key = tuple(col)
     if shadow:
-        s = font.render(text, True, (0, 0, 0))
+        s = _render_text_cached(text, size, (0, 0, 0))
         r = s.get_rect(center=(x + 2, y + 2)) if center else s.get_rect(topleft=(x + 1, y + 1))
         surf.blit(s, r)
-    s = font.render(text, True, col)
+    s = _render_text_cached(text, size, col_key)
     r = s.get_rect(center=(x, y)) if center else s.get_rect(topleft=(x, y))
     surf.blit(s, r)
     return r
+
+
+def draw_panel_footer(surf, panel_rect, text, size=12, col=C_GRAY):
+    """Draw a keyboard-hint / help line anchored to a panel's bottom.
+
+    Text sits INSIDE the panel, 18 px above its bottom edge and centred
+    horizontally. Use this instead of ad-hoc `panel.bottom + 16` style
+    placement — that pattern routinely clipped through the panel's own
+    border or landed off-screen entirely (UI_AUDIT §1).
+    """
+    txt(surf, text, panel_rect.centerx, panel_rect.bottom - 18,
+        size, col, center=True)
+
+
+def size_panel_to_fit(content_h, min_h=200, max_h=HEIGHT - 40,
+                      extra_padding=24):
+    """Return a panel height that tightly wraps `content_h`, clamped to
+    a sensible min/max. Use to kill the huge dead-space bands that
+    show up when panels have hard-coded `panel_h` and variable content."""
+    h = content_h + extra_padding
+    return max(min_h, min(max_h, h))
 
 
 def txt_wrap(surf, text, x, y, max_w, size=18, col=C_WHITE, line_h=None):
@@ -207,6 +239,46 @@ def txt_wrap(surf, text, x, y, max_w, size=18, col=C_WHITE, line_h=None):
 # ---------------------------------------------------------------------------
 # Button — polished with hover + shadow
 # ---------------------------------------------------------------------------
+# Per-button hover-ease state. Keyed on (cx, cy, label) because those
+# together uniquely identify a button location in any menu; the dict is
+# bounded by manual eviction of entries that haven't been ticked
+# recently (anything older than ~2s is unreachable UI).
+_HOVER_EASE = {}
+_HOVER_EASE_MAX = 256
+_HOVER_EASE_SPEED = 0.18  # fraction of the remaining gap per frame
+
+
+def _hover_t(key, target, *, _frame=[0]):
+    """Return eased [0,1] hover weight for `key`, moving toward `target`.
+    Simple lerp at a fixed rate — `dt` isn't threaded through the menu
+    draw path yet, so frame-rate-assumed easing is close enough (menus
+    run at 60 Hz via `settings.get_fps_cap`)."""
+    _frame[0] += 1
+    entry = _HOVER_EASE.get(key)
+    if entry is None:
+        t = 1.0 if target >= 1.0 else 0.0
+    else:
+        t = entry[0]
+        t += (target - t) * _HOVER_EASE_SPEED
+        if abs(t - target) < 0.01:
+            t = target
+    _HOVER_EASE[key] = (t, _frame[0])
+    # Evict stale entries once the dict gets too full — cheap and only
+    # fires occasionally because the menu vocabulary is small.
+    if len(_HOVER_EASE) > _HOVER_EASE_MAX:
+        cutoff = _frame[0] - 120
+        for k in list(_HOVER_EASE.keys()):
+            if _HOVER_EASE[k][1] < cutoff:
+                del _HOVER_EASE[k]
+    return t
+
+
+def _lerp_rgb(a, b, t):
+    return (int(a[0] + (b[0] - a[0]) * t),
+            int(a[1] + (b[1] - a[1]) * t),
+            int(a[2] + (b[2] - a[2]) * t))
+
+
 def btn(surf, label, cx, cy, w=180, h=46, col=C_BTN, mpos=None, disabled=False,
         font_size=20):
     r = pygame.Rect(cx - w // 2, cy - h // 2, w, h)
@@ -215,7 +287,11 @@ def btn(surf, label, cx, cy, w=180, h=46, col=C_BTN, mpos=None, disabled=False,
         base = darker(col, 50)
         lbl_col = (160, 160, 170)
     else:
-        base = lighter(col, 35) if hovered else col
+        # Eased hover — color lerps smoothly toward the hover tint
+        # instead of snapping. Makes every button feel less cheap.
+        hot = lighter(col, 35)
+        t = _hover_t((cx, cy, label), 1.0 if hovered else 0.0)
+        base = _lerp_rgb(col, hot, t) if t > 0.0 else col
         lbl_col = C_WHITE
     pygame.draw.rect(surf, darker(base, 50), r.move(0, 3), border_radius=10)
     pygame.draw.rect(surf, base, r, border_radius=10)
@@ -245,16 +321,21 @@ def cell_rect(gx, gy):
     return pygame.Rect(gx * CELL, gy * CELL, CELL, CELL)
 
 
+# Slab local offsets (pre-rotation) in cell-local coords. Precomputed so
+# slab_rect just branches the table and does one Rect alloc — no repeated
+# normalize_rotation / if-chain per call.
+_SLAB_LOCAL = {
+    0:   (0,          CELL // 2, CELL,      CELL // 2),
+    180: (0,          0,         CELL,      CELL // 2),
+    90:  (0,          0,         CELL // 2, CELL),
+    270: (CELL // 2,  0,         CELL // 2, CELL),
+}
+
+
 def slab_rect(gx, gy, rotation=0):
     """Slab is half-height; rotation determines which edge it sits on."""
-    rot = normalize_rotation(rotation)
-    if rot == 0:
-        return pygame.Rect(gx * CELL, gy * CELL + CELL // 2, CELL, CELL // 2)
-    if rot == 180:
-        return pygame.Rect(gx * CELL, gy * CELL, CELL, CELL // 2)
-    if rot == 90:
-        return pygame.Rect(gx * CELL, gy * CELL, CELL // 2, CELL)
-    return pygame.Rect(gx * CELL + CELL // 2, gy * CELL, CELL // 2, CELL)
+    lx, ly, lw, lh = _SLAB_LOCAL[normalize_rotation(rotation)]
+    return pygame.Rect(gx * CELL + lx, gy * CELL + ly, lw, lh)
 
 
 def rotate_local_rect(local_rect, rotation, size=CELL):
@@ -287,19 +368,36 @@ def rotate_local_rect(local_rect, rotation, size=CELL):
     return pygame.Rect(round(min_x), round(min_y), round(max_x - min_x), round(max_y - min_y))
 
 
-def spike_hitboxes(gx, gy, rotation=0, half=False):
+# Spike / pad base rects are pure functions of (rotation, half) — the
+# rotation math ran in the collision inner loop every call. Cache the
+# rotated bases; per-call allocation reduces to a single `.move()` per
+# rect. The bases themselves are NOT returned to callers (`.move()`
+# produces fresh Rects), so the cached Rects can't be mutated externally.
+@functools.lru_cache(maxsize=16)
+def _spike_base_rotated(rotation, half):
     if half:
-        base = [pygame.Rect(14, 34, 22, 8), pygame.Rect(18, 28, 14, 6)]
+        base = (pygame.Rect(14, 34, 22, 8), pygame.Rect(18, 28, 14, 6))
     else:
-        base = [pygame.Rect(14, 34, 22, 8), pygame.Rect(18, 24, 14, 10)]
+        base = (pygame.Rect(14, 34, 22, 8), pygame.Rect(18, 24, 14, 10))
+    return tuple(rotate_local_rect(r, rotation) for r in base)
+
+
+def spike_hitboxes(gx, gy, rotation=0, half=False):
     x = gx * CELL
     y = gy * CELL
-    return [rotate_local_rect(r, rotation).move(x, y) for r in base]
+    return [r.move(x, y) for r in
+            _spike_base_rotated(normalize_rotation(rotation), bool(half))]
+
+
+@functools.lru_cache(maxsize=8)
+def _pad_trigger_base_rotated(rotation):
+    return rotate_local_rect(
+        pygame.Rect(5, CELL - 18, CELL - 10, 18), rotation)
 
 
 def pad_trigger_rect(gx, gy, rotation=0):
-    base = pygame.Rect(5, CELL - 18, CELL - 10, 18)
-    return rotate_local_rect(base, rotation).move(gx * CELL, gy * CELL)
+    return _pad_trigger_base_rotated(normalize_rotation(rotation)).move(
+        gx * CELL, gy * CELL)
 
 
 def saw_hitbox(gx, gy):
@@ -392,12 +490,64 @@ def draw_bg(surf, cam_x=0, stars=None, mountains=None, cam_y=0, bg_top=None, bg_
 
 # ---------------------------------------------------------------------------
 # Object sprite images — rendered at 2x and downsampled for AA, then saved
-# to ``assets/sprites/*.png`` so they load as real images on next launch.
+# so they load as real images on next launch.
+#
+# Two locations: the BUNDLED_SPRITES_DIR ships the pre-rendered sprites
+# inside the app bundle (read-only), and SPRITES_DIR is a writable cache
+# under the user data dir. At runtime we read either location, but WRITE
+# only to the user cache so packaged builds can rebake on render-code
+# changes without needing write access to the bundle.
+#
+# SPRITE_CACHE_VERSION is bumped whenever a renderer output changes in a
+# way that would make stale PNGs look wrong. On mismatch the user cache
+# is wiped and regenerated on demand.
 # ---------------------------------------------------------------------------
-SPRITES_DIR = os.path.join(ASSETS_DIR, "sprites")
+SPRITE_CACHE_VERSION = "1"
+BUNDLED_SPRITES_DIR = os.path.join(ASSETS_DIR, "sprites")
+SPRITES_DIR = os.path.join(_USER_DATA, "sprite_cache")
+_SPRITE_VERSION_MARKER = os.path.join(SPRITES_DIR, ".version")
 SPRITE_FRAMES = 8            # animation frames baked per animated type
 _SUPERSAMPLE = 2             # render at this multiple, smooth-scale down
-_OBJECT_CACHE = {}           # (t, s, frame, variant) -> Surface
+_OBJECT_CACHE = OrderedDict()  # (t, s, frame, variant) -> Surface; LRU-ordered
+_OBJECT_CACHE_MAX = 600
+
+
+def _check_sprite_cache_version():
+    """Wipe the writable sprite cache when SPRITE_CACHE_VERSION changes.
+
+    Prevents stale PNGs (from an older render pass) from shadowing the
+    current renderer's output — that was the "asset glitch" class where
+    a user who updated the game saw the old visuals.
+    """
+    try:
+        os.makedirs(SPRITES_DIR, exist_ok=True)
+    except OSError:
+        return
+    want = SPRITE_CACHE_VERSION
+    cur = None
+    try:
+        with open(_SPRITE_VERSION_MARKER, encoding="utf-8") as f:
+            cur = f.read().strip()
+    except OSError:
+        pass
+    if cur == want:
+        return
+    # Version mismatch (or first run) — nuke old PNGs. We only touch the
+    # writable cache; the bundled sprites dir stays untouched.
+    try:
+        for fn in os.listdir(SPRITES_DIR):
+            if fn.endswith(".png"):
+                try:
+                    os.remove(os.path.join(SPRITES_DIR, fn))
+                except OSError:
+                    pass
+        with open(_SPRITE_VERSION_MARKER, "w", encoding="utf-8") as f:
+            f.write(want)
+    except OSError:
+        pass
+
+
+_check_sprite_cache_version()
 
 # Static types get a single image. Animated types get SPRITE_FRAMES.
 _ANIMATED_TYPES = {
@@ -413,10 +563,20 @@ def _frame_count(t):
     return SPRITE_FRAMES if t in _ANIMATED_TYPES else 1
 
 
-def _sprite_path(t, s, frame):
+def _sprite_filename(t, s, frame):
     if t in _ANIMATED_TYPES:
-        return os.path.join(SPRITES_DIR, f"{t}_s{s}_f{frame}.png")
-    return os.path.join(SPRITES_DIR, f"{t}_s{s}.png")
+        return f"{t}_s{s}_f{frame}.png"
+    return f"{t}_s{s}.png"
+
+
+def _sprite_path(t, s, frame):
+    """Writable per-user sprite-cache path."""
+    return os.path.join(SPRITES_DIR, _sprite_filename(t, s, frame))
+
+
+def _bundled_sprite_path(t, s, frame):
+    """Read-only bundled sprite path."""
+    return os.path.join(BUNDLED_SPRITES_DIR, _sprite_filename(t, s, frame))
 
 
 # ---- HQ drawing primitives ------------------------------------------------
@@ -976,6 +1136,45 @@ def _render_trigger(surf, s, t):
 
 
 # ---- Dispatcher: render one sprite at a given size & frame -----------------
+# Table-driven sprite dispatch. Adding a new object type now means adding
+# a renderer function and one entry here (plus TYPE_COLS / editor palette
+# as before). The old if/elif chain was 55 lines and required adding
+# branches *after* the MODE_FROM_TYPE catch-all in the right order — the
+# table is order-insensitive because direct-type keys beat the set-membership
+# fallbacks below.
+_DIRECT_RENDERERS = {
+    T_BLOCK:       lambda s, b, f, v: _render_block(s, b, f),
+    T_SLAB:        lambda s, b, f, v: _render_slab(s, b, f),
+    T_SPIKE:       lambda s, b, f, v: _render_spike(s, b, f, half=False),
+    T_HALF_SPIKE:  lambda s, b, f, v: _render_spike(s, b, f, half=True),
+    T_SAW:         lambda s, b, f, v: _render_saw(s, b, f),
+    T_ORB:         lambda s, b, f, v: _render_orb(s, b, f),
+    T_DASH_ORB:    lambda s, b, f, v: _render_dash_orb(s, b, f),
+    T_TELEPORT_ORB: lambda s, b, f, v: _render_teleport_orb(s, b, f, link_label=v),
+    T_BLACK_ORB:   lambda s, b, f, v: _render_black_orb(s, b, f),
+    T_BLUE_ORB:    lambda s, b, f, v: _render_blue_orb(s, b, f),
+    T_GREEN_ORB:   lambda s, b, f, v: _render_green_orb(s, b, f),
+    T_PAD:         lambda s, b, f, v: _render_pad(s, b, f, blue=False),
+    T_BLUE_PAD:    lambda s, b, f, v: _render_pad(s, b, f, blue=True),
+    T_GRAV:        lambda s, b, f, v: _render_grav(s, b, f),
+    T_END:         lambda s, b, f, v: _render_end(s, b, f),
+    T_START:       lambda s, b, f, v: _render_start(s, b, f),
+    T_COIN:        lambda s, b, f, v: _render_coin(s, b, f),
+    T_CHECKPOINT:  lambda s, b, f, v: _render_checkpoint(s, b, f),
+    T_DECO_CRYSTAL: lambda s, b, f, v: _render_deco_crystal(s, b, f),
+    T_DECO_PILLAR:  lambda s, b, f, v: _render_deco_pillar(s, b, f),
+    T_DECO_GLOW:    lambda s, b, f, v: _render_deco_glow(s, b, f),
+}
+
+_TRIGGER_TYPES_SET = {
+    T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
+    T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
+}
+
+_SIZE_PORTAL_TYPES = {T_MODE_MINI, T_MODE_BIG}
+_DUAL_PORTAL_TYPES = {T_MODE_DUAL, T_MODE_SOLO}
+
+
 def _render_sprite(t, s, frame_t, variant=None):
     """Render ONE sprite to a new (s,s) SRCALPHA surface.
 
@@ -983,58 +1182,18 @@ def _render_sprite(t, s, frame_t, variant=None):
     """
     big = s * _SUPERSAMPLE
     surf = pygame.Surface((big, big), pygame.SRCALPHA)
-    if t == T_BLOCK:
-        _render_block(surf, big, frame_t)
-    elif t == T_SLAB:
-        _render_slab(surf, big, frame_t)
-    elif t == T_SPIKE:
-        _render_spike(surf, big, frame_t, half=False)
-    elif t == T_HALF_SPIKE:
-        _render_spike(surf, big, frame_t, half=True)
-    elif t == T_SAW:
-        _render_saw(surf, big, frame_t)
-    elif t == T_ORB:
-        _render_orb(surf, big, frame_t)
-    elif t == T_DASH_ORB:
-        _render_dash_orb(surf, big, frame_t)
-    elif t == T_TELEPORT_ORB:
-        _render_teleport_orb(surf, big, frame_t, link_label=variant)
-    elif t == T_BLACK_ORB:
-        _render_black_orb(surf, big, frame_t)
-    elif t == T_BLUE_ORB:
-        _render_blue_orb(surf, big, frame_t)
-    elif t == T_GREEN_ORB:
-        _render_green_orb(surf, big, frame_t)
-    elif t == T_PAD:
-        _render_pad(surf, big, frame_t, blue=False)
-    elif t == T_BLUE_PAD:
-        _render_pad(surf, big, frame_t, blue=True)
-    elif t == T_GRAV:
-        _render_grav(surf, big, frame_t)
-    elif t == T_END:
-        _render_end(surf, big, frame_t)
+    fn = _DIRECT_RENDERERS.get(t)
+    if fn is not None:
+        fn(surf, big, frame_t, variant)
+    elif t in _SIZE_PORTAL_TYPES:
+        _render_size_portal(surf, big, frame_t, t)
+    elif t in _DUAL_PORTAL_TYPES:
+        _render_dual_portal(surf, big, frame_t, t)
     elif t in MODE_FROM_TYPE:
         _render_mode_portal(surf, big, frame_t, t)
-    elif t in (T_MODE_MINI, T_MODE_BIG):
-        _render_size_portal(surf, big, frame_t, t)
-    elif t in (T_MODE_DUAL, T_MODE_SOLO):
-        _render_dual_portal(surf, big, frame_t, t)
     elif t in SPEED_VALUES:
         _render_speed_portal(surf, big, frame_t, t)
-    elif t == T_START:
-        _render_start(surf, big, frame_t)
-    elif t == T_COIN:
-        _render_coin(surf, big, frame_t)
-    elif t == T_CHECKPOINT:
-        _render_checkpoint(surf, big, frame_t)
-    elif t == T_DECO_CRYSTAL:
-        _render_deco_crystal(surf, big, frame_t)
-    elif t == T_DECO_PILLAR:
-        _render_deco_pillar(surf, big, frame_t)
-    elif t == T_DECO_GLOW:
-        _render_deco_glow(surf, big, frame_t)
-    elif t in (T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
-               T_PULSE_TRIGGER, T_ROTATE_TRIGGER):
+    elif t in _TRIGGER_TYPES_SET:
         _render_trigger(surf, big, t)
     else:
         col = TYPE_COLS.get(t, (200, 200, 200))
@@ -1047,33 +1206,40 @@ def _load_or_render(t, s, frame, variant=None):
     key = (t, s, frame, variant)
     cached = _OBJECT_CACHE.get(key)
     if cached is not None:
+        _OBJECT_CACHE.move_to_end(key)
         return cached
     # Try to load from disk (only non-variant sprites are cached on disk).
+    # The user cache is checked first so it overrides the bundled sprite
+    # after a version-bump rebake; if that misses we fall back to the
+    # read-only bundled dir, and only then do we render from scratch.
     if variant is None:
-        path = _sprite_path(t, s, frame)
-        if os.path.isfile(path):
-            try:
-                img = pygame.image.load(path).convert_alpha()
-                _OBJECT_CACHE[key] = img
-                return img
-            except (pygame.error, OSError):
-                pass
+        for path in (_sprite_path(t, s, frame),
+                     _bundled_sprite_path(t, s, frame)):
+            if os.path.isfile(path):
+                try:
+                    img = pygame.image.load(path).convert_alpha()
+                    _OBJECT_CACHE[key] = img
+                    while len(_OBJECT_CACHE) > _OBJECT_CACHE_MAX:
+                        _OBJECT_CACHE.popitem(last=False)
+                    return img
+                except (pygame.error, OSError):
+                    pass
     frames = _frame_count(t)
     frame_t = (frame / frames) if frames > 0 else 0.0
     img = _render_sprite(t, s, frame_t, variant)
     _OBJECT_CACHE[key] = img
-    # Persist rendered non-variant sprites to disk for next launch.
+    # Persist rendered non-variant sprites to the USER cache so the next
+    # launch avoids the rerender. Writes to the bundled dir are not
+    # attempted (and would fail in a frozen build anyway).
     if variant is None:
         try:
             os.makedirs(SPRITES_DIR, exist_ok=True)
             pygame.image.save(img, _sprite_path(t, s, frame))
         except (pygame.error, OSError):
             pass
-    # Prevent unbounded cache growth (e.g., lots of link variants).
-    if len(_OBJECT_CACHE) > 600:
-        # Drop half the cache (keep most recent ~300).
-        for k in list(_OBJECT_CACHE.keys())[:300]:
-            _OBJECT_CACHE.pop(k, None)
+    # Evict least-recently-used entries to cap memory.
+    while len(_OBJECT_CACHE) > _OBJECT_CACHE_MAX:
+        _OBJECT_CACHE.popitem(last=False)
     return img
 
 

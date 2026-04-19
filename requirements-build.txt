@@ -1,0 +1,14 @@
+# Build-time-only deps. Runtime deps live in requirements.txt; this file
+# pulls those in too so a packager venv is `pip install -r
+# requirements-build.txt` away from working.
+#
+# Usage:
+#   python -m venv .venv-build
+#   source .venv-build/bin/activate   # Windows: .venv-build\Scripts\activate
+#   pip install -r requirements-build.txt
+#   pyinstaller GeometryDashTemu.spec
+-r requirements.txt
+
+# 6.15+ is required for Python 3.13/3.14 support. If you're on 3.12
+# `pyinstaller==6.11.0` also works.
+pyinstaller>=6.15.0,<7

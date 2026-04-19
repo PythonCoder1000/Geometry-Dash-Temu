@@ -147,18 +147,6 @@ def jump_pressed():
     return fired
 
 
-def back_pressed():
-    """True if the cancel button (B) is currently held."""
-    _refresh()
-    return _safe_button(BTN_BACK)
-
-
-def pause_pressed():
-    """True if Start is currently held."""
-    _refresh()
-    return _safe_button(BTN_PAUSE)
-
-
 def reset_edge_state():
     """Clear edge-detected state — call on scene transitions so a leftover
     button hold doesn't trigger a phantom press in the next loop."""

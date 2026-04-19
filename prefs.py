@@ -14,11 +14,11 @@ Keys in use:
 import json
 import os
 
-from constants import LEVELS_DIR
+from constants import PREFS_FILE
 
-# Sit the prefs file next to the levels directory so it shares the same
-# writeable root in packaged builds.
-_PREFS_PATH = os.path.join(os.path.dirname(LEVELS_DIR), "prefs.json")
+# Canonical location is resolved in constants.py — packaged builds get a
+# per-user writable dir, dev checkouts (GDT_DEV_LOCAL=1) use the repo.
+_PREFS_PATH = PREFS_FILE
 _cache = None
 
 

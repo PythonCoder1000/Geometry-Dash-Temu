@@ -154,10 +154,22 @@ def run_music_menu(screen, clock):
                 txt(screen, "▶", badge_x, row.y + 8, 20, (140, 240, 140))
                 badge_x += 24
 
-            txt(screen, t["name"], badge_x + 4, row.y + 11, 17, C_WHITE)
+            # Clip long names to a width that guarantees no overlap with
+            # the "[file]" tag or the Set ★ button. Size-17 char ≈ 9 px,
+            # set button starts at row.right - 200, so the name budget
+            # is ≈ (row.right - 200) - (badge_x + 4) - 10 px safety.
+            name_text = t["name"]
+            name_budget_px = (row.right - 200) - (badge_x + 4) - 10
+            max_chars = max(6, name_budget_px // 9)
+            if len(name_text) > max_chars:
+                name_text = name_text[:max_chars - 1] + "…"
+            txt(screen, name_text, badge_x + 4, row.y + 11, 17, C_WHITE)
             kind = t.get("type", "file")
             ttag = "[generated]" if kind == "generated" else "[file]"
-            txt(screen, ttag, row.right - 100, row.y + 13, 12, C_GRAY)
+            # Right-aligned so "[generated]" (wider than "[file]") stays
+            # inside the row rather than trailing past row.right.
+            txt(screen, ttag, row.right - 110, row.y + 14, 11, C_GRAY,
+                center=True)
 
             # Two micro-buttons on the right: "Set ★" and "Stop" (if playing).
             set_btn = pygame.Rect(row.right - 200, row.y + 6, 86, row.h - 12)
@@ -228,7 +240,27 @@ def run_music_menu(screen, clock):
         if click_pos and b_back.collidepoint(click_pos):
             return
 
+        # ---- Add music (file-picker dialog) -----------------------------
+        # Sits in the row below the track controls so it doesn't crowd
+        # the Mute/Prev/Next line. tkinter.filedialog is stdlib on all
+        # platforms we build for; music.pick_music_file_dialog falls
+        # back to None on headless environments.
+        add_y = panel.bottom - 40
+        b_add = btn(screen, "+ Add music from file...",
+                    panel.centerx, add_y, 280, 30, (80, 130, 180),
+                    mpos, font_size=13)
+        if click_pos and b_add.collidepoint(click_pos):
+            picked = music.pick_music_file_dialog("Add music file")
+            guard.reset()
+            if picked:
+                imported = music.import_music_file(picked)
+                if imported is None:
+                    txt(screen, "Import failed — check file format",
+                        panel.centerx, add_y + 20, 12, C_DANGER, True)
+                    pygame.display.flip()
+                    pygame.time.wait(600)
+
         txt(screen, "Space: play/stop  ·  M: mute  ·  Esc: back",
-            panel.centerx, panel.bottom - 22, 12, C_GRAY, True)
+            panel.centerx, panel.bottom - 8, 12, C_GRAY, True)
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())

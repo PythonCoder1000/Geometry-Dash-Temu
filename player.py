@@ -11,9 +11,6 @@ import pygame
 
 from constants import (
     CELL, WIDTH, HEIGHT, PLAYER_SIZE, MINI_PLAYER_SIZE, PLAYER_START_GX,
-    BASE_MOVE_SPEED, GRAVITY, SHIP_GRAVITY, SHIP_THRUST,
-    JUMP_FORCE, PAD_FORCE, BALL_FLIP_FORCE, DASH_SPEED, DASH_TIME, WAVE_ANGLE,
-    UFO_JUMP_FORCE, SPIDER_TELEPORT_RANGE,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_FROM_TYPE, SPEED_VALUES, PLAYER_COLORS, PLAYER_ICONS,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
@@ -23,13 +20,14 @@ from constants import (
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
     C_PLAYER, C_DASH_ORB, C_PAD, C_MODE_WAVE, C_MODE_UFO, C_MODE_SPIDER,
-    DEFAULT_MOVE_CURVE, PAD_TYPES,
+    DEFAULT_MOVE_CURVE, PAD_TYPES, ORB_TYPES, SOLID_TYPES,
 )
 from graphics import (
     cell_rect, slab_rect, spike_hitboxes, pad_trigger_rect, saw_hitbox,
     lighter, darker, clamp, draw_cube_icon_glyph,
 )
 from levels import get_group_id
+from physics import PhysicsParams, DEFAULT_PARAMS
 import settings
 
 
@@ -69,13 +67,32 @@ def _curve_progress(curve, total_area, t):
 # ---------------------------------------------------------------------------
 
 class Player:
-    def __init__(self, objects):
+    def __init__(self, objects, params=None):
         self.objects = objects
+        # PhysicsParams is read on every physics tick — stash locally so
+        # subclasses (e.g. _SimPlayer in autobot.py) inherit the same
+        # feel. None falls through to the global defaults so the shim
+        # doesn't change behavior for callers that haven't opted in.
+        self.params = params if params is not None else DEFAULT_PARAMS
         for o in self.objects:
             o.setdefault("_orig_x", o["x"])
             o.setdefault("_orig_y", o["y"])
         self._teleport_index = {}
         self._rebuild_teleport_index()
+        # Trigger target indexes — built once and reused by every move /
+        # rotate trigger fire. Before, each fire scanned `self.objects`
+        # twice (once to collect group oids, once to filter by the oid
+        # set), so a trigger-heavy level paid O(N_objects × N_triggers)
+        # on every crossing.
+        self._by_oid = {}
+        self._by_group = {}
+        for o in self.objects:
+            oid = o.get("oid")
+            if oid:
+                self._by_oid[oid] = o
+            g = o.get("group")
+            if g:
+                self._by_group.setdefault(g, []).append(o)
         # End walls span the full screen height: collision is x-only.
         # Sorted so we can stop scanning once player.x is past all of them.
         self._end_walls_x = sorted({
@@ -95,6 +112,44 @@ class Player:
                     groups.setdefault(gid, []).append(o)
         self._teleport_index = groups
 
+    def _resolve_targets(self, trig):
+        """Return the list of objects a move/rotate/etc. trigger targets.
+
+        Handles the `target_oid` / `target_oids` / `group` resolution in
+        one place (previously open-coded at every trigger's start-site).
+        Preserves identity ordering — oids first, then group members, with
+        any duplicates dropped.
+        """
+        seen = set()
+        out = []
+        oids = trig.get("target_oids")
+        if oids:
+            for oid in oids:
+                if oid and oid not in seen:
+                    o = self._by_oid.get(oid)
+                    if o is not None:
+                        seen.add(oid)
+                        out.append(o)
+        single = trig.get("target_oid")
+        if single and single not in seen:
+            o = self._by_oid.get(single)
+            if o is not None:
+                seen.add(single)
+                out.append(o)
+        group = trig.get("group")
+        if group:
+            for o in self._by_group.get(group, ()):
+                oid = o.get("oid")
+                # Skip objects already covered by the explicit oid list;
+                # unident group-members (no oid) still get appended so
+                # purely-group-addressed targets aren't dropped.
+                if oid is None:
+                    out.append(o)
+                elif oid not in seen:
+                    seen.add(oid)
+                    out.append(o)
+        return out
+
     def reset(self):
         for o in self.objects:
             if "_orig_x" in o:
@@ -102,7 +157,15 @@ class Player:
                 o["y"] = o["_orig_y"]
             o.pop("_fx", None)
             o.pop("_fy", None)
+            o.pop("_cell", None)
         self.move_animations = []
+        # `id(obj) -> obj` for every object ever touched by a move trigger
+        # this session. The autobot's `_restore` needs to un-move objects
+        # that moved *after* a snapshot was taken; this is the universe
+        # of candidates to check. Rebuilt on reset because positions are
+        # restored to `_orig_x`/`_orig_y` above.
+        self._ever_moved = {}
+        self._rebuild_spatial_index()
         self.x, self.y = self._spawn_point()
         self.vy = 0.0
         self.on_ground = False
@@ -112,10 +175,9 @@ class Player:
         self.grav = 1
         self.trail = []
         self.passed = set()
-        self.mirror_passed = set()
         self.frame = 0
         self.mode = MODE_CUBE
-        self.move_speed = BASE_MOVE_SPEED
+        self.move_speed = self.params.base_move_speed
         self.dash_timer = 0
         self.input_buffer = 0
         # Mirror keeps its own input buffer so a single click registers for
@@ -232,44 +294,80 @@ class Player:
         self.trail = []
         return True
 
+    def _rebuild_spatial_index(self):
+        """(Re)build the (gx, gy) -> list[obj] index from current positions.
+
+        Called on init and reset. Any stale `_cell` markers are cleared by
+        the reset-loop before this runs, so every object gets reinserted.
+        """
+        self._spatial_index = {}
+        for o in self.objects:
+            cell = (o["x"], o["y"])
+            o["_cell"] = cell
+            self._spatial_index.setdefault(cell, []).append(o)
+
+    def _spatial_rebucket(self, obj):
+        """Move obj between index buckets when its (x, y) cell changes."""
+        old = obj.get("_cell")
+        new = (obj["x"], obj["y"])
+        if old == new:
+            return
+        if old is not None:
+            bucket = self._spatial_index.get(old)
+            if bucket is not None:
+                for i in range(len(bucket)):
+                    if bucket[i] is obj:
+                        bucket.pop(i)
+                        break
+                if not bucket:
+                    self._spatial_index.pop(old, None)
+        obj["_cell"] = new
+        self._spatial_index.setdefault(new, []).append(obj)
+
     def nearby_for_rect(self, rect, extra=2):
         left = rect.left // CELL - extra
         right = rect.right // CELL + extra
         top = rect.top // CELL - extra
         bottom = rect.bottom // CELL + extra
-        return [o for o in self.objects
-                if left <= o["x"] <= right and top <= o["y"] <= bottom]
+        out = []
+        index = self._spatial_index
+        for gx in range(left, right + 1):
+            for gy in range(top, bottom + 1):
+                bucket = index.get((gx, gy))
+                if bucket:
+                    out.extend(bucket)
+        return out
 
     # ---- actions ----------------------------------------------------------
     def jump(self, force=None):
         if force is None:
-            force = JUMP_FORCE
+            force = self.params.jump_force
         self.vy = force * self.grav
         self.on_ground = False
 
     def activate_orb(self):
         if self.mode == MODE_BALL:
             self.grav *= -1
-            self.vy = BALL_FLIP_FORCE * self.grav
+            self.vy = self.params.ball_flip_force * self.grav
         elif self.mode == MODE_SHIP:
-            self.vy = JUMP_FORCE * 0.85 * self.grav
+            self.vy = self.params.jump_force * 0.85 * self.grav
         elif self.mode == MODE_WAVE:
             pass
         elif self.mode == MODE_UFO:
-            self.vy = JUMP_FORCE * 0.9 * self.grav
+            self.vy = self.params.jump_force * 0.9 * self.grav
         elif self.mode == MODE_SPIDER:
             self._spider_teleport()
         else:
-            self.vy = JUMP_FORCE * self.grav
+            self.vy = self.params.jump_force * self.grav
         self.on_ground = False
 
     def activate_dash_orb(self):
         self.activate_orb()
-        self.dash_timer = DASH_TIME
+        self.dash_timer = self.params.dash_time
         self.input_buffer = 0
 
     def activate_black_orb(self):
-        self.vy = -JUMP_FORCE * self.grav
+        self.vy = -self.params.jump_force * self.grav
         self.on_ground = False
         self.input_buffer = 0
 
@@ -280,7 +378,7 @@ class Player:
 
     def activate_green_orb(self):
         """Green orb: jump in the current gravity direction (opposite of blue)."""
-        self.vy = JUMP_FORCE * self.grav
+        self.vy = self.params.jump_force * self.grav
         self.on_ground = False
         self.input_buffer = 0
 
@@ -314,8 +412,8 @@ class Player:
         """
         probe = self.rect()
         best = None
-        max_dist = SPIDER_TELEPORT_RANGE * CELL
-        for o in self.nearby_for_rect(probe, extra=SPIDER_TELEPORT_RANGE + 1):
+        max_dist = self.params.spider_teleport_range * CELL
+        for o in self.nearby_for_rect(probe, extra=self.params.spider_teleport_range + 1):
             if o["t"] != T_BLOCK:
                 continue
             br = cell_rect(o["x"], o["y"])
@@ -342,18 +440,7 @@ class Player:
 
     def _start_move_trigger(self, trig):
         """Kick off the move animation for one or more target oids."""
-        oids = list(trig.get("target_oids") or
-                    ([trig.get("target_oid", 0)] if trig.get("target_oid", 0) else []))
-        # Group resolution: any object with matching `group` is also a target.
-        group = trig.get("group")
-        if group:
-            for o in self.objects:
-                if o.get("group") == group and o.get("oid"):
-                    oids.append(o["oid"])
-        oids = list(dict.fromkeys(oids))  # de-dupe
-        if not oids:
-            return
-        targets = [o for o in self.objects if o.get("oid") in oids]
+        targets = self._resolve_targets(trig)
         if not targets:
             return
         duration = max(1, int(trig.get("duration", 30)))
@@ -399,18 +486,7 @@ class Player:
         keep their visual rotation in their `r` field. Resolves group ids
         too — if `group` is set on the trigger, all objects with the
         matching group field are added as targets."""
-        oids = list(trig.get("target_oids") or
-                    ([trig.get("target_oid", 0)] if trig.get("target_oid", 0) else []))
-        # Group resolution: collect oids of any object with matching group.
-        group = trig.get("group")
-        if group:
-            for o in self.objects:
-                if o.get("group") == group and o.get("oid"):
-                    oids.append(o["oid"])
-        oids = list(dict.fromkeys(oids))  # de-dupe, preserve order
-        if not oids:
-            return
-        targets = [o for o in self.objects if o.get("oid") in oids]
+        targets = self._resolve_targets(trig)
         if not targets:
             return
         spin_dps = float(trig.get("spin", 90.0))  # degrees per second
@@ -457,6 +533,13 @@ class Player:
                 obj["y"] = int(round(anim["ey"]))
                 obj.pop("_fx", None)
                 obj.pop("_fy", None)
+            # Keep the spatial index in sync with the new (x, y) cell so
+            # nearby_for_rect can find the moved object at its new location.
+            self._spatial_rebucket(obj)
+            # Track every object ever touched by a move animation so the
+            # autobot's `_restore` can un-move entries that drifted since
+            # the snapshot was taken.
+            self._ever_moved[id(obj)] = obj
         self.move_animations = remaining
 
     def set_mode(self, mode):
@@ -467,7 +550,7 @@ class Player:
             self.vy = 0.0
 
     def set_speed(self, speed_type):
-        self.move_speed = SPEED_VALUES.get(speed_type, BASE_MOVE_SPEED)
+        self.move_speed = SPEED_VALUES.get(speed_type, self.params.base_move_speed)
 
     def _set_size(self, new_size):
         """Change the player's bounding size while preserving the
@@ -562,13 +645,19 @@ class Player:
 
     def _resolve_y_collision(self, dy_step):
         pr = self.rect()
-        blocks = [o for o in self.nearby_for_rect(pr) if self._solid_rect(o) is not None]
-        if dy_step > 0:
-            blocks.sort(key=lambda o: self._solid_rect(o).y)
-        elif dy_step < 0:
-            blocks.sort(key=lambda o: -self._solid_rect(o).y)
-        for o in blocks:
+        # Materialise each block's solid rect once; the sort key used to
+        # re-call _solid_rect per comparison, wasting O(n log n) Rect
+        # allocations in the hottest collision loop.
+        blocks = []
+        for o in self.nearby_for_rect(pr):
             br = self._solid_rect(o)
+            if br is not None:
+                blocks.append((o, br))
+        if dy_step > 0:
+            blocks.sort(key=lambda ob: ob[1].y)
+        elif dy_step < 0:
+            blocks.sort(key=lambda ob: -ob[1].y)
+        for o, br in blocks:
             if not pr.colliderect(br):
                 continue
             if self.grav == 1:
@@ -608,12 +697,10 @@ class Player:
                     and prev_right <= wall_x):
                 self.won = True
                 return True
-        orb_types = (T_ORB, T_DASH_ORB, T_BLACK_ORB, T_BLUE_ORB,
-                     T_GREEN_ORB, T_TELEPORT_ORB)
         activated_orb_cell = None
         for o in self.nearby_for_rect(trigger_rect, 2):
             t = o["t"]
-            if t == T_BLOCK or t == T_SLAB or t == T_START:
+            if t in SOLID_TYPES or t == T_START:
                 continue
             key = (t, o["x"], o["y"])
             if t in (T_SPIKE, T_HALF_SPIKE):
@@ -631,11 +718,11 @@ class Player:
                 if trigger_rect.colliderect(pad_trigger_rect(o["x"], o["y"], o.get("r", 0))):
                     if t == T_BLUE_PAD:
                         self.flip_gravity()
-                        self.vy = PAD_FORCE * 0.5 * self.grav
+                        self.vy = self.params.pad_force * 0.5 * self.grav
                     elif self.mode == MODE_SHIP:
-                        self.vy = JUMP_FORCE * 0.95 * self.grav
+                        self.vy = self.params.jump_force * 0.95 * self.grav
                     elif self.mode != MODE_WAVE:
-                        self.vy = PAD_FORCE * self.grav
+                        self.vy = self.params.pad_force * self.grav
                     self.on_ground = False
                     self.passed.add(key)
                 continue
@@ -653,7 +740,7 @@ class Player:
                 # Mark a request flag for the play loop.
                 self._checkpoint_request = True
                 continue
-            if t in orb_types and key not in self.passed:
+            if t in ORB_TYPES and key not in self.passed:
                 cell = (o["x"], o["y"])
                 if activated_orb_cell is None:
                     if self.input_buffer <= 0:
@@ -757,44 +844,51 @@ class Player:
         # Mirrors update()'s mode dispatch but writes into m["vy"] /
         # m["on_ground"] instead of self.vy / self.on_ground.
         if mmode == MODE_SHIP:
-            m["vy"] += SHIP_GRAVITY * m["grav"]
+            m["vy"] += self.params.ship_gravity * m["grav"]
             if input_held:
-                m["vy"] -= SHIP_THRUST * m["grav"]
+                m["vy"] -= self.params.ship_thrust * m["grav"]
             m["vy"] = clamp(m["vy"], -13.0, 13.0)
         elif mmode == MODE_WAVE:
             direction = -1 if input_held else 1
             m["vy"] = self.move_speed * direction * m["grav"]
         elif mmode == MODE_UFO:
-            m["vy"] += GRAVITY * m["grav"]
+            m["vy"] += self.params.gravity * m["grav"]
             m["vy"] = clamp(m["vy"], -18.0, 18.0)
             if input_pressed:
-                m["vy"] = UFO_JUMP_FORCE * m["grav"]
+                m["vy"] = self.params.ufo_jump_force * m["grav"]
                 m["on_ground"] = False
         elif mmode == MODE_SPIDER:
-            m["vy"] += GRAVITY * m["grav"]
+            m["vy"] += self.params.gravity * m["grav"]
             m["vy"] = clamp(m["vy"], -18.0, 18.0)
             if input_pressed and m["on_ground"]:
                 self._mirror_spider_teleport()
         elif mmode == MODE_BALL:
-            m["vy"] += GRAVITY * m["grav"]
+            m["vy"] += self.params.gravity * m["grav"]
             m["vy"] = clamp(m["vy"], -18.0, 18.0)
             if input_pressed and m["on_ground"]:
                 m["grav"] = -m["grav"]
-                m["vy"] = BALL_FLIP_FORCE * m["grav"]
+                m["vy"] = self.params.ball_flip_force * m["grav"]
                 m["on_ground"] = False
         else:  # MODE_CUBE (default)
-            m["vy"] += GRAVITY * m["grav"]
+            m["vy"] += self.params.gravity * m["grav"]
             m["vy"] = clamp(m["vy"], -18.0, 18.0)
             if input_held and m["on_ground"]:
-                m["vy"] = JUMP_FORCE * m["grav"]
+                m["vy"] = self.params.jump_force * m["grav"]
                 m["on_ground"] = False
         m["on_ground"] = False
-        # Step y in small substeps so we don't tunnel through thin platforms
+        # Track the pre-step y so the hazard sweep below covers the full
+        # vertical travel — a spike between prev_y and final y would
+        # otherwise be missed when |vy| > the ±6 trigger inflate.
+        prev_y = m["y"]
+        # Step y in small substeps so we don't tunnel through thin platforms.
+        # `mrect` is allocated once and reused via topleft assignment — see
+        # A7 in CR4 for why the allocation rate matters on fast falls.
         steps = max(1, int(math.ceil(abs(m["vy"]) / 4.0)))
         dy_step = m["vy"] / steps
+        mrect = pygame.Rect(round(self.x), round(m["y"]), msize, msize)
         for _ in range(steps):
             m["y"] += dy_step
-            mrect = pygame.Rect(round(self.x), round(m["y"]), msize, msize)
+            mrect.topleft = (round(self.x), round(m["y"]))
             # Block collision (y only)
             for o in self.nearby_for_rect(mrect):
                 br = self._solid_rect(o)
@@ -817,18 +911,30 @@ class Player:
                         else:
                             m["y"] = br.top - msize
                             m["vy"] = 0.0
-                    mrect = pygame.Rect(round(self.x), round(m["y"]),
-                                        msize, msize)
+                    mrect.topleft = (round(self.x), round(m["y"]))
         # Off-screen kill
         if m["y"] > HEIGHT + 300 or m["y"] < -500:
             m["alive"] = False
             return
-        # Hazard collision (spikes, saws) using mirror's hitbox.
+        # Hazard collision (spikes, saws) using mirror's hitbox. Sweep the
+        # union of the pre-step and post-step rects so fast vertical moves
+        # (UFO / spider at max vy) can't tunnel past a spike between
+        # substeps. Both the broad-phase trigger_rect and the narrow-phase
+        # hazard_rect are widened to the union — otherwise a spike halfway
+        # through the sweep would be in trigger_rect but miss hazard_rect.
         shrink = max(2, int(6 * msize / PLAYER_SIZE))
-        hazard_rect = pygame.Rect(round(self.x) + shrink, round(m["y"]) + shrink,
-                                  msize - shrink * 2, msize - shrink * 2)
-        trigger_rect = pygame.Rect(round(self.x), round(m["y"]),
-                                   msize, msize).inflate(6, 6)
+        final_rect = pygame.Rect(round(self.x), round(m["y"]),
+                                 msize, msize)
+        prev_rect = pygame.Rect(round(self.x), round(prev_y),
+                                msize, msize)
+        prev_hazard = pygame.Rect(
+            round(self.x) + shrink, round(prev_y) + shrink,
+            msize - shrink * 2, msize - shrink * 2)
+        final_hazard = pygame.Rect(
+            round(self.x) + shrink, round(m["y"]) + shrink,
+            msize - shrink * 2, msize - shrink * 2)
+        hazard_rect = prev_hazard.union(final_hazard)
+        trigger_rect = prev_rect.union(final_rect).inflate(6, 6)
         for o in self.nearby_for_rect(trigger_rect, 2):
             t = o["t"]
             if t in (T_SPIKE, T_HALF_SPIKE):
@@ -859,7 +965,7 @@ class Player:
         elif mmode == MODE_UFO:
             m["angle"] = clamp(-m["vy"] * 2.8, -30, 30)
         elif mmode == MODE_WAVE:
-            m["angle"] = WAVE_ANGLE * (-1 if (input_held and m["grav"] == 1) or
+            m["angle"] = self.params.wave_angle * (-1 if (input_held and m["grav"] == 1) or
                                        (not input_held and m["grav"] == -1) else 1)
         elif mmode == MODE_BALL:
             if m["on_ground"]:
@@ -886,8 +992,8 @@ class Player:
         msize = int(m["size"])
         probe = pygame.Rect(round(self.x), round(m["y"]), msize, msize)
         best = None
-        max_dist = SPIDER_TELEPORT_RANGE * CELL
-        for o in self.nearby_for_rect(probe, extra=SPIDER_TELEPORT_RANGE + 1):
+        max_dist = self.params.spider_teleport_range * CELL
+        for o in self.nearby_for_rect(probe, extra=self.params.spider_teleport_range + 1):
             if o["t"] != T_BLOCK:
                 continue
             br = cell_rect(o["x"], o["y"])
@@ -965,9 +1071,9 @@ class Player:
                         pad_trigger_rect(o["x"], o["y"], o.get("r", 0))):
                     if t == T_BLUE_PAD:
                         m["grav"] *= -1
-                        m["vy"] = PAD_FORCE * 0.5 * m["grav"]
+                        m["vy"] = self.params.pad_force * 0.5 * m["grav"]
                     else:
-                        m["vy"] = PAD_FORCE * m["grav"]
+                        m["vy"] = self.params.pad_force * m["grav"]
                     m["on_ground"] = False
                     self.passed.add(key)
                 continue
@@ -993,13 +1099,13 @@ class Player:
                 elif cell != activated_orb_cell:
                     continue
                 if t == T_ORB:
-                    m["vy"] = JUMP_FORCE * m["grav"]
+                    m["vy"] = self.params.jump_force * m["grav"]
                 elif t == T_BLUE_ORB:
                     m["grav"] *= -1
                 elif t == T_GREEN_ORB:
-                    m["vy"] = JUMP_FORCE * m["grav"]
+                    m["vy"] = self.params.jump_force * m["grav"]
                 elif t == T_BLACK_ORB:
-                    m["vy"] = -JUMP_FORCE * m["grav"]
+                    m["vy"] = -self.params.jump_force * m["grav"]
                 m["on_ground"] = False
                 self.passed.add(key)
                 continue
@@ -1079,6 +1185,11 @@ class Player:
         # evaluated against this so that teleport orbs that sweep backward
         # through the finish column don't trigger a premature win.
         self._x_at_frame_start = self.x
+        # Stash on_ground BEFORE any mode-physics can clear or change it.
+        # Portal triggers (e.g. _enter_dual) fire mid-substep and read this
+        # to know whether the player was stably grounded at the start of
+        # the frame — before any jump / thrust lifted them off.
+        self._was_on_ground = self.on_ground
         self._step_move_animations()
         self._step_rotate_triggers()
         # Drop pulse triggers that have expired.
@@ -1091,7 +1202,12 @@ class Player:
             self._grav_flip_grace -= 1
         if self.frame % 3 == 0:
             self.trail.append([self.x, self.y, self.angle, 100])
-        self.trail = [[x, y, a, al - 5] for x, y, a, al in self.trail if al > 5]
+        # In-place alpha decrement + pop-expired-from-front — avoids the
+        # 25-allocations-per-frame churn of rebuilding the list every tick.
+        for seg in self.trail:
+            seg[3] -= 5
+        while self.trail and self.trail[0][3] <= 5:
+            self.trail.pop(0)
         if input_pressed:
             self.input_buffer = 6
             self.mirror_input_buffer = 6
@@ -1102,44 +1218,38 @@ class Player:
                 self.mirror_input_buffer -= 1
         # Mode physics
         if self.mode == MODE_SHIP:
-            self.vy += SHIP_GRAVITY * self.grav
+            self.vy += self.params.ship_gravity * self.grav
             if input_held:
-                self.vy -= SHIP_THRUST * self.grav
+                self.vy -= self.params.ship_thrust * self.grav
             self.vy = clamp(self.vy, -13.0, 13.0)
         elif self.mode == MODE_WAVE:
             direction = -1 if input_held else 1
             self.vy = self.move_speed * direction * self.grav
         elif self.mode == MODE_UFO:
-            self.vy += GRAVITY * self.grav
+            self.vy += self.params.gravity * self.grav
             self.vy = clamp(self.vy, -18.0, 18.0)
             if input_pressed:
-                self.vy = UFO_JUMP_FORCE * self.grav
+                self.vy = self.params.ufo_jump_force * self.grav
                 self.on_ground = False
                 self.input_buffer = 0
         elif self.mode == MODE_SPIDER:
-            self.vy += GRAVITY * self.grav
+            self.vy += self.params.gravity * self.grav
             self.vy = clamp(self.vy, -18.0, 18.0)
             if input_pressed and self.on_ground:
                 self._spider_teleport()
                 self.input_buffer = 0
         else:
-            self.vy += GRAVITY * self.grav
+            self.vy += self.params.gravity * self.grav
             self.vy = clamp(self.vy, -18.0, 18.0)
             if self.mode == MODE_CUBE and input_held and self.on_ground:
                 self.jump()
             elif self.mode == MODE_BALL and input_pressed and self.on_ground:
                 self.grav *= -1
-                self.vy = BALL_FLIP_FORCE * self.grav
+                self.vy = self.params.ball_flip_force * self.grav
                 self.on_ground = False
-        dx = self.move_speed + (DASH_SPEED if self.dash_timer > 0 else 0.0)
+        dx = self.move_speed + (self.params.dash_speed if self.dash_timer > 0 else 0.0)
         if self.dash_timer > 0:
             self.dash_timer -= 1
-        # Stash the post-collision on_ground from last frame so portal
-        # triggers — which fire mid-substep, after on_ground gets cleared
-        # below — can ask "was this player stably grounded?" rather than
-        # always seeing False. _enter_dual reads this so a mirror spawned
-        # by a walking player inherits grounded state correctly.
-        self._was_on_ground = self.on_ground
         self.on_ground = False
         steps = max(1, int(math.ceil(max(abs(dx), abs(self.vy)) / 4.0)))
         dx_step = dx / steps
@@ -1157,7 +1267,12 @@ class Player:
             hazard_rect = self.hitbox()
             if self._handle_interactions(trigger_rect, hazard_rect, input_active):
                 return
-        if self.y > HEIGHT + 300 or self.y < -500:
+        # Fell off the *visible* screen: kill cutoff is relative to the
+        # camera's target Y so vertical-camera sections (ship segments
+        # rising into the sky, UFO drops) don't false-kill when the player
+        # is still in frame at a high/low world-Y.
+        _cam_y = self.target_cam_y
+        if self.y > _cam_y + HEIGHT + 300 or self.y < _cam_y - 500:
             self.alive = False
             return
         # Dual-mode: step the mirror body. If the mirror dies, the attempt
@@ -1165,7 +1280,7 @@ class Player:
         # sees the post-step x position.
         if self.mirror is not None:
             self._step_mirror(input_held, input_pressed)
-            if not self.mirror["alive"]:
+            if self.mirror is not None and not self.mirror["alive"]:
                 self.alive = False
                 return
         # Rotation (visual)
@@ -1174,7 +1289,7 @@ class Player:
         elif self.mode == MODE_UFO:
             self.angle = clamp(-self.vy * 2.8, -30, 30)
         elif self.mode == MODE_WAVE:
-            self.angle = WAVE_ANGLE * (-1 if (input_held and self.grav == 1) or
+            self.angle = self.params.wave_angle * (-1 if (input_held and self.grav == 1) or
                                        (not input_held and self.grav == -1) else 1)
         elif self.mode == MODE_BALL:
             if self.on_ground:
