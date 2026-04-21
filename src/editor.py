@@ -1855,6 +1855,16 @@ def run_editor(screen, clock, preload_filename=None):
                     save_meta["name"] = name_for_pub
                     save_meta["published"] = True
                     save_meta["requested_difficulty"] = req_diff
+                    # Fresh publish starts unverified / unrated / with
+                    # no community suggestion. A re-publish of an
+                    # already-verified level (e.g. big edits after
+                    # first beat) intentionally RESETS these so the
+                    # new version goes through the same verify →
+                    # rate lifecycle — big layout changes shouldn't
+                    # inherit an old player's difficulty opinion.
+                    save_meta["verified"] = False
+                    save_meta["rated"] = False
+                    save_meta["suggested_difficulty"] = ""
                     # Same author-stamp rationale as Save: without this
                     # the level ends up under author="Player" and the
                     # picker's "my levels" filter hides it from the

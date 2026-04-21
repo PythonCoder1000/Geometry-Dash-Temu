@@ -203,9 +203,22 @@ def _default_meta(name="Untitled"):
         "author": "Player",
         "difficulty": "Normal",
         "requested_difficulty": "Normal",
+        # Filled in by the first player (non-author) who beats a
+        # published level. Stays as an informational "community
+        # suggested" rating until ADMIN_USERNAME locks the final
+        # rating via the Rate Levels menu.
+        "suggested_difficulty": "",
         "description": "",
         "published": False,
+        # True when someone (not the author) has beaten a published
+        # level at least once. Official `difficulty` is still the
+        # publisher's request; `suggested_difficulty` holds the
+        # beater's opinion.
         "verified": False,
+        # True only after ADMIN_USERNAME rates the verified level.
+        # Once true, `difficulty` = admin's final rating; the
+        # "unconfirmed difficulty" label disappears from the UI.
+        "rated": False,
         "music": None,
         "attempts": 0,
         "best_progress": 0,
@@ -234,6 +247,11 @@ def _migrate(data):
         meta["requested_difficulty"] = meta["difficulty"]
     meta["published"] = bool(meta.get("published", False))
     meta["verified"] = bool(meta.get("verified", False))
+    meta["rated"] = bool(meta.get("rated", False))
+    _sg = meta.get("suggested_difficulty", "") or ""
+    if _sg and _sg not in DIFFICULTIES:
+        _sg = ""
+    meta["suggested_difficulty"] = _sg
     try:
         meta["attempts"] = max(0, int(meta.get("attempts", 0)))
     except (TypeError, ValueError):

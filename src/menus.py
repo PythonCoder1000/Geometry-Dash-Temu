@@ -187,9 +187,9 @@ def run_menu(screen, clock):
     """
     stars = _stars()
     mountains = _mountains()
-    (b_play, b_practice, b_edit, b_quit,
+    (b_play, b_practice, b_edit, b_rate, b_quit,
      r_mute_music, r_mute_sfx, r_gear, r_auth, r_help) = (
-        pygame.Rect(0, 0, 0, 0) for _ in range(9))
+        pygame.Rect(0, 0, 0, 0) for _ in range(10))
     if music.is_enabled() and not music.is_playing():
         music.play_menu_music()
     guard = ClickGuard()
@@ -219,7 +219,7 @@ def run_menu(screen, clock):
                 if not guard.consume_click(ev):
                     continue
                 _maybe_click_sfx(ev.pos, [
-                    b_play, b_practice, b_edit, b_quit,
+                    b_play, b_practice, b_edit, b_rate, b_quit,
                     r_mute_music, r_mute_sfx, r_gear, r_auth, r_help])
                 if r_help.collidepoint(ev.pos):
                     help_modal(screen, clock, "Main Menu — Help",
@@ -242,6 +242,8 @@ def run_menu(screen, clock):
                     return "practice"
                 if b_edit.collidepoint(ev.pos):
                     return "editor"
+                if b_rate.collidepoint(ev.pos):
+                    return "rate"
                 if b_quit.collidepoint(ev.pos):
                     return "quit"
         draw_bg(screen, pulse * 0.5, stars, mountains)
@@ -251,7 +253,11 @@ def run_menu(screen, clock):
                         col=C_PLAYER, glow_col=C_PLAYER,
                         glow_radius=_gr, glow_alpha=200)
 
-        # Vertical stack: Play · Practice · Level Editor · Quit.
+        # Vertical stack: Play · Practice · Level Editor · Quit. The
+        # admin user (ADMIN_USERNAME) gets an extra "RATE LEVELS" row
+        # slotted between Level Editor and Quit.
+        from .constants import ADMIN_USERNAME as _ADMIN
+        _show_rate = (_current_username() == _ADMIN)
         stack_cx = WIDTH // 2
         stack_y = 280
         gap = 60
@@ -260,8 +266,16 @@ def run_menu(screen, clock):
                          260, 50, (90, 130, 90), mpos)
         b_edit = btn(screen, "LEVEL EDITOR", stack_cx, stack_y + 2 * gap,
                      260, 50, (80, 100, 160), mpos)
-        b_quit = btn(screen, "QUIT", stack_cx, stack_y + 3 * gap,
-                     260, 50, C_DANGER, mpos)
+        if _show_rate:
+            b_rate = btn(screen, "RATE LEVELS",
+                         stack_cx, stack_y + 3 * gap,
+                         260, 50, (200, 150, 40), mpos)
+            b_quit = btn(screen, "QUIT", stack_cx, stack_y + 4 * gap,
+                         260, 50, C_DANGER, mpos)
+        else:
+            b_rate = pygame.Rect(0, 0, 0, 0)
+            b_quit = btn(screen, "QUIT", stack_cx, stack_y + 3 * gap,
+                         260, 50, C_DANGER, mpos)
 
         # Decorative squares orbiting behind the stack.
         for i in range(6):
@@ -679,7 +693,9 @@ def _draw_carousel_card(screen, x, y, w, h, fn, meta, practice):
     author = meta.get("author") or "Player"
     txt(screen, f"by {author}", x + w // 2, ty + 34, 14, C_GRAY, True)
 
-    # Difficulty pill.
+    # Difficulty pill — the official displayed difficulty. For
+    # rated levels this is ADMIN_USERNAME's final call; otherwise it
+    # mirrors the publisher's `requested_difficulty`.
     diff = meta.get("difficulty", "Normal")
     dc = DIFFICULTY_COLORS.get(diff, C_GRAY)
     pill_w = max(120, 40 + 8 * len(diff))
@@ -688,6 +704,14 @@ def _draw_carousel_card(screen, x, y, w, h, fn, meta, practice):
     pygame.draw.rect(screen, dc, pill_rect.inflate(-2, -2), border_radius=12)
     txt(screen, diff, pill_rect.centerx, pill_rect.centery, 14,
         C_WHITE, True, shadow=True)
+    # "Unconfirmed difficulty: <sug>" — only shown for verified-not-rated
+    # levels, where a beater has weighed in but ADMIN_USERNAME hasn't
+    # locked the rating yet. Rated levels hide this line entirely.
+    _sg = (meta.get("suggested_difficulty") or "").strip()
+    if _sg and meta.get("verified") and not meta.get("rated"):
+        txt(screen, f"Unconfirmed suggestion: {_sg}",
+            x + w // 2, pill_rect.bottom + 12, 11,
+            (180, 180, 210), True, shadow=True)
 
     # Coin row.
     total_coins = int(meta.get("total_coins", 3))
@@ -704,8 +728,20 @@ def _draw_carousel_card(screen, x, y, w, h, fn, meta, practice):
     _draw_best_stat(screen, x + w // 2 + 140, bl_y,
                     "Best — Practice", best_practice, (90, 190, 140))
 
-    # Verified badge, if any — top-right of the card.
-    if meta.get("verified"):
+    # State badge, top-right. Priority: RATED > VERIFIED > PUBLISHED.
+    # RATED means ADMIN_USERNAME has locked the final difficulty;
+    # VERIFIED means a non-author beater recorded a suggestion; plain
+    # PUBLISHED means no one has finished it yet.
+    if meta.get("rated"):
+        bw_, bh_ = 104, 26
+        br = pygame.Rect(x + w - bw_ - 18, y + 16, bw_, bh_)
+        pygame.draw.rect(screen, darker((250, 200, 60), 40), br,
+                         border_radius=13)
+        pygame.draw.rect(screen, (250, 200, 60),
+                         br.inflate(-2, -2), border_radius=12)
+        txt(screen, "★ RATED", br.centerx, br.centery, 13,
+            (40, 30, 10), True, shadow=True)
+    elif meta.get("verified"):
         bw_, bh_ = 118, 26
         br = pygame.Rect(x + w - bw_ - 18, y + 16, bw_, bh_)
         pygame.draw.rect(screen, darker(C_SUCCESS, 40), br,
@@ -1393,7 +1429,9 @@ def run_editor_picker(screen, clock):
             if len(name) > 36:
                 name = name[:35] + "…"
             txt(screen, name, r.x + 20, r.y + 8, 17, C_WHITE)
-            if meta.get("verified"):
+            if meta.get("rated"):
+                state, state_col = "RATED", (250, 200, 60)
+            elif meta.get("verified"):
                 state, state_col = "VERIFIED", C_SUCCESS
             elif meta.get("published"):
                 state, state_col = "PUBLISHED", C_PUBLISH
@@ -1464,6 +1502,160 @@ def run_editor_picker(screen, clock):
 
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())
+
+
+def run_rate_menu(screen, clock):
+    """Admin-only level-rating screen.
+
+    Only reachable when the signed-in user matches constants.ADMIN_USERNAME.
+    Lists every verified-but-not-yet-rated level. Clicking one opens the
+    difficulty_picker; the chosen difficulty becomes the level's
+    permanent official rating and flips `rated = True`, so the
+    "unconfirmed suggestion" label disappears from the carousel.
+    """
+    from .prefs import get as _pget
+    from .constants import ADMIN_USERNAME
+    current_user = _pget("signed_in_username", None)
+    if current_user != ADMIN_USERNAME:
+        # Defensive: if the button somehow fires for a non-admin,
+        # just bounce back without mutating anything.
+        return
+
+    from .levels import update_meta
+
+    def _load_candidates():
+        out = []
+        for fn, meta in list_level_summaries():
+            if meta.get("verified") and not meta.get("rated"):
+                out.append((fn, meta))
+        out.sort(key=lambda e: (e[1].get("name") or e[0]).lower())
+        return out
+
+    candidates = _load_candidates()
+    stars = _stars()
+    mountains = _mountains()
+    guard = ClickGuard()
+    scroll = 0
+    row_h = 62
+    header_h = 104
+    footer_h = 60
+    visible_rows = 7
+    box_w = 720
+    box_h = header_h + visible_rows * row_h + footer_h
+    box_x = WIDTH // 2 - box_w // 2
+    box_y = (HEIGHT - box_h) // 2
+
+    while True:
+        guard.tick()
+        mpos = pygame.mouse.get_pos()
+        click_pos = None
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                return
+            if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                if not guard.consume_click(ev):
+                    continue
+                click_pos = ev.pos
+            if ev.type == pygame.MOUSEWHEEL:
+                max_scroll = max(0, len(candidates) * row_h
+                                 - visible_rows * row_h)
+                scroll = max(0, min(max_scroll, scroll - ev.y * 30))
+
+        draw_bg(screen, 0, stars, mountains)
+        ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 180))
+        screen.blit(ov, (0, 0))
+        box = pygame.Rect(box_x, box_y, box_w, box_h)
+        pygame.draw.rect(screen, C_DARK, box, border_radius=14)
+        pygame.draw.rect(screen, (250, 200, 60), box, 2, border_radius=14)
+        txt(screen, "RATE LEVELS", box.centerx, box_y + 26,
+            26, (250, 200, 60), True, shadow=True)
+        sub = ("Assign the permanent official difficulty to each "
+               "verified level.")
+        txt(screen, sub, box.centerx, box_y + 58, 13, C_GRAY, True)
+
+        list_top = box_y + header_h
+        list_bottom = list_top + visible_rows * row_h
+        prev_clip = screen.get_clip()
+        screen.set_clip(pygame.Rect(box_x + 4, list_top - 2,
+                                    box_w - 8, visible_rows * row_h + 4))
+        if not candidates:
+            txt(screen,
+                "Nothing to rate right now — no verified-unrated levels.",
+                box.centerx, list_top + 60, 14, C_GRAY, True)
+        picked = None
+        for i, (fn, meta) in enumerate(candidates):
+            y = list_top + i * row_h - scroll
+            if y + row_h < list_top - row_h or y > list_bottom:
+                continue
+            r = pygame.Rect(box_x + 24, y + 4, box_w - 48, row_h - 10)
+            hov = r.collidepoint(mpos)
+            c = C_BTN_H if hov else C_BTN
+            pygame.draw.rect(screen, darker(c, 40), r.move(0, 3),
+                             border_radius=8)
+            pygame.draw.rect(screen, c, r, border_radius=8)
+            # Publisher's difficulty chip (left edge).
+            req_diff = meta.get("requested_difficulty",
+                                meta.get("difficulty", "Normal"))
+            rq_col = DIFFICULTY_COLORS.get(req_diff, C_GRAY)
+            pygame.draw.rect(screen, rq_col,
+                             (r.x + 6, r.y + 6, 6, r.h - 12),
+                             border_radius=3)
+            name = meta.get("name") or fn
+            if len(name) > 34:
+                name = name[:33] + "…"
+            txt(screen, name, r.x + 20, r.y + 8, 18, C_WHITE)
+            author = meta.get("author") or "Unknown"
+            txt(screen, f"by {author}", r.x + 20, r.y + 32, 12, C_GRAY)
+            # Current 'official' (publisher's) and community suggestion.
+            sug = (meta.get("suggested_difficulty") or "").strip()
+            info_x = r.right - 260
+            txt(screen, f"Publisher: {req_diff}", info_x, r.y + 10,
+                11, (200, 220, 255))
+            if sug:
+                sg_col = DIFFICULTY_COLORS.get(sug, (200, 200, 220))
+                txt(screen, f"Suggested: {sug}", info_x, r.y + 30,
+                    11, sg_col)
+            if click_pos and r.collidepoint(click_pos):
+                picked = (fn, meta)
+        screen.set_clip(prev_clip)
+
+        b_back = btn(screen, "BACK", box.centerx,
+                     box.bottom - 28, 200, 34, C_DANGER, mpos,
+                     font_size=14)
+        if click_pos and b_back.collidepoint(click_pos):
+            return
+
+        pygame.display.flip()
+        clock.tick(settings.get_fps_cap())
+
+        if picked is not None:
+            fn, meta = picked
+            default = (meta.get("suggested_difficulty")
+                       or meta.get("requested_difficulty")
+                       or "Normal")
+            chosen = difficulty_picker(
+                screen, clock,
+                prompt=f"Rate '{meta.get('name') or fn}'",
+                default=default,
+                subtitle=("This becomes the level's permanent "
+                          "official difficulty."),
+            )
+            guard.reset()
+            if chosen:
+                try:
+                    update_meta(os.path.join(LEVELS_DIR, fn),
+                                difficulty=chosen,
+                                rated=True)
+                except OSError:
+                    pass
+                candidates = _load_candidates()
+                max_scroll = max(0, len(candidates) * row_h
+                                 - visible_rows * row_h)
+                scroll = min(scroll, max_scroll)
 
 
 def run_settings(screen, clock, on_fullscreen_change=None):

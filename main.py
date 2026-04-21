@@ -23,7 +23,7 @@ from src.editor import run_editor
 from src.levels import ensure_dirs, load_level_full
 from src import music, sfx, settings, gamepad
 from src.menus import (run_menu, run_select, run_settings, run_customize,
-                       run_editor_picker)
+                       run_editor_picker, run_rate_menu)
 from src.music_menu import run_music_menu
 from src.play import run_play
 
@@ -93,6 +93,12 @@ def main():
                     level_path=path,
                     practice_mode=_practice,
                 )
+            state = "menu"
+        elif state == "rate":
+            # Admin-only level rating screen. run_rate_menu itself
+            # guards against non-admin access, so even if the button
+            # somehow fires for a wrong user we bounce back cleanly.
+            run_rate_menu(screen, clock)
             state = "menu"
         elif state == "editor":
             pick = run_editor_picker(screen, clock)

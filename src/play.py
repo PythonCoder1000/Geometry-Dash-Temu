@@ -19,7 +19,6 @@ from .constants import (
     DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES,
     T_TELEPORT_ORB, T_COIN, T_END, T_ORB, T_DASH_ORB, T_BLACK_ORB,
     T_BLUE_ORB, T_GREEN_ORB, T_GRAV,
-    ADMIN_USERNAME,
 )
 from .graphics import (
     draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
@@ -355,12 +354,23 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     def _persist_win():
         """Persist meta: attempts / best_progress / coins_collected / etc.
 
-        Every player's win records their session stats. *Verifying* a
-        published level — flipping the ✓ and stamping the canonical
-        difficulty — is admin-only (constants.ADMIN_USERNAME). A
-        non-admin win on an unverified published level still counts
-        toward attempts / best / coins / best-time / deaths, but it
-        never flips `verified` and never shows the difficulty prompt.
+        Level lifecycle:
+          drafted   → private, no win counts anything
+          published → public, shows publisher's requested difficulty
+          verified  → first non-author beater flipped verified=True
+                       and recorded their suggested_difficulty; the
+                       official `difficulty` still mirrors the
+                       publisher's request, but the carousel shows
+                       "unconfirmed: <suggested>" alongside it
+          rated     → ADMIN_USERNAME picked the final difficulty via
+                       the Rate Levels menu; `difficulty` is their
+                       choice and `suggested_difficulty` is no longer
+                       displayed
+
+        Every win updates session stats. Only a non-author winning an
+        unverified published level triggers the "suggest difficulty"
+        prompt. Rating is never touched here — that's the Rate menu's
+        job.
         """
         nonlocal meta_persisted
         if meta_persisted or not can_persist:
@@ -384,28 +394,35 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
             "best_time_frames": new_best_time,
             "deaths": prev_deaths + deaths_this_session,
         }
-        # Admin-only verification path: only the ADMIN_USERNAME account
-        # can flip `verified` and stamp an official difficulty on a
-        # published level. Anyone else's first win still bumps their
-        # session stats above but leaves the rating untouched.
+        # First non-author win on a published-but-unverified level:
+        # prompt the beater for their difficulty suggestion and flip
+        # `verified`. The publisher's `difficulty` / `requested_difficulty`
+        # is NOT overwritten — only `suggested_difficulty` records the
+        # new opinion. ADMIN_USERNAME's rating in the Rate menu is what
+        # eventually locks the final difficulty.
         from .prefs import get as _pget_usr
         _cur_user = _pget_usr("signed_in_username", None)
-        _is_admin = (_cur_user == ADMIN_USERNAME)
-        if _is_admin:
-            updates["verified"] = True
-            if meta and meta.get("published") and not meta.get("verified"):
-                from .menus import difficulty_picker
-                requested = meta.get("requested_difficulty",
-                                     meta.get("difficulty", "Normal"))
-                chosen = difficulty_picker(
-                    screen, clock,
-                    prompt="You verified this level!",
-                    default=requested,
-                    subtitle=f"Publisher requested: {requested}.  "
-                             f"Set the official difficulty:",
-                )
-                if chosen:
-                    updates["difficulty"] = chosen
+        _author = (meta or {}).get("author", "") or ""
+        _is_author = (_cur_user is not None and _cur_user == _author)
+        _is_published = bool((meta or {}).get("published", False))
+        _is_verified = bool((meta or {}).get("verified", False))
+        _is_rated = bool((meta or {}).get("rated", False))
+        if (not _is_author and _is_published and not _is_verified
+                and not _is_rated):
+            from .menus import difficulty_picker
+            requested = (meta or {}).get("requested_difficulty",
+                                         (meta or {}).get("difficulty",
+                                                          "Normal"))
+            chosen = difficulty_picker(
+                screen, clock,
+                prompt="You beat this level!",
+                default=requested,
+                subtitle=f"Publisher requested: {requested}.  "
+                         f"What difficulty do you think this is?",
+            )
+            if chosen:
+                updates["verified"] = True
+                updates["suggested_difficulty"] = chosen
         try:
             update_meta(level_path, **updates)
             meta_persisted = True
