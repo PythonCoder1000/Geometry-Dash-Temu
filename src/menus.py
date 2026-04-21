@@ -1265,24 +1265,42 @@ def _slider(screen, mpos, mb_down, x, y, w, value):
 
 
 def run_editor_picker(screen, clock):
-    """Pre-editor picker — lists every level on the local disk plus a
+    """Pre-editor picker — lists the signed-in user's levels plus a
     "New level" tile. Returns one of:
 
         ("open", filename)  — open this level in the editor
         ("new", None)       — start an empty level
         None                — user backed out
 
-    The picker is filesystem-scoped on purpose: anything under the user
-    data dir is openable regardless of whose username is stamped in the
-    meta.author field. That way levels authored under a previous
-    username (e.g. an "alice" account used pre-auth) stay editable
-    after switching to a new signed-in user.
+    Ownership model: a level is editable only by the user whose
+    username is stamped in its meta.author field. The picker filters to
+    show just those — levels authored by someone else are hidden (you
+    still see them in the play-side level select, you just can't edit
+    them). A legacy file with no author or one stamped "Player" is
+    treated as the current user's (pre-auth dev checkouts).
+
+    Delete: each row has an ×  button in the right margin. Clicking it
+    prompts for confirmation, then removes the level JSON + thumbnail.
     """
     from .prefs import get as _pget
     current_user = _pget("signed_in_username", None)
-    summaries = list_level_summaries()
-    my_levels = list(summaries)
-    my_levels.sort(key=lambda e: (e[1].get("name") or e[0]).lower())
+
+    def _load_my_levels():
+        summaries = list_level_summaries()
+        if current_user is None:
+            # Not signed in → single-user dev workflow; everything on
+            # disk is considered mine.
+            out = list(summaries)
+        else:
+            out = []
+            for fn, meta in summaries:
+                author = (meta.get("author") or "").strip()
+                if author == current_user or author in ("", "Player"):
+                    out.append((fn, meta))
+        out.sort(key=lambda e: (e[1].get("name") or e[0]).lower())
+        return out
+
+    my_levels = _load_my_levels()
 
     stars = _stars()
     mountains = _mountains()
@@ -1354,6 +1372,7 @@ def run_editor_picker(screen, clock):
         if not my_levels:
             txt(screen, "No levels of your own yet — hit '+ New level'.",
                 box.centerx, list_top + 40, 14, C_GRAY, True)
+        pending_delete = None  # filename to delete after the render pass
         for i, (fn, meta) in enumerate(my_levels):
             y = list_top + i * row_h - scroll
             if y + row_h < list_top - row_h or y > list_bottom:
@@ -1380,11 +1399,62 @@ def run_editor_picker(screen, clock):
                 state, state_col = "PUBLISHED", C_PUBLISH
             else:
                 state, state_col = "DRAFT", C_GRAY
-            txt(screen, state, r.right - 100, r.y + 14, 11, state_col)
-            if click_pos and r.collidepoint(click_pos):
+            txt(screen, state, r.right - 130, r.y + 14, 11, state_col)
+            # Delete button (×) — inset from the right edge, only fires
+            # on the button's own rect so clicking it doesn't also open
+            # the level.
+            del_rect = pygame.Rect(r.right - 38, r.y + 8, 26, 26)
+            del_hov = del_rect.collidepoint(mpos)
+            del_col = C_DANGER if del_hov else (120, 60, 70)
+            pygame.draw.rect(screen, del_col, del_rect, border_radius=6)
+            pygame.draw.rect(screen, darker(del_col, 40), del_rect, 1,
+                             border_radius=6)
+            txt(screen, "×", del_rect.centerx, del_rect.centery - 1,
+                18, C_WHITE, True, shadow=True)
+            if click_pos and del_rect.collidepoint(click_pos):
+                pending_delete = fn
+                click_pos = None  # swallow so row-click doesn't also fire
+            elif click_pos and r.collidepoint(click_pos):
                 screen.set_clip(prev_clip)
                 return ("open", fn)
         screen.set_clip(prev_clip)
+
+        # Handle deletion after the render pass — confirm_dialog takes
+        # over the screen, so we don't want to interleave its frames
+        # with the picker's loop. When it returns, refresh the list so
+        # the deleted row disappears.
+        if pending_delete is not None:
+            _to_del = pending_delete
+            _meta = next((m for f, m in my_levels if f == _to_del), {})
+            _nm = _meta.get("name") or _to_del
+            ok = confirm_dialog(
+                screen, clock,
+                f"Delete '{_nm}'?",
+                subtitle="This removes the level file from your disk. "
+                         "Cannot be undone.",
+                ok_label="Delete", cancel_label="Keep",
+            )
+            guard.reset()
+            if ok:
+                try:
+                    _path = os.path.join(LEVELS_DIR, _to_del)
+                    if os.path.isfile(_path):
+                        os.remove(_path)
+                    # Thumbnails live in levels/_thumbs/ with a .png
+                    # matching the JSON stem — drop that too so the
+                    # carousel doesn't keep showing a preview for a
+                    # level that no longer exists.
+                    _thumb = os.path.join(LEVELS_DIR, "_thumbs",
+                                          _to_del.replace(".json", ".png"))
+                    if os.path.isfile(_thumb):
+                        os.remove(_thumb)
+                except OSError:
+                    pass
+                my_levels = _load_my_levels()
+                # Snap scroll if we shrunk past the current window.
+                max_scroll = max(0, len(my_levels) * row_h
+                                 - visible_rows * row_h)
+                scroll = min(scroll, max_scroll)
 
         b_back = btn(screen, "BACK", box.centerx,
                      box.bottom - 28, 200, 34, C_DANGER, mpos,

@@ -1765,6 +1765,21 @@ def run_editor(screen, clock, preload_filename=None):
         if autosave_toast_frames > 0:
             autosave_toast_frames -= 1
         if do_save:
+            # Ownership guard: if this level was authored by somebody
+            # other than the signed-in user, refuse to overwrite it.
+            # Keeps the "only edit your own levels" rule honest even
+            # when the level was reached via Ctrl+L instead of the
+            # author-filtered picker.
+            from .prefs import get as _pget
+            _cu = _pget("signed_in_username", None)
+            _existing_author = (level_meta or {}).get("author", "") or ""
+            if (_cu and _existing_author
+                    and _existing_author not in (_cu, "Player")):
+                msg = (f"Can't save — owned by {_existing_author}. "
+                       f"Use 'Save as' on a copy instead.")
+                msg_timer = 180
+                do_save = False
+        if do_save:
             name = text_input_dialog(screen, clock, "Level name:", level_name)
             guard.reset()  # prevent click-through from dialog
             if name:
@@ -1775,24 +1790,16 @@ def run_editor(screen, clock, preload_filename=None):
                 save_meta = dict(level_meta) if level_meta else None
                 if save_meta:
                     save_meta["name"] = name
-                # Stamp the signed-in user as author so the editor picker
-                # (which filters by meta.author == current_user) shows
-                # this level back under "My levels". Without this a brand
-                # new save lands with author="Player" and disappears from
-                # the picker the moment the real user is signed in.
-                from .prefs import get as _pget
-                _cu = _pget("signed_in_username", None)
+                # Claim legacy/empty-author levels for the current user;
+                # leave authored-by-me ones alone. Others are blocked
+                # earlier by the ownership guard above.
                 if _cu:
                     if save_meta is None:
                         from .levels import _default_meta as _dm
                         save_meta = _dm(name)
-                    # Always claim the level for the signed-in user on
-                    # Save. If they opened a legacy level stamped under
-                    # an old account (e.g. "alice") and press Save, the
-                    # saved version belongs to them now — consistent with
-                    # the picker showing all local levels regardless of
-                    # the original author.
-                    save_meta["author"] = _cu
+                    _cur_author = (save_meta.get("author") or "").strip()
+                    if _cur_author in ("", "Player"):
+                        save_meta["author"] = _cu
                 save_level(objects, name, fn, music_file=level_music, meta=save_meta)
                 level_filename = fn + ".json"
                 # Reload meta so we have the current on-disk state.
@@ -1807,6 +1814,17 @@ def run_editor(screen, clock, preload_filename=None):
                 dirty = False
                 autosave_timer = 0
                 msg, msg_timer = f"Saved as {fn}.json", 120
+        if do_publish:
+            # Ownership guard — mirrors the Save path so you can't
+            # publish a level that's authored by someone else.
+            from .prefs import get as _pget_pg
+            _cu_pg = _pget_pg("signed_in_username", None)
+            _existing_author_pg = (level_meta or {}).get("author", "") or ""
+            if (_cu_pg and _existing_author_pg
+                    and _existing_author_pg not in (_cu_pg, "Player")):
+                msg = (f"Can't publish — owned by {_existing_author_pg}.")
+                msg_timer = 180
+                do_publish = False
         if do_publish:
             # Save (if needed) then flip the published flag on.
             name_for_pub = level_name
@@ -1844,7 +1862,9 @@ def run_editor(screen, clock, preload_filename=None):
                     from .prefs import get as _pget_pub
                     _cu_pub = _pget_pub("signed_in_username", None)
                     if _cu_pub:
-                        save_meta["author"] = _cu_pub
+                        _cur_pub_author = (save_meta.get("author") or "").strip()
+                        if _cur_pub_author in ("", "Player"):
+                            save_meta["author"] = _cu_pub
                     # Until verified, the displayed difficulty mirrors the request.
                     if not save_meta.get("verified"):
                         save_meta["difficulty"] = req_diff
