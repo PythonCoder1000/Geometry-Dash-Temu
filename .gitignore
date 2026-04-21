@@ -254,3 +254,7 @@ levels/_autosave_backups/
 
 # Local Claude Code worktrees (dev-only scratch copies).
 .claude/worktrees/
+
+# macOS Finder metadata.
+.DS_Store
+**/.DS_Store
