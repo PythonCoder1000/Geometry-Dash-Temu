@@ -258,3 +258,10 @@ levels/_autosave_backups/
 # macOS Finder metadata.
 .DS_Store
 **/.DS_Store
+
+# User level files — the server is the source of truth now. Anything
+# inside levels/ except the .gitkeep placeholder is per-user state.
+# A fresh clone starts with an empty levels/ dir; clients that talk
+# to the Lightsail backend pull published/verified levels from there.
+levels/*.json
+!levels/.gitkeep
