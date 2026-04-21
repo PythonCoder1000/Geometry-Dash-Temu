@@ -36,6 +36,7 @@
             "dark_bg": "#00000000"
         },
         "font": {
+            "name": "noto_sans",
             "size": "15"
         }
     },
@@ -45,6 +46,7 @@
             "dark_bg": "#00000000"
         },
         "font": {
+            "name": "noto_sans",
             "size": "26",
             "bold": "1"
         }

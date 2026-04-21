@@ -605,12 +605,16 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
             step_scale *= 0.2  # slower slow-mo makes the moment punchier
             death_slowmo_timer -= 1
 
-        # Decouple sim from render: the number of physics ticks per
-        # real second is `get_tps()`, regardless of the render FPS cap.
-        # At the default TPS=60 on a 60 FPS display this reduces to the
-        # old "one tick per frame" behavior. A 30 FPS display emits ~2
-        # sim ticks per render frame so the game still runs at real-time.
-        _tps = max(15, settings.get_tps())
+        # Physics is pinned to 60 Hz — every movement constant (gravity,
+        # jump force, speed values, spike arcs, orb timings) is tuned for
+        # that rate. TPS used to be user-configurable which let the
+        # player set 120/240 and found the whole game playing back 2×/4×
+        # as fast, because each tick still advanced physics by a full
+        # "60 Hz frame's worth" of motion. Locking the tick rate here
+        # keeps the speed constant regardless of the render FPS cap:
+        # the accumulator emits N ticks per real second, and a 30 FPS
+        # display just gets two ticks per render frame.
+        _tps = 60
         sim_accum += last_dt_sec * _tps * step_scale
         # Guard against spiral-of-death after a long stall (debugger
         # break, tab switch) — clamp the accumulator so we don't try to

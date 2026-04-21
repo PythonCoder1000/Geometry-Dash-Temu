@@ -187,16 +187,20 @@ def run_menu(screen, clock):
     """
     stars = _stars()
     mountains = _mountains()
-    pulse = 0
     (b_play, b_practice, b_edit, b_quit,
      r_mute_music, r_mute_sfx, r_gear, r_auth, r_help) = (
         pygame.Rect(0, 0, 0, 0) for _ in range(9))
     if music.is_enabled() and not music.is_playing():
         music.play_menu_music()
     guard = ClickGuard()
+    _menu_t0 = pygame.time.get_ticks()
     while True:
         guard.tick()
-        pulse += 1
+        # Drive animations from wall-clock ms, not render frames, so the
+        # spinning cubes / glow / bg scroll run at the same visual speed
+        # regardless of the user's FPS cap. 60 "pulse units" per real
+        # second matches the old 60 Hz frame-counter feel.
+        pulse = (pygame.time.get_ticks() - _menu_t0) * 60 // 1000
         mpos = pygame.mouse.get_pos()
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
@@ -1463,18 +1467,6 @@ def run_settings(screen, clock, on_fullscreen_change=None):
     )
     row_y += 50
 
-    # ---- TPS cycle button -------------------------------------------------
-    pygame_gui.elements.UILabel(
-        relative_rect=pygame.Rect((label_x, row_y + 4), (label_w, 28)),
-        text="TPS (simulation)", manager=manager, container=panel_widget,
-    )
-    tps_btn = pygame_gui.elements.UIButton(
-        relative_rect=pygame.Rect((ctrl_x, row_y), (ctrl_w, 36)),
-        text=settings.tps_label(),
-        manager=manager, container=panel_widget,
-    )
-    row_y += 50
-
     # ---- Fullscreen toggle ------------------------------------------------
     pygame_gui.elements.UILabel(
         relative_rect=pygame.Rect((label_x, row_y + 4), (label_w, 28)),
@@ -1588,7 +1580,6 @@ def run_settings(screen, clock, on_fullscreen_change=None):
 
     def _refresh_labels():
         fps_btn.set_text(settings.fps_cap_label())
-        tps_btn.set_text(settings.tps_label())
         fs_btn.set_text("On" if settings.get_fullscreen() else "Off")
         music_mute_btn.set_text("Muted" if music.is_muted() else "Not muted")
         sfx_mute_btn.set_text("Muted" if sfx.is_muted() else "Not muted")
@@ -1616,8 +1607,6 @@ def run_settings(screen, clock, on_fullscreen_change=None):
             if ev.type == pygame_gui.UI_BUTTON_PRESSED:
                 if ev.ui_element is fps_btn:
                     settings.cycle_fps_cap()
-                elif ev.ui_element is tps_btn:
-                    settings.cycle_tps()
                 elif ev.ui_element is fs_btn:
                     settings.toggle_fullscreen()
                     if on_fullscreen_change is not None:
