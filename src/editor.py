@@ -1775,6 +1775,19 @@ def run_editor(screen, clock, preload_filename=None):
                 save_meta = dict(level_meta) if level_meta else None
                 if save_meta:
                     save_meta["name"] = name
+                # Stamp the signed-in user as author so the editor picker
+                # (which filters by meta.author == current_user) shows
+                # this level back under "My levels". Without this a brand
+                # new save lands with author="Player" and disappears from
+                # the picker the moment the real user is signed in.
+                from .prefs import get as _pget
+                _cu = _pget("signed_in_username", None)
+                if _cu:
+                    if save_meta is None:
+                        from .levels import _default_meta as _dm
+                        save_meta = _dm(name)
+                    if not save_meta.get("author") or save_meta.get("author") == "Player":
+                        save_meta["author"] = _cu
                 save_level(objects, name, fn, music_file=level_music, meta=save_meta)
                 level_filename = fn + ".json"
                 # Reload meta so we have the current on-disk state.
@@ -1819,6 +1832,15 @@ def run_editor(screen, clock, preload_filename=None):
                     save_meta["name"] = name_for_pub
                     save_meta["published"] = True
                     save_meta["requested_difficulty"] = req_diff
+                    # Same author-stamp rationale as Save: without this
+                    # the level ends up under author="Player" and the
+                    # picker's "my levels" filter hides it from the
+                    # signed-in user who just published it.
+                    from .prefs import get as _pget_pub
+                    _cu_pub = _pget_pub("signed_in_username", None)
+                    if _cu_pub and (not save_meta.get("author")
+                                    or save_meta.get("author") == "Player"):
+                        save_meta["author"] = _cu_pub
                     # Until verified, the displayed difficulty mirrors the request.
                     if not save_meta.get("verified"):
                         save_meta["difficulty"] = req_diff

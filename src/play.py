@@ -398,6 +398,13 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         try:
             update_meta(level_path, **updates)
             meta_persisted = True
+            # Also mirror the updates into the in-memory `meta` dict so
+            # later exit-time bookkeeping (_stop_music_and_return) sees
+            # the 100% best, not the pre-win stale value — otherwise
+            # the session's sub-100 best_progress would "win" a >
+            # compare against stale meta and clobber the disk's 100%.
+            if meta is not None:
+                meta.update(updates)
         except OSError:
             # If the file is gone, just skip persistence.
             pass
