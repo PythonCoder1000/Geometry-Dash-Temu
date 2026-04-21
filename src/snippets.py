@@ -22,7 +22,6 @@ from constants import (
     T_COIN, T_MODE_MINI, T_MODE_BIG, T_MODE_SHIP, T_MODE_CUBE,
     T_MODE_BALL, T_MODE_WAVE, T_MODE_UFO,
     T_SPEED_FAST, T_SPEED_NORMAL, T_SPEED_FASTER,
-    T_CHECKPOINT,
 )
 
 
@@ -162,9 +161,6 @@ BUILTIN_SNIPPETS = [
         _o(T_HALF_SPIKE, 1, 10),
         _o(T_HALF_SPIKE, 2, 10),
         _o(T_BLOCK, 4, 7),
-    ]),
-    ("Checkpoint Marker", [
-        _o(T_CHECKPOINT, 0, 9),
     ]),
     ("Saw Tunnel", [
         _o(T_BLOCK, 0, 4), _o(T_BLOCK, 1, 4), _o(T_BLOCK, 2, 4),

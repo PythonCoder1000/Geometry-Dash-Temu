@@ -1,4 +1,4 @@
-"""Sound effects for Geometry Dash — Temu Edition.
+"""Sound effects for Trigonometry Sprint.
 
 Generates short sound effects procedurally so no .wav files are needed.
 All sounds are created on init() and cached as pygame.mixer.Sound objects.
@@ -158,7 +158,7 @@ def init():
         "click": _gen_click,
         "orb": _gen_orb,
         "death": _gen_death,
-        "checkpoint": _gen_checkpoint,
+        "practice_checkpoint": _gen_checkpoint,
         "win": _gen_win,
         "pad": _gen_pad,
         "gravity": _gen_gravity,

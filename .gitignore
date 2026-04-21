@@ -30,7 +30,9 @@ MANIFEST
 #   Usually these files are written by a python script from a template
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
-*.spec
+# NB: we *do* check in TrigonometrySprint.spec — it's the reproducible
+# build config, not generated output. Wildcard *.spec is intentionally
+# omitted below.
 
 # Installer logs
 pip-log.txt
@@ -214,3 +216,41 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Trigonometry Sprint runtime artifacts -------------------------------
+# Generated sprite atlas, cached per-size to avoid re-rasterising each
+# boot. Regenerated on demand; no reason to version.
+sprite_cache/
+
+# Auto-generated level thumbnails.
+levels/_thumbs/
+
+# Per-user runtime state that lands next to the source tree when the
+# dev (GDT_DEV_LOCAL=1 implicit) default is used. The packaged binary
+# writes these to the OS user-data dir instead, so they only end up
+# here during local play.
+prefs.json
+progress.json
+bot_runs/
+level_bot_inputs.txt
+
+# Local auth store — PBKDF2 hashes + salts for LocalAuthStore users.
+# Not a security boundary, but still a user credential file that should
+# never be committed.
+auth_local.json
+
+# Server DB (sqlite) + sessions when deploy_server.sh runs in-tree.
+server/data/
+*.sqlite
+*.sqlite3
+
+# pytest artefacts that aren't covered by .pytest_cache/ alone.
+pytest-cache-files-*/
+
+# Editor autosave snapshots — transient recovery data for the level
+# editor, never meant to travel with the repo.
+levels/_autosave.json
+levels/_autosave_backups/
+
+# Local Claude Code worktrees (dev-only scratch copies).
+.claude/worktrees/

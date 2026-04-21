@@ -92,7 +92,22 @@ class PhysicsParams:
             raw = data[f.name]
             default = getattr(defaults, f.name)
             try:
-                kwargs[f.name] = type(default)(raw)
+                # bool is a subclass of int, so type(default)(raw) would
+                # mean bool("False") == True (any non-empty string is
+                # truthy). Parse strings explicitly before coercing.
+                if isinstance(default, bool):
+                    if isinstance(raw, str):
+                        low = raw.strip().lower()
+                        if low in ("true", "1", "yes", "on"):
+                            kwargs[f.name] = True
+                        elif low in ("false", "0", "no", "off", ""):
+                            kwargs[f.name] = False
+                        else:
+                            continue
+                    else:
+                        kwargs[f.name] = bool(raw)
+                else:
+                    kwargs[f.name] = type(default)(raw)
             except (TypeError, ValueError):
                 # Keep the default rather than crash — a malformed
                 # override should degrade to vanilla physics, not brick

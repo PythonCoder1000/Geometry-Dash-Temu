@@ -1,4 +1,4 @@
-"""Music system for Geometry Dash — Temu Edition.
+"""Music system for Trigonometry Sprint.
 
 Supports:
 - Loading .ogg/.mp3/.wav files from assets/music/
@@ -135,42 +135,77 @@ def import_music_file(src_path):
 
 def pick_music_file_dialog(parent_title="Import music"):
     """Open a native file-picker dialog and return the selected path, or
-    None if the user cancelled / no GUI is available. Runs tkinter in a
-    hidden root window so it doesn't steal focus from pygame.
+    None if the user cancelled / no GUI is available.
+
+    Dispatch by platform:
+    - **macOS**: use ``osascript``'s ``choose file`` because tkinter in
+      the same process as pygame crashes — pygame's SDL replaces
+      ``NSApplication`` with ``SDLApplication``, which Tk's
+      ``[app macOSVersion]`` call blows up on.
+    - **Windows / Linux**: spawn a short Python subprocess that runs
+      tkinter. Isolating Tk in its own process also avoids subtle
+      interactions on other platforms (Tk can leave `Quit` menu items
+      registered on the main NSApp / hijack focus).
     """
+    import sys as _sys
+    if _sys.platform == "darwin":
+        return _pick_file_osascript(parent_title)
+    return _pick_file_tk_subprocess(parent_title)
+
+
+def _pick_file_osascript(title):
+    """macOS native file picker via osascript — avoids the SDL/Tk
+    NSApplication conflict that crashes pygame apps."""
+    import subprocess
+    script = (
+        'set chosen to choose file with prompt "{title}" '
+        'of type {{"mp3","MP3","wav","WAV","ogg","OGG"}}\n'
+        'return POSIX path of chosen'
+    ).format(title=title.replace('"', "'"))
     try:
-        import tkinter as _tk
-        from tkinter import filedialog as _fd
-    except ImportError:
-        return None
-    try:
-        root = _tk.Tk()
-    except _tk.TclError:
-        return None
-    try:
-        root.withdraw()
-        # `-topmost` forces the dialog to appear in front of the pygame
-        # window on macOS/Linux; the attribute is silently ignored on
-        # Windows which already does the right thing.
-        try:
-            root.attributes("-topmost", True)
-        except _tk.TclError:
-            pass
-        path = _fd.askopenfilename(
-            title=parent_title,
-            filetypes=[
-                ("Audio", "*.mp3 *.ogg *.wav"),
-                ("MP3", "*.mp3"),
-                ("OGG", "*.ogg"),
-                ("WAV", "*.wav"),
-                ("All files", "*.*"),
-            ],
+        out = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=120,
         )
-    finally:
-        try:
-            root.destroy()
-        except _tk.TclError:
-            pass
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    # User cancel → returncode != 0 and a specific stderr message.
+    if out.returncode != 0:
+        return None
+    path = out.stdout.strip()
+    return path or None
+
+
+def _pick_file_tk_subprocess(title):
+    """tkinter in a subprocess — safe on Windows/Linux. Returns the
+    picked path or None."""
+    import subprocess
+    import sys as _sys
+    script = (
+        "import tkinter, tkinter.filedialog as fd\n"
+        "r = tkinter.Tk()\n"
+        "r.withdraw()\n"
+        "try:\n"
+        "    r.attributes('-topmost', True)\n"
+        "except Exception:\n"
+        "    pass\n"
+        "p = fd.askopenfilename(title=" + repr(title) + ", filetypes=[\n"
+        "    ('Audio', '*.mp3 *.ogg *.wav'),\n"
+        "    ('MP3', '*.mp3'), ('OGG', '*.ogg'), ('WAV', '*.wav'),\n"
+        "    ('All files', '*.*'),\n"
+        "])\n"
+        "print(p or '')\n"
+    )
+    try:
+        out = subprocess.run(
+            [_sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    path = out.stdout.strip()
     return path or None
 
 
@@ -214,8 +249,10 @@ def is_muted():
     return not _enabled
 
 
-def play_track(index=0, loops=-1):
-    """Play a track by index. loops=-1 means loop forever."""
+def play_track(index=0, loops=-1, start_sec=0.0):
+    """Play a track by index. loops=-1 means loop forever. ``start_sec``
+    seeks into the track before playback — only supported on file
+    tracks; generated chiptunes ignore the offset."""
     global _current_track
     if not _initialized:
         init()
@@ -229,30 +266,51 @@ def play_track(index=0, loops=-1):
         if track["type"] == "file":
             pygame.mixer.music.load(track["path"])
             pygame.mixer.music.set_volume(_volume)
-            pygame.mixer.music.play(loops)
+            if start_sec and start_sec > 0.0:
+                try:
+                    pygame.mixer.music.play(loops, start=float(start_sec))
+                except (pygame.error, TypeError):
+                    # Some formats / platforms refuse `start` — fall back
+                    # to playing from 0 rather than going silent.
+                    pygame.mixer.music.play(loops)
+            else:
+                pygame.mixer.music.play(loops)
         elif track["type"] == "generated":
             _play_generated(track["seed"], loops)
     except Exception:
         pass
 
 
-def play_file(filename, loops=-1):
-    """Play a track by its filename. Returns True if found and started."""
+def play_file(filename, loops=-1, start_sec=0.0):
+    """Play a track by its filename. Returns True if found and started.
+    ``start_sec`` seeks into the file (playtest-from-cursor uses this to
+    keep the music in sync with the level position)."""
     if not filename or not _enabled:
         return False
     idx = track_index_by_file(filename)
     if idx is not None:
-        play_track(idx, loops)
+        play_track(idx, loops, start_sec=start_sec)
         return True
-    # Try direct path in music dir
-    path = os.path.join(MUSIC_DIR, filename)
-    if os.path.exists(path):
+    # Try direct path in the bundled or user music dir.
+    path = None
+    for base in (USER_MUSIC_DIR, MUSIC_DIR):
+        candidate = os.path.join(base, filename)
+        if os.path.exists(candidate):
+            path = candidate
+            break
+    if path is not None:
         global _current_track
         _current_track = None
         try:
             pygame.mixer.music.load(path)
             pygame.mixer.music.set_volume(_volume)
-            pygame.mixer.music.play(loops)
+            if start_sec and start_sec > 0.0:
+                try:
+                    pygame.mixer.music.play(loops, start=float(start_sec))
+                except (pygame.error, TypeError):
+                    pygame.mixer.music.play(loops)
+            else:
+                pygame.mixer.music.play(loops)
             return True
         except Exception:
             return False

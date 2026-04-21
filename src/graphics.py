@@ -193,6 +193,50 @@ def txt(surf, text, x, y, size=22, col=C_WHITE, center=False, shadow=False):
     return r
 
 
+_TITLE_GLOW_CACHE = {}
+
+
+def draw_title_glow(surf, text, cx, cy, size=56, col=C_WHITE,
+                    glow_col=None, glow_radius=10, glow_alpha=220):
+    """Render `text` with a soft gaussian-blur halo behind it.
+
+    Used for the main-menu title and any other "hero" label that needs
+    to punch through a busy background. Cached by (text, size, col,
+    glow_col, radius) so we're not re-blurring the same title every
+    frame. Falls back gracefully when pygame's ``gaussian_blur`` isn't
+    available (very old pygame versions).
+    """
+    glow_col = glow_col or col
+    key = (text, size, tuple(col), tuple(glow_col), glow_radius)
+    surf_glow = _TITLE_GLOW_CACHE.get(key)
+    if surf_glow is None:
+        font = get_font(size)
+        base = font.render(text, True, glow_col)
+        bw, bh = base.get_size()
+        pad = glow_radius * 3 + 4
+        src = pygame.Surface((bw + pad * 2, bh + pad * 2), pygame.SRCALPHA)
+        src.blit(base, (pad, pad))
+        try:
+            blurred = pygame.transform.gaussian_blur(src, glow_radius)
+        except (AttributeError, pygame.error):
+            # Older pygame — use box_blur with a larger radius as proxy.
+            try:
+                blurred = pygame.transform.box_blur(src, glow_radius)
+            except (AttributeError, pygame.error):
+                blurred = src  # no blur available; still functional
+        blurred.set_alpha(glow_alpha)
+        surf_glow = blurred
+        _TITLE_GLOW_CACHE[key] = surf_glow
+        # Bound the cache — titles are small but rotating labels shouldn't
+        # grow it unbounded.
+        if len(_TITLE_GLOW_CACHE) > 32:
+            _TITLE_GLOW_CACHE.pop(next(iter(_TITLE_GLOW_CACHE)))
+    gr = surf_glow.get_rect(center=(cx, cy))
+    surf.blit(surf_glow, gr)
+    # Crisp text on top.
+    txt(surf, text, cx, cy, size, col, center=True, shadow=True)
+
+
 def draw_panel_footer(surf, panel_rect, text, size=12, col=C_GRAY):
     """Draw a keyboard-hint / help line anchored to a panel's bottom.
 
@@ -1392,7 +1436,12 @@ def speaker_icon(size=22, muted=False):
 
 
 def icon_button(surf, icon, cx, cy, w=40, h=40, col=C_BTN, mpos=None, active=False):
-    """Square button with an icon centred — used for mute toggle etc."""
+    """Square button with an icon centred — used for mute toggle etc.
+
+    `icon` may be None when the caller wants the chrome only and plans
+    to draw its own glyph on top (e.g. the gear icon overlay on the
+    main menu).
+    """
     r = pygame.Rect(cx - w // 2, cy - h // 2, w, h)
     hovered = mpos is not None and r.collidepoint(mpos)
     base = lighter(col, 35) if hovered else col
@@ -1401,6 +1450,7 @@ def icon_button(surf, icon, cx, cy, w=40, h=40, col=C_BTN, mpos=None, active=Fal
     pygame.draw.rect(surf, darker(base, 50), r.move(0, 2), border_radius=8)
     pygame.draw.rect(surf, base, r, border_radius=8)
     pygame.draw.rect(surf, lighter(base, 55), r, 1, border_radius=8)
-    ir = icon.get_rect(center=r.center)
-    surf.blit(icon, ir)
+    if icon is not None:
+        ir = icon.get_rect(center=r.center)
+        surf.blit(icon, ir)
     return r

@@ -1,0 +1,8 @@
+# Server-side deps only. The client game does NOT need these.
+#
+# Run the server locally with:
+#   pip install -r requirements-server.txt
+#   uvicorn server.app:app --reload
+fastapi>=0.110
+pydantic>=2.0
+uvicorn[standard]>=0.27

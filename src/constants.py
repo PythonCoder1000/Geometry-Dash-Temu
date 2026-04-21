@@ -53,10 +53,25 @@ SPIDER_TELEPORT_RANGE = 6  # cells
 
 def _app_root():
     """Directory of the app's read-only assets. Inside a PyInstaller
-    --onefile bundle this is the extracted temp dir (``sys._MEIPASS``)."""
+    --onefile bundle this is the extracted temp dir (``sys._MEIPASS``).
+
+    For dev checkouts the module's own directory is no longer the app
+    root — now that source lives under ``src/`` the repo root sits one
+    level up. Walk a couple of levels up looking for the ``assets/``
+    folder so the lookup works whether constants.py lives at the repo
+    root (legacy) or inside ``src/`` (current layout).
+    """
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         return meipass
+    here = os.path.dirname(os.path.abspath(__file__))
+    for _ in range(4):
+        if os.path.isdir(os.path.join(here, "assets")):
+            return here
+        parent = os.path.dirname(here)
+        if parent == here:
+            break
+        here = parent
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -80,11 +95,11 @@ def _user_data_dir():
     """
     override = os.environ.get("GDT_DEV_LOCAL")
     if override == "1":
-        return os.path.dirname(os.path.abspath(__file__))
+        return _app_root()
     if override != "0" and not _is_frozen():
         # Default for dev checkouts: stay in the repo so existing
         # workflows don't silently migrate levels to a new directory.
-        return os.path.dirname(os.path.abspath(__file__))
+        return _app_root()
     if sys.platform == "win32":
         base = os.environ.get("APPDATA", os.path.expanduser("~"))
     elif sys.platform == "darwin":
@@ -92,13 +107,24 @@ def _user_data_dir():
     else:
         base = os.environ.get("XDG_DATA_HOME",
                               os.path.expanduser("~/.local/share"))
-    path = os.path.join(base, "GeometryDashTemu")
+    path = os.path.join(base, "TrigonometrySprint")
+    # Migrate from the old "GeometryDashTemu" directory — copy any
+    # existing content so pre-rename users don't lose their levels,
+    # bot saves, prefs, etc. One-shot: once the new dir exists, the
+    # migration is skipped.
+    legacy = os.path.join(base, "GeometryDashTemu")
+    if not os.path.isdir(path) and os.path.isdir(legacy):
+        try:
+            import shutil
+            shutil.copytree(legacy, path)
+        except OSError:
+            pass
     try:
         os.makedirs(path, exist_ok=True)
     except OSError:
         # If the user data dir is unwritable (read-only home, CI, etc.)
         # fall back to the app root so at least in-memory state works.
-        path = os.path.dirname(os.path.abspath(__file__))
+        path = _app_root()
     return path
 
 
@@ -145,7 +171,12 @@ T_GRAV = "grav"
 T_END = "end"
 T_START = "start"
 T_COIN = "coin"             # new: collectible (3 per level)
-T_CHECKPOINT = "checkpoint" # new: practice checkpoint
+# TRANSIENT type — checkpoints are a player-session mechanic placed with
+# the C key in practice mode. They are NEVER serialized to level JSON
+# (levels.py strips them on load) and are NOT in PALETTE_CATEGORIES, so
+# the editor can't stamp them. T_CHECKPOINT lives in constants only so
+# render/sfx code can key color/tip/name tables off a single source.
+T_CHECKPOINT = "checkpoint"
 T_MODE_CUBE = "mode_cube"
 T_MODE_SHIP = "mode_ship"
 T_MODE_BALL = "mode_ball"
@@ -243,15 +274,39 @@ SPEED_VALUES = {
 # ---------------------------------------------------------------------------
 # Difficulty
 # ---------------------------------------------------------------------------
-DIFFICULTIES = ["Auto", "Easy", "Normal", "Hard", "Harder", "Insane", "Demon"]
+# 11 tiers: the spec listed 9 (easy/medium/hard/insane + 5 demon), but we
+# mirror the canonical Geometry Dash ladder which also includes "Auto" (for
+# one-button trivial runs) and "Harder" (between Hard and Insane). "Normal"
+# is the project's name for the spec's "medium". If you trim the extras to
+# match the spec exactly, note that levels._migrate auto-demotes unknown
+# tags to "Normal", so dropping "Auto"/"Harder" is safe but loses prior
+# level ratings that used those names.
+DIFFICULTIES = [
+    "Auto", "Easy", "Normal", "Hard", "Harder", "Insane",
+    "Easy Demon", "Medium Demon", "Hard Demon",
+    "Insane Demon", "Extreme Demon",
+]
+# Backward-compat alias — old levels saved with the plain "Demon" tag
+# migrate to "Hard Demon". levels._migrate maps this at load time.
+LEGACY_DEMON_TARGET = "Hard Demon"
+
 DIFFICULTY_COLORS = {
-    "Auto":   (180, 255, 180),
-    "Easy":   (100, 230, 255),
-    "Normal": (100, 255, 120),
-    "Hard":   (255, 220, 80),
-    "Harder": (255, 150, 60),
-    "Insane": (255, 80, 80),
-    "Demon":  (255, 40, 220),
+    "Auto":           (180, 255, 180),
+    "Easy":           (100, 230, 255),
+    "Normal":         (100, 255, 120),
+    "Hard":           (255, 220, 80),
+    "Harder":         (255, 150, 60),
+    "Insane":         (255, 80, 80),
+    # Demon tiers — progressive purple→pink→red gradient so the rank
+    # reads at-a-glance even without reading the full label.
+    "Easy Demon":     (200, 120, 255),
+    "Medium Demon":   (230, 80, 230),
+    "Hard Demon":     (255, 40, 220),
+    "Insane Demon":   (255, 30, 140),
+    "Extreme Demon":  (255, 0, 60),
+    # Legacy alias kept so a level JSON still in flight with "Demon"
+    # renders with a sane color while being migrated on next save.
+    "Demon":          (255, 40, 220),
 }
 
 TYPE_NAMES = {
@@ -457,7 +512,7 @@ PALETTE_CATEGORIES = [
     ("Deco",     [T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW]),
     ("Triggers", [T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
                   T_PULSE_TRIGGER, T_ROTATE_TRIGGER]),
-    ("Misc",     [T_START, T_END, T_COIN, T_CHECKPOINT]),
+    ("Misc",     [T_START, T_END, T_COIN]),
 ]
 
 ALL_TYPES = [t for _, items in PALETTE_CATEGORIES for t in items]

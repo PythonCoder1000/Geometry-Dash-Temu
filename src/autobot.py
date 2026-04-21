@@ -473,6 +473,11 @@ class AutoBot:
         # Cheaper column-only variant for fast "is any orb within a few
         # cells of this x?" without iterating the full grid each time.
         self._orb_xs = set(c[0] for c in self._orb_cells)
+        # Coin columns — used by the scoring heuristic to nudge the beam
+        # toward opportunistic coin pickups (part of an "easy / clean"
+        # solve is picking up the coins on the way).
+        from constants import T_COIN as _T_COIN
+        self._coin_xs = set(o["x"] for o in objects if o["t"] == _T_COIN)
 
     # Frames of cached input we discard before resuming beam search after a
     # divergence. Gives the beam wiggle-room around the change point — without
@@ -565,10 +570,60 @@ class AutoBot:
                         best_failed_mirror_waypoints = mwp
                         best_failed_inputs = inp
 
-            # --- Phase 1: launch workers for attempts 1-N BEFORE attempt 0 ---
+            # === Phase 1: Initial search =============================
+            # One pass from the start at default beam width. Quick, gets
+            # as far as the narrow beam can; whatever it finds seeds
+            # every later phase. We also fast-path a width-16 pre-pass
+            # for trivial levels — solves a flat corridor in ~100 ms
+            # without the attempt-0 overhead.
+            _FAST_WIDTH = 16
+            if not prefix_inputs and _FAST_WIDTH < self.BEAM_WIDTH:
+                fast_wp, fast_mwp, fast_inp, fast_won = self._beam_search(
+                    _FAST_WIDTH, max_frames, screen, clock, 0,
+                    prefix_inputs=None,
+                    status_text="Phase 1: Initial search (fast)")
+                if fast_won:
+                    return fast_wp, fast_mwp, fast_inp, True
+                if self._cancelled:
+                    return fast_wp, fast_mwp, fast_inp, False
+                if fast_inp:
+                    _update_best(fast_wp, fast_mwp, fast_inp)
+
+            waypoints, mirror_waypoints, inputs, won = self._beam_search(
+                widths[0], max_frames, screen, clock, 0,
+                prefix_inputs=prefix_inputs,
+                status_text="Phase 1: Initial search")
+            if not won:
+                _update_best(waypoints, mirror_waypoints, inputs)
+            if self._cancelled:
+                return waypoints, mirror_waypoints, inputs, False
+
+            # === Phase 2: Gap fill ===================================
+            # Before spinning up any parallel workers, try to extend the
+            # best partial we have using retries with progressively
+            # wider beams. Brute force is held back for Phase 4 so the
+            # phase boundaries stay clean.
+            if not won and best_failed_inputs and not self._cancelled:
+                gf_wp, gf_mwp, gf_inp, gf_won = self._gap_fill(
+                    best_failed_inputs, screen, clock, max_frames,
+                    allow_brute=False)
+                if gf_won:
+                    waypoints, mirror_waypoints, inputs, won = \
+                        gf_wp, gf_mwp, gf_inp, True
+                elif gf_inp:
+                    _update_best(gf_wp, gf_mwp, gf_inp)
+            if self._cancelled:
+                return waypoints, mirror_waypoints, inputs, won
+
+            # === Phase 3: Parallel wider beam ========================
+            # N - 1 wider-beam attempts running in separate processes
+            # (plus a sequential fallback on platforms where spawn is
+            # restricted). Meant to unstick gaps that Phase 2's narrow
+            # retries couldn't bridge.
             pool = None
             async_results = []
-            if use_parallel and n_attempts > 1:
+            parallel_launched = False
+            if not won and n_attempts > 1 and use_parallel:
                 try:
                     ctx = _mp.get_context("spawn")
                     nw = n_workers if n_workers else min(
@@ -581,82 +636,46 @@ class AutoBot:
                                 None, attempt, self.params)
                         async_results.append(
                             pool.apply_async(_solve_attempt_worker, (args,)))
+                    parallel_launched = True
                 except (OSError, RuntimeError, _pickle.PickleError):
-                    # Narrow to the real failure modes for subprocess
-                    # startup / pickling so programming errors in the
-                    # worker (AttributeError, KeyError, ...) still surface
-                    # as crashes during development.
                     pool = None
                     async_results = []
 
-            # Run attempt 0 in-process (workers running concurrently)
-            waypoints, mirror_waypoints, inputs, won = self._beam_search(
-                widths[0], max_frames, screen, clock, 0,
-                prefix_inputs=prefix_inputs,
-                status_text="Phase 1: Initial search")
-            if not won:
-                _update_best(waypoints, mirror_waypoints, inputs)
-
-            # User-requested abort: short-circuit every remaining phase
-            # (wider-beam retries, parallel wait, gap-fill, brute-force)
-            # so a single ESC stops the whole solve, not just attempt 0.
-            if self._cancelled:
-                return waypoints, mirror_waypoints, inputs, False
-
-            # Collect worker results (some may have finished during attempt 0)
-            if not won and pool:
-                for ar in async_results:
-                    if ar.ready():
-                        try:
-                            r_wp, r_mwp, r_inp, r_won, _ = ar.get(timeout=0)
-                        except Exception:
-                            continue
-                        if r_won:
-                            waypoints, mirror_waypoints, inputs, won = \
-                                r_wp, r_mwp, r_inp, True
-                            break
-                        _update_best(r_wp, r_mwp, r_inp)
-
-                if not won:
-                    still_pending = [ar for ar in async_results
-                                     if not ar.ready()]
-                    if still_pending:
-                        par_wp, par_mwp, par_in, par_won, par_failed = \
-                            self._solve_attempts_parallel_wait(
-                                still_pending, screen, clock,
-                                n_workers=len(async_results))
-                        if par_won:
-                            waypoints, mirror_waypoints, inputs, won = \
-                                par_wp, par_mwp, par_in, True
-                        elif par_failed is not None:
-                            fwp, fmwp, fin, fx = par_failed
-                            if fx > best_failed_x:
-                                best_failed_x = fx
-                                best_failed_waypoints = fwp
-                                best_failed_mirror_waypoints = fmwp
-                                best_failed_inputs = fin
+            if not won and pool and parallel_launched:
+                par_wp, par_mwp, par_in, par_won, par_failed = \
+                    self._solve_attempts_parallel_wait(
+                        async_results, screen, clock,
+                        n_workers=len(async_results))
+                if par_won:
+                    waypoints, mirror_waypoints, inputs, won = \
+                        par_wp, par_mwp, par_in, True
+                elif par_failed is not None:
+                    fwp, fmwp, fin, fx = par_failed
+                    if fx > best_failed_x:
+                        best_failed_x = fx
+                        best_failed_waypoints = fwp
+                        best_failed_mirror_waypoints = fmwp
+                        best_failed_inputs = fin
 
             if pool:
                 pool.terminate()
                 pool.join()
                 pool = None
 
-            # Fallback: sequential attempts if parallel wasn't used or failed
-            # to launch (pool creation / pickling can fail on restricted
-            # platforms — silently dropping the wider-beam retries is what
-            # made the solver quietly lose solves it used to find).
-            parallel_launched = bool(async_results)
-            if ((not use_parallel or not parallel_launched)
-                    and not won and n_attempts > 1 and not self._cancelled):
+            # Sequential fallback: if the parallel pool never launched
+            # (pickling failure, etc.) we still want wider retries.
+            if (not won and not parallel_launched and n_attempts > 1
+                    and not self._cancelled):
                 for attempt in range(1, n_attempts):
                     if self._cancelled:
                         break
                     last = (attempt == n_attempts - 1)
                     frames = int(max_frames * 1.5) if last else max_frames
                     waypoints, mirror_waypoints, inputs, won = \
-                        self._beam_search(widths[attempt], frames,
-                                          screen, clock, attempt,
-                                          prefix_inputs=None)
+                        self._beam_search(
+                            widths[attempt], frames, screen, clock, attempt,
+                            prefix_inputs=None,
+                            status_text="Phase 3: Parallel search (sequential)")
                     if won:
                         break
                     _update_best(waypoints, mirror_waypoints, inputs)
@@ -664,15 +683,18 @@ class AutoBot:
             if self._cancelled:
                 return waypoints, mirror_waypoints, inputs, won
 
-            # --- Phase 2: gap filling ---
+            # === Phase 4: Brute force ================================
+            # Very wide beam on the short segment where all prior
+            # phases stalled. Exits as soon as any candidate wins.
             if not won and best_failed_inputs and not self._cancelled:
-                gf_wp, gf_mwp, gf_inp, gf_won = self._gap_fill(
-                    best_failed_inputs, screen, clock, max_frames)
-                if gf_won:
+                bf_wp, bf_mwp, bf_inp, bf_won = self._gap_fill(
+                    best_failed_inputs, screen, clock, max_frames,
+                    allow_brute=True)
+                if bf_won:
                     waypoints, mirror_waypoints, inputs, won = \
-                        gf_wp, gf_mwp, gf_inp, True
-                elif gf_inp:
-                    _update_best(gf_wp, gf_mwp, gf_inp)
+                        bf_wp, bf_mwp, bf_inp, True
+                elif bf_inp:
+                    _update_best(bf_wp, bf_mwp, bf_inp)
 
             if not won and best_failed_waypoints:
                 waypoints = best_failed_waypoints
@@ -687,10 +709,13 @@ class AutoBot:
 
         return waypoints, mirror_waypoints, inputs, won
 
-    def _gap_fill(self, partial_inputs, screen, clock, max_frames):
+    def _gap_fill(self, partial_inputs, screen, clock, max_frames,
+                  allow_brute=True):
         """Extend a partial path by replaying it as prefix and running wider
-        beam searches from the failure point. Falls back to brute-force
-        (very wide beam, short window) for stubborn segments."""
+        beam searches from the failure point. With ``allow_brute=False``
+        the brute-force fallback is skipped so the caller can run brute
+        force as a distinct phase after parallel search has had a chance
+        to unstick things."""
         best_inputs = list(partial_inputs)
         best_wp = []
         best_mwp = []
@@ -708,6 +733,11 @@ class AutoBot:
                 break
 
             if last_alive == prev_alive:
+                if not allow_brute:
+                    # Same alive-x two retries in a row and brute force
+                    # isn't our job — bail so the caller runs the next
+                    # phase (parallel / brute).
+                    break
                 bf_wp, bf_mwp, bf_inp, bf_won = self._brute_force_segment(
                     best_inputs[:last_alive - self._SEED_SAFETY_MARGIN],
                     self._BRUTE_FORCE_FRAMES, screen, clock, retry)
@@ -725,7 +755,7 @@ class AutoBot:
             cut = last_alive - self._SEED_SAFETY_MARGIN
             prefix = list(best_inputs[:cut])
             width = self.BEAM_WIDTH * (2 ** (retry + 2))
-            status = f"Phase 2: Gap fill (retry {retry + 1}/{self._GAP_FILL_RETRIES}, beam {width})"
+            status = f"Phase 2: Gap fill (retry {retry + 1}/{self._GAP_FILL_RETRIES})"
 
             wp, mwp, inp, gap_won = self._beam_search(
                 width, max_frames, screen, clock, 0,
@@ -746,7 +776,7 @@ class AutoBot:
     def _brute_force_segment(self, prefix_inputs, n_frames, screen, clock,
                              retry_idx=0):
         """Very wide beam for a short window to power through stuck segments."""
-        status = f"Phase 3: Brute force (width {self._BRUTE_FORCE_WIDTH})"
+        status = f"Phase 4: Brute force"
         return self._beam_search(
             self._BRUTE_FORCE_WIDTH,
             len(prefix_inputs) + n_frames,
@@ -943,24 +973,46 @@ class AutoBot:
                     if not player.alive:
                         candidates.append((new_snap, beam_idx, player.x - 1e6, held, pressed))
                     else:
-                        # Composite score (higher = preferred):
-                        #  • x-progress dominates (raw pixels).
-                        #  • clearance_bonus favours paths well clear of
-                        #    saws/spikes (tiebreaker, weight 0.01).
+                        # Composite score (higher = preferred). Tuned
+                        # toward "easiest / cleanest" solves:
+                        #  • x-progress still dominates (raw pixels).
+                        #  • clearance_bonus is weighted higher so the
+                        #    bot prefers paths that stay well clear of
+                        #    spikes/saws — the "easy" path a human would
+                        #    pick.
+                        #  • tap-count penalty in tap-prunable modes so
+                        #    the bot picks hold-heavy (fewer input
+                        #    changes) solutions when they both win.
                         #  • passed-count bonus rewards consuming orbs /
-                        #    portals / coins this frame — usually the
-                        #    designer-intended route.
-                        #  • velocity bonus rewards forward momentum, so
-                        #    the beam prefers candidates building speed
-                        #    over candidates with the same x but stalled.
-                        #  • end-proximity pull strengthens as the player
-                        #    nears the finish, so the beam commits to the
-                        #    final approach instead of wandering sideways.
+                        #    pads / portals / coins.
+                        #  • velocity bonus rewards forward momentum.
+                        #  • end-proximity pull commits the beam to the
+                        #    final approach.
                         score = player.x
-                        score += self._clearance_bonus(player) * 0.01
+                        score += self._clearance_bonus(player) * 0.05
                         newly_passed = len(player.passed) - parent_pcount
                         if newly_passed > 0:
                             score += newly_passed * 3.0
+                        # Prefer fewer taps — every "pressed" frame in a
+                        # tap-prunable mode costs a small amount. Cube
+                        # on-ground jump is unavoidable; flag it with a
+                        # smaller penalty so it doesn't get pruned.
+                        cand_mode = vals[_MODE]
+                        if pressed:
+                            if cand_mode in _TAP_PRUNABLE_MODES:
+                                score -= 0.35
+                            else:
+                                score -= 0.1
+                        # Coin attraction — when a coin is within a
+                        # short window forward of the player, nudge the
+                        # beam toward it so the "easy" solve tends to
+                        # collect coins opportunistically.
+                        gx_now = int(player.x) // CELL
+                        for dcx in range(0, 4):
+                            if (gx_now + dcx) in getattr(
+                                    self, "_coin_xs", ()):
+                                score += 0.3
+                                break
                         # Forward momentum: getattr because move_speed exists
                         # on Player but only post-init.
                         score += getattr(player, "move_speed", 5) * 0.4
@@ -1323,45 +1375,47 @@ class AutoBot:
     def _draw_progress(self, screen, clock, frame, best_x, max_frames,
                        n_alive, beam_width, attempt, status_text="",
                        any_dual=False):
+        """Progress screen for every solver phase. Minimalist by design —
+        the user only cares about the phase, where the solver currently
+        is (X), and how much of the level is left. Frame count / dual
+        marker / beam count were dropped because they confused more than
+        they informed."""
         from graphics import txt
-        pct = min(99, int(frame / max_frames * 100))
         level_pct = 0
         if self._end_x > 0:
             level_pct = min(100, max(0, int(best_x / self._end_x * 100)))
         screen.fill((10, 8, 24))
-        title = "AUTO-BOT  BEAM SEARCH"
-        if attempt > 0:
-            title += f"  (attempt {attempt + 1})"
-        txt(screen, title, WIDTH // 2, HEIGHT // 2 - 80,
+        # Title (same as before) — centered a bit higher so the phase
+        # line sits just under it.
+        txt(screen, "AUTO-BOT SEARCH", WIDTH // 2, HEIGHT // 2 - 86,
             32, (255, 180, 60), True)
+        # Phase label — smaller, directly below the title.
         if status_text:
-            txt(screen, status_text, WIDTH // 2, HEIGHT // 2 - 48,
-                14, (180, 220, 255), True)
-        dual_tag = "  [DUAL]" if any_dual else ""
-        txt(screen, f"Frame {frame}  |  X {int(best_x)}  |  Beam {n_alive}/{beam_width}{dual_tag}",
-            WIDTH // 2, HEIGHT // 2 - 20, 18, (180, 180, 200), True)
-        txt(screen, f"Level progress: {level_pct}%",
-            WIDTH // 2, HEIGHT // 2 + 6, 16,
-            (90, 255, 120) if level_pct > 80 else
-            (250, 200, 80) if level_pct > 40 else (180, 180, 200), True)
-        bw = 400
+            txt(screen, status_text, WIDTH // 2, HEIGHT // 2 - 52,
+                16, (180, 220, 255), True)
+        # Just the current X position. No frame count, no beam counts,
+        # no dual marker.
+        txt(screen, f"X {int(best_x)}",
+            WIDTH // 2, HEIGHT // 2 - 18, 18, (180, 180, 200), True)
+        # Progress bar — always level % (distance toward the finish
+        # line), never frame count. Single bar, no secondary.
+        bw = 460
         bx = WIDTH // 2 - bw // 2
-        by = HEIGHT // 2 + 40
-        pygame.draw.rect(screen, (40, 40, 60), (bx, by, bw, 22), border_radius=6)
-        pygame.draw.rect(screen, (255, 180, 60),
-                         (bx, by, max(1, int(bw * pct / 100)), 22), border_radius=6)
-        txt(screen, f"{pct}%", WIDTH // 2, by + 6, 14, (255, 255, 255), True)
-        if self._end_x > 0:
-            by2 = by + 30
-            pygame.draw.rect(screen, (40, 40, 60), (bx, by2, bw, 14), border_radius=4)
-            lvl_color = (90, 255, 120) if level_pct > 80 else (255, 180, 60)
-            pygame.draw.rect(screen, lvl_color,
-                             (bx, by2, max(1, int(bw * level_pct / 100)), 14),
-                             border_radius=4)
-            txt(screen, f"level {level_pct}%", WIDTH // 2, by2 + 2, 10,
-                (255, 255, 255), True)
+        by = HEIGHT // 2 + 14
+        bh = 24
+        pygame.draw.rect(screen, (40, 40, 60), (bx, by, bw, bh),
+                         border_radius=6)
+        if self._end_x > 0 and level_pct > 0:
+            bar_color = ((90, 255, 120) if level_pct > 80
+                         else (255, 180, 60) if level_pct > 40
+                         else (230, 130, 80))
+            pygame.draw.rect(screen, bar_color,
+                             (bx, by, max(1, int(bw * level_pct / 100)), bh),
+                             border_radius=6)
+        txt(screen, f"{level_pct}%", WIDTH // 2, by + 4,
+            14, (255, 255, 255), True)
         txt(screen, "Escape to cancel",
-            WIDTH // 2, HEIGHT // 2 + 120, 16, (140, 140, 155), True)
+            WIDTH // 2, HEIGHT // 2 + 90, 14, (140, 140, 155), True)
         pygame.display.flip()
         if clock:
             clock.tick(60)

@@ -17,6 +17,7 @@ from constants import FPS as DEFAULT_FPS
 # ---------------------------------------------------------------------------
 DEFAULTS = {
     "fps_cap": DEFAULT_FPS,   # 0 means "uncapped" (passes 0 to clock.tick)
+    "tps": 60,                # ticks/second — simulation rate, independent of FPS
     "fullscreen": False,
     "music_vol": 0.5,         # 0.0..1.0
     "sfx_vol": 0.5,           # 0.0..1.0
@@ -28,6 +29,10 @@ DEFAULTS = {
 
 # Whitelist of FPS caps the UI cycles through. 0 means "no cap".
 FPS_CAP_OPTIONS = [30, 60, 75, 120, 144, 240, 0]
+# TPS options — the simulation tick rate. Decoupled from the render FPS
+# cap so a low-refresh monitor (30 Hz) still runs physics at 60/120 Hz
+# and vice versa.
+TPS_OPTIONS = [30, 60, 90, 120, 180, 240]
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +104,38 @@ def fps_cap_label(cap=None):
     if cap is None:
         cap = get_fps_cap()
     return "Unlimited" if cap == 0 else f"{cap}"
+
+
+def get_tps():
+    """Return the simulation ticks-per-second rate, clamped to a sane
+    range so a corrupted pref can't stall the sim loop."""
+    raw = prefs.get("tps", DEFAULTS["tps"])
+    val = _coerce_int(raw, DEFAULTS["tps"])
+    return max(15, min(480, val))
+
+
+def set_tps(value):
+    val = _coerce_int(value, DEFAULTS["tps"])
+    if val < 15 or val > 480:
+        val = DEFAULTS["tps"]
+    prefs.set("tps", val)
+
+
+def cycle_tps():
+    cur = get_tps()
+    try:
+        idx = TPS_OPTIONS.index(cur)
+    except ValueError:
+        idx = -1
+    new = TPS_OPTIONS[(idx + 1) % len(TPS_OPTIONS)]
+    set_tps(new)
+    return new
+
+
+def tps_label(tps=None):
+    if tps is None:
+        tps = get_tps()
+    return f"{tps}"
 
 
 def get_fullscreen():

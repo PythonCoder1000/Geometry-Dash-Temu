@@ -20,7 +20,7 @@ from constants import (
 )
 from graphics import (
     draw_bg, txt, btn, make_stars, make_mountains, lighter, darker,
-    speaker_icon, icon_button,
+    speaker_icon, icon_button, draw_panel_footer,
 )
 from input_guard import ClickGuard
 import music
@@ -65,17 +65,29 @@ def run_music_menu(screen, clock):
     mountains = make_mountains()
     guard = ClickGuard()
 
+    # Size the panel to its actual content stack so the list, volume
+    # slider, controls row, and add-music row sit in a cohesive block
+    # instead of floating at the bottom with a big empty middle.
     panel_w = 720
-    panel_h = 560
+    header_h = 70
+    row_h = 44
+    list_rows = 7
+    list_h = list_rows * row_h
+    volume_h = 44
+    controls_h = 54
+    add_h = 44
+    footer_h = 28
+    padding = 20
+    panel_h = (header_h + list_h + volume_h + controls_h + add_h
+               + footer_h + padding)
     panel = pygame.Rect((WIDTH - panel_w) // 2,
                         (HEIGHT - panel_h) // 2,
                         panel_w, panel_h)
 
     list_x = panel.x + 32
-    list_y = panel.y + 100
+    list_y = panel.y + header_h
     list_w = panel.w - 64
-    row_h = 44
-    visible_h = panel.h - 240   # leave room for volume + buttons at bottom
+    visible_h = list_h
 
     while True:
         guard.tick()
@@ -199,9 +211,14 @@ def run_music_menu(screen, clock):
                              (panel.right - 18, bar_y, 4, bar_h),
                              border_radius=2)
 
+        # Layout below the list: volume → controls → add-music → footer.
+        # All anchored to known offsets from the list bottom so the rows
+        # stay contiguous even if panel_h ever changes.
+        after_list = list_y + visible_h + 10
+
         # ---- Volume slider -----------------------------------------------
-        vol_y = panel.bottom - 130
-        txt(screen, "Music volume", list_x, vol_y - 2, 15, C_WHITE)
+        vol_y = after_list
+        txt(screen, "Music volume", list_x, vol_y + 4, 15, C_WHITE)
         cur_vol = settings.get_music_vol()
         new_vol = _slider(screen, mpos, mb_down,
                           list_x + 130, vol_y, 280, cur_vol)
@@ -211,7 +228,7 @@ def run_music_menu(screen, clock):
             list_x + 420, vol_y + 4, 13, C_GRAY)
 
         # ---- Mute / Stop / Next / Prev / Back ---------------------------
-        ctrl_y = panel.bottom - 80
+        ctrl_y = vol_y + 42
         b_mute = btn(screen,
                      "Music: OFF" if music.is_muted() else "Music: ON",
                      list_x + 70, ctrl_y, 160, 36,
@@ -241,13 +258,12 @@ def run_music_menu(screen, clock):
             return
 
         # ---- Add music (file-picker dialog) -----------------------------
-        # Sits in the row below the track controls so it doesn't crowd
-        # the Mute/Prev/Next line. tkinter.filedialog is stdlib on all
-        # platforms we build for; music.pick_music_file_dialog falls
-        # back to None on headless environments.
-        add_y = panel.bottom - 40
+        # Sits in its own row BELOW the controls row with 12 px of
+        # margin on each side — previously this button was jammed 4 px
+        # above the panel's bottom border.
+        add_y = ctrl_y + 44
         b_add = btn(screen, "+ Add music from file...",
-                    panel.centerx, add_y, 280, 30, (80, 130, 180),
+                    panel.centerx, add_y, 320, 32, (80, 130, 180),
                     mpos, font_size=13)
         if click_pos and b_add.collidepoint(click_pos):
             picked = music.pick_music_file_dialog("Add music file")
@@ -256,11 +272,11 @@ def run_music_menu(screen, clock):
                 imported = music.import_music_file(picked)
                 if imported is None:
                     txt(screen, "Import failed — check file format",
-                        panel.centerx, add_y + 20, 12, C_DANGER, True)
+                        panel.centerx, add_y + 24, 12, C_DANGER, True)
                     pygame.display.flip()
                     pygame.time.wait(600)
 
-        txt(screen, "Space: play/stop  ·  M: mute  ·  Esc: back",
-            panel.centerx, panel.bottom - 8, 12, C_GRAY, True)
+        draw_panel_footer(screen, panel,
+                          "Space: play/stop  ·  M: mute  ·  Esc: back")
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())

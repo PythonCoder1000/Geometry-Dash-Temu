@@ -1,3 +1,5 @@
+import os
+
 import pygame
 
 from constants import (
@@ -13,6 +15,7 @@ from graphics import (
     draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
     lighter, darker, normalize_rotation,
     speaker_icon, icon_button, draw_end_wall,
+    spike_hitboxes, saw_hitbox,
 )
 from levels import (
     save_level, load_level, load_level_full, update_meta,
@@ -35,6 +38,162 @@ from input_guard import ClickGuard
 # allocate a new WIDTH*HEIGHT surface each frame. Stored as a single-slot
 # list to keep the lazy-init pattern readable.
 _hb_scratch = [None]
+
+
+def _export_level_png(objects, level_name, cell_px=10):
+    """Render the whole level to a single PNG and return the filepath.
+
+    Writes to ``{USER_DATA}/exports/`` so frozen builds work without
+    needing write access to the bundle. Each object renders at
+    ``cell_px`` pixels per grid cell (small enough that a 1000-cell-wide
+    level fits in a manageable image).
+    """
+    import os as _os_exp
+    import re as _re_exp
+    import time as _time_exp
+    from constants import _USER_DATA
+    if not objects:
+        return None
+    min_x = min(o["x"] for o in objects)
+    max_x = max(o["x"] for o in objects)
+    min_y = min(o["y"] for o in objects)
+    max_y = max(o["y"] for o in objects)
+    # Pad 2 cells on each side so the frame doesn't hug the bounds.
+    pad = 2
+    w_cells = max(1, (max_x - min_x) + 1 + 2 * pad)
+    h_cells = max(1, (max_y - min_y) + 1 + 2 * pad)
+    surf_w = w_cells * cell_px
+    surf_h = h_cells * cell_px
+    # Guard absurdly large exports (e.g. levels with stray far-x objects).
+    MAX_PIXELS = 16000 * 2000
+    if surf_w * surf_h > MAX_PIXELS:
+        return None
+    surf = pygame.Surface((surf_w, surf_h), pygame.SRCALPHA)
+    surf.fill((18, 14, 30))
+    for o in objects:
+        sx = (o["x"] - min_x + pad) * cell_px
+        sy = (o["y"] - min_y + pad) * cell_px
+        meta_arg = (o if o["t"] in
+                    (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER,
+                     T_MOVE_TRIGGER, T_COLOR_TRIGGER) else None)
+        try:
+            draw_obj(surf, o["t"], sx, sy, cell_px, 0,
+                     o.get("r", 0), meta_arg)
+        except Exception:
+            continue
+    out_dir = _os_exp.path.join(_USER_DATA, "exports")
+    try:
+        _os_exp.makedirs(out_dir, exist_ok=True)
+    except OSError:
+        return None
+    safe = _re_exp.sub(r"[^\w\-]+", "_", level_name or "level").strip("_") \
+        or "level"
+    fn = f"{safe}_{_time_exp.strftime('%Y%m%d_%H%M%S')}.png"
+    path = _os_exp.path.join(out_dir, fn)
+    try:
+        pygame.image.save(surf, path)
+    except (pygame.error, OSError):
+        return None
+    return path
+
+
+# Editor keyboard cheat sheet — rendered centered on demand (press `?` /
+# F1 / `/`). Grouped by function so the user can skim for what they
+# want. Update this list when a new shortcut lands; cramming more
+# shortcuts into the bottom hints strip is the footgun this replaces.
+_EDITOR_SHORTCUTS = [
+    ("Tools", [
+        ("B", "Brush (place objects)"),
+        ("E", "Erase"),
+        ("N", "Group tool"),
+        ("I", "Edit / inspect"),
+        ("F2", "Snippet library"),
+    ]),
+    ("Palette / placement", [
+        ("Tab / Shift+Tab", "Cycle category"),
+        ("1 – 9", "Pick item in current row"),
+        ("R / Q", "Rotate selection"),
+        ("Wheel on palette", "Rotate current item"),
+    ]),
+    ("Navigation", [
+        ("Arrows / WASD", "Pan canvas (Shift = 2×)"),
+        ("Middle click drag", "Pan canvas"),
+        ("Wheel on canvas", "Zoom (Shift = finer)"),
+        ("Ctrl + = / -", "Zoom in / out (centre)"),
+        ("Ctrl + 0", "Reset zoom to 1.0×"),
+    ]),
+    ("Selection", [
+        ("Click + drag", "Marquee select"),
+        ("^A", "Select all"),
+        ("Del", "Delete selection"),
+        ("^C / ^X / ^V", "Copy / cut / paste"),
+        ("^D", "Duplicate"),
+    ]),
+    ("History / view", [
+        ("^Z / ^Y", "Undo / redo"),
+        ("G", "Toggle grid"),
+        ("H", "Toggle hitbox overlay"),
+    ]),
+    ("Run / save", [
+        ("T", "Test play"),
+        ("Shift+T", "Test from cursor (music seeks)"),
+        ("K", "Bot menu"),
+        ("L", "Auto-solve hint"),
+        ("S", "Save level"),
+        ("^L", "Load level"),
+        ("^E", "Export as PNG"),
+        ("Esc", "Back to menu"),
+    ]),
+    ("Help", [
+        ("? / F1 / /", "Toggle this cheat sheet"),
+    ]),
+]
+
+
+def _draw_editor_cheat_sheet(screen):
+    ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    ov.fill((0, 0, 0, 200))
+    screen.blit(ov, (0, 0))
+    panel_w, panel_h = 880, 560
+    panel = pygame.Rect((WIDTH - panel_w) // 2,
+                        (HEIGHT - panel_h) // 2,
+                        panel_w, panel_h)
+    pygame.draw.rect(screen, (16, 16, 28), panel, border_radius=14)
+    pygame.draw.rect(screen, (90, 110, 190), panel, 2, border_radius=14)
+    txt(screen, "KEYBOARD SHORTCUTS",
+        panel.centerx, panel.y + 26, 24, C_WHITE, True, shadow=True)
+    # Two-column layout — split by row-count so adding / removing a
+    # group keeps columns roughly balanced without having to re-tune a
+    # hardcoded index.
+    total_rows = sum(1 + len(items) for _, items in _EDITOR_SHORTCUTS)
+    left_groups = []
+    right_groups = []
+    acc = 0
+    for grp in _EDITOR_SHORTCUTS:
+        rows_here = 1 + len(grp[1])
+        if acc < total_rows / 2 and acc + rows_here <= total_rows / 2 + rows_here / 2:
+            left_groups.append(grp)
+            acc += rows_here
+        else:
+            right_groups.append(grp)
+    col_w = (panel_w - 80) // 2
+    col_gap = 20
+
+    def _draw_col(groups, col_x):
+        y = panel.y + 68
+        for title, items in groups:
+            txt(screen, title, col_x, y, 16, (150, 190, 255))
+            y += 22
+            for key, desc in items:
+                txt(screen, key, col_x + 10, y, 13, (255, 220, 120))
+                txt(screen, desc, col_x + 150, y, 13, C_WHITE)
+                y += 18
+            y += 10
+
+    _draw_col(left_groups, panel.x + 40)
+    _draw_col(right_groups, panel.x + 40 + col_w + col_gap)
+    txt(screen, "Press ? / F1 / / or Esc to close",
+        panel.centerx, panel.bottom - 22, 12, (170, 170, 190), True)
 
 # Pre-rendered grid-line surface, keyed on effective_cell size (== CELL *
 # zoom_level rounded to int). Replaces ~48 pygame.draw.line calls per
@@ -622,7 +781,7 @@ def _draw_palette(screen, mpos, active_cat, selected_type, tool, pulse,
     return hovered_item_type
 
 
-def run_editor(screen, clock):
+def run_editor(screen, clock, preload_filename=None):
     # The editor is a "quiet" screen — menu music doesn't belong here and
     # playtest / bot replay restart music on their own. Stop on entry so
     # the menu track doesn't keep looping under the editor UI.
@@ -633,11 +792,26 @@ def run_editor(screen, clock):
     level_filename = None  # last-saved filename (without path); used by Publish
     level_meta = None     # last-loaded meta dict (preserve published/verified)
     # ---- Autosave recovery ------------------------------------------------
+    # Preload path: if the caller passed a specific filename (from the
+    # editor picker) skip autosave recovery and load that level instead.
+    if preload_filename:
+        try:
+            from levels import load_level_full, LEVELS_DIR
+            _pre_path = os.path.join(LEVELS_DIR, preload_filename)
+            pl_meta, pl_objs = load_level_full(_pre_path)
+            objects = pl_objs
+            level_name = pl_meta.get("name", "Untitled")
+            level_music = pl_meta.get("music")
+            level_filename = preload_filename
+            level_meta = pl_meta
+        except (OSError, ValueError):
+            pass
+
     # If a previous editor session left a snapshot, offer to restore it before
     # the user starts editing. Declining (or any error) clears the snapshot so
     # the prompt doesn't reappear on every entry.
     recovered = False
-    if has_autosave():
+    if not preload_filename and has_autosave():
         try:
             ameta, aobjs = load_autosave()
         except Exception:
@@ -720,6 +894,33 @@ def run_editor(screen, clock):
 
     # Zoom system
     zoom_level = 1.0
+    # Middle-click / Space+drag panning state. Tracks the mouse/camera
+    # origin at drag start so motion deltas apply linearly.
+    _pan_dragging = False
+    _pan_anchor = (0, 0)
+    _pan_cam_start = (0.0, 0.0)
+
+    def _apply_zoom_anchor(old_zoom, new_zoom, anchor=None):
+        """Keep the world point under ``anchor`` fixed across a zoom change.
+
+        Called after `zoom_level` is mutated — re-solves cam_x/cam_y so
+        the cell previously beneath ``anchor`` (screen pixel coords; defaults
+        to the canvas centre) lands at the same screen pixel post-zoom.
+        Without this, zoom feels glitchy because the view pivots around
+        world origin instead of the user's focal point.
+        """
+        nonlocal cam_x, cam_y
+        if anchor is None:
+            anchor = (WIDTH // 2, (TOP_H + BAR_Y) // 2)
+        eff_old = int(CELL * old_zoom)
+        eff_new = int(CELL * new_zoom)
+        if eff_old <= 0 or eff_new <= 0:
+            return
+        ax, ay = anchor
+        world_x = (ax + cam_x) / eff_old
+        world_y = (ay + cam_y) / eff_old
+        cam_x = world_x * eff_new - ax
+        cam_y = world_y * eff_new - ay
 
     # Autosave: True whenever objects have changed since the last save (or
     # autosave). The timer counts frames between disk writes; the toast frames
@@ -778,6 +979,11 @@ def run_editor(screen, clock):
     last_run_hitboxes = []
     show_hitboxes = False
 
+    # Keyboard cheat-sheet overlay — press `?` or F1 in the editor to see
+    # every shortcut in one place, instead of squinting at the bottom
+    # hint strip. Dismissed with the same key or Escape.
+    show_shortcuts = False
+
     def screen_to_cell(mx, my):
         effective_cell = int(CELL * zoom_level)
         return int((mx + cam_x) // effective_cell), int((my + cam_y) // effective_cell)
@@ -795,6 +1001,9 @@ def run_editor(screen, clock):
         mx, my = mpos
         in_canvas = TOP_H < my < BAR_Y
         do_save = do_load = do_test = do_bot = do_publish = False
+        # Shift+T sets this alongside do_test — caller uses it to pass
+        # start_x to run_play so the playtest spawns at the cursor.
+        do_test_from_cursor = False
         do_bot_menu = False
         tab_rects, item_rects, tool_rects = _palette_rects(active_cat)
         for ev in pygame.event.get():
@@ -817,6 +1026,17 @@ def run_editor(screen, clock):
                         autosave_now()
                     music.stop()
                     return
+                if ev.key in (pygame.K_F1, pygame.K_QUESTION, pygame.K_SLASH):
+                    # `/` without a modifier usually yields K_SLASH; with
+                    # shift it yields K_QUESTION on US layouts. Accept
+                    # either so the help is discoverable.
+                    show_shortcuts = not show_shortcuts
+                    continue
+                if show_shortcuts:
+                    # Any other key dismisses the cheat sheet so the
+                    # editor remains responsive.
+                    show_shortcuts = False
+                    continue
                 if ev.key == pygame.K_g:
                     show_grid = not show_grid
                 elif ev.key == pygame.K_h:
@@ -945,6 +1165,15 @@ def run_editor(screen, clock):
                     selected_objs = []
                     last_edit_cell = None
                     msg, msg_timer = f"Cut {n} object{'s' if n != 1 else ''}", 80
+                elif ev.key == pygame.K_e and pygame.key.get_mods() & pygame.KMOD_CTRL:
+                    # Ctrl+E — export the whole level as a single PNG
+                    # under `{user_data}/exports/`. Renders each object
+                    # at a small fixed cell size (configurable inline).
+                    out_path = _export_level_png(objects, level_name)
+                    if out_path:
+                        msg, msg_timer = f"Exported: {out_path}", 240
+                    else:
+                        msg, msg_timer = "Export failed", 180
                 elif ev.key == pygame.K_a and pygame.key.get_mods() & pygame.KMOD_CTRL:
                     # Select all: Ctrl+A — pick everything except the start marker
                     selected_objs = [o for o in objects if o.get("t") != T_START]
@@ -955,16 +1184,22 @@ def run_editor(screen, clock):
                     else:
                         msg, msg_timer = "Nothing to select", 60
                 elif ev.key == pygame.K_EQUALS and pygame.key.get_mods() & pygame.KMOD_CTRL:
-                    # Zoom in: Ctrl+=
-                    zoom_level = min(2.0, zoom_level + 0.1)
+                    # Zoom in: Ctrl+= (anchored at screen center)
+                    old_zoom = zoom_level
+                    zoom_level = min(3.0, round(zoom_level + 0.2, 2))
+                    _apply_zoom_anchor(old_zoom, zoom_level)
                     msg, msg_timer = f"Zoom: {zoom_level:.1f}x", 60
                 elif ev.key == pygame.K_MINUS and pygame.key.get_mods() & pygame.KMOD_CTRL:
                     # Zoom out: Ctrl+-
-                    zoom_level = max(0.5, zoom_level - 0.1)
+                    old_zoom = zoom_level
+                    zoom_level = max(0.3, round(zoom_level - 0.2, 2))
+                    _apply_zoom_anchor(old_zoom, zoom_level)
                     msg, msg_timer = f"Zoom: {zoom_level:.1f}x", 60
                 elif ev.key == pygame.K_0 and pygame.key.get_mods() & pygame.KMOD_CTRL:
                     # Reset zoom: Ctrl+0
+                    old_zoom = zoom_level
                     zoom_level = 1.0
+                    _apply_zoom_anchor(old_zoom, zoom_level)
                     msg, msg_timer = "Zoom: 1.0x (reset)", 60
                 elif ev.key == pygame.K_s:
                     mods = pygame.key.get_mods()
@@ -1000,6 +1235,12 @@ def run_editor(screen, clock):
                     do_load = True
                 elif ev.key == pygame.K_t:
                     do_test = True
+                    # Shift+T = test starting from the current cursor's
+                    # world x (music seeks to match), so authors can
+                    # iterate on a late section without replaying from
+                    # the start.
+                    if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                        do_test_from_cursor = True
                 elif ev.key == pygame.K_F2:
                     # Open the snippet palette → returned snippet becomes the
                     # cursor stamp; the next canvas click drops it.
@@ -1068,6 +1309,33 @@ def run_editor(screen, clock):
                 if my < TOP_H or my > BAR_Y:
                     current_rotation = normalize_rotation(current_rotation + (90 if ev.y > 0 else -90))
                     msg, msg_timer = f"Rotation: {current_rotation}°", 60
+                else:
+                    # Wheel over the canvas → zoom, anchored at the mouse
+                    # cursor so the cell under the cursor stays put. Without
+                    # anchoring, zoom jumps content around and feels glitchy.
+                    old_zoom = zoom_level
+                    step = 0.1 if (pygame.key.get_mods() & pygame.KMOD_SHIFT) else 0.2
+                    if ev.y > 0:
+                        zoom_level = min(3.0, round(zoom_level + step, 2))
+                    elif ev.y < 0:
+                        zoom_level = max(0.3, round(zoom_level - step, 2))
+                    if zoom_level != old_zoom:
+                        _apply_zoom_anchor(old_zoom, zoom_level, anchor=(mx, my))
+                        msg, msg_timer = f"Zoom: {zoom_level:.1f}x", 40
+            if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 2:
+                # Middle-click: begin canvas pan (matches the cheat-sheet
+                # promise of "Middle click drag: Pan canvas").
+                if TOP_H <= ev.pos[1] <= BAR_Y:
+                    _pan_dragging = True
+                    _pan_anchor = ev.pos
+                    _pan_cam_start = (cam_x, cam_y)
+            if ev.type == pygame.MOUSEBUTTONUP and ev.button == 2:
+                _pan_dragging = False
+            if ev.type == pygame.MOUSEMOTION and _pan_dragging:
+                dx = ev.pos[0] - _pan_anchor[0]
+                dy = ev.pos[1] - _pan_anchor[1]
+                cam_x = _pan_cam_start[0] - dx
+                cam_y = _pan_cam_start[1] - dy
             if ev.type == pygame.MOUSEBUTTONDOWN and not guard.consume_click(ev):
                 continue
             if ev.type == pygame.MOUSEBUTTONUP and not guard.is_settled():
@@ -1603,9 +1871,18 @@ def run_editor(screen, clock):
             # `last_run_hitboxes` is mutated in place by run_play so the
             # editor's H-toggle overlay always reflects the most recent run.
             last_run_hitboxes.clear()
-            run_play(screen, clock, list(objects), level_name + " (Test)",
+            # Shift+T → spawn at the cursor's world x with music seeked
+            # to the matching offset. Test-at-start otherwise.
+            _test_start_x = None
+            if do_test_from_cursor:
+                _test_start_x = int((mx + cam_x) / zoom_level)
+            _test_name = (level_name + " (Test)"
+                          + (" @cursor" if _test_start_x else ""))
+            run_play(screen, clock, list(objects), _test_name,
                      editor_test=True, level_music=level_music,
-                     out_hitboxes=last_run_hitboxes)
+                     meta=level_meta,
+                     out_hitboxes=last_run_hitboxes,
+                     start_x=_test_start_x)
             guard.reset()  # prevent click-through from play
         if do_bot:
             # Bot replays now also pass level_music — the user asked for the
@@ -1616,7 +1893,7 @@ def run_editor(screen, clock):
                 last_run_hitboxes.clear()
                 run_play(screen, clock, list(objects), level_name + " (Bot Exact)",
                          editor_test=True, playback_inputs=bot_exact_inputs,
-                         level_music=level_music,
+                         level_music=level_music, meta=level_meta,
                          out_hitboxes=last_run_hitboxes)
                 msg, msg_timer = f"Exact playback done — {len(bot_exact_inputs)} frames", 180
             elif bot_waypoints:
@@ -1624,7 +1901,7 @@ def run_editor(screen, clock):
                 last_run_hitboxes.clear()
                 run_play(screen, clock, list(objects), level_name + " (Bot)",
                          editor_test=True, bot_controller=bot,
-                         level_music=level_music,
+                         level_music=level_music, meta=level_meta,
                          out_hitboxes=last_run_hitboxes)
                 bot.save_inputs()
                 msg, msg_timer = f"Bot done — {len(bot.inputs)} frames saved to level_bot_inputs.txt", 180
@@ -1634,7 +1911,7 @@ def run_editor(screen, clock):
                     last_run_hitboxes.clear()
                     run_play(screen, clock, list(objects), level_name + " (Playback)",
                              editor_test=True, playback_inputs=pb_inputs,
-                             level_music=level_music,
+                             level_music=level_music, meta=level_meta,
                              out_hitboxes=last_run_hitboxes)
                     msg, msg_timer = f"Playback done — {len(pb_inputs)} frames", 120
                 else:
@@ -1650,11 +1927,15 @@ def run_editor(screen, clock):
                 # Same level_music wiring as the other bot replays — keep
                 # the audio experience consistent across all bot entry
                 # points (K key, Bot button, Bot menu's Replay button).
+                # Pass level_meta so PhysicsParams.from_meta returns the
+                # same per-level tunables the solver used; otherwise the
+                # replay silently runs on default physics and dies at the
+                # first divergent jump arc.
                 last_run_hitboxes.clear()
                 run_play(screen, clock, list(objects),
                          level_name + " (Bot Replay)",
                          editor_test=True, playback_inputs=inputs,
-                         level_music=level_music,
+                         level_music=level_music, meta=level_meta,
                          out_hitboxes=last_run_hitboxes)
                 guard.reset()
 
@@ -1742,8 +2023,9 @@ def run_editor(screen, clock):
         # alpha so dense passes (a long ship hover) read as a single thick
         # band while quick traversals stay legible. Drawn here so palette /
         # bot path / selection rings render on top.
-        if show_hitboxes and last_run_hitboxes:
-            from constants import PLAYER_SIZE as _HB_PSZ
+        if show_hitboxes:
+            from constants import (PLAYER_SIZE as _HB_PSZ, T_SPIKE,
+                                    T_HALF_SPIKE, T_SAW)
             if _hb_scratch[0] is None:
                 _hb_scratch[0] = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             hb_layer = _hb_scratch[0]
@@ -1752,25 +2034,57 @@ def run_editor(screen, clock):
             world_right = (cam_x + WIDTH) / zoom_level + 60
             world_top = cam_y / zoom_level - 60
             world_bot = (cam_y + HEIGHT) / zoom_level + 60
+            # Player's recorded path from the last run (if any) —
+            # cell-aligned 44×44 boxes in green (solid-collision
+            # footprint) with the inner hazard rect in red.
             for hx, hy, hsz in last_run_hitboxes:
-                # Cull off-screen samples cheaply before doing draw math.
                 if (hx + hsz < world_left or hx > world_right
                         or hy + hsz < world_top or hy > world_bot):
                     continue
                 sxh = int(hx * zoom_level - cam_x)
                 syh = int(hy * zoom_level - cam_y)
                 ssz = max(1, int(hsz * zoom_level))
-                # Outer rect (solid-collision footprint) in green.
                 pygame.draw.rect(hb_layer, (120, 255, 140, 90),
                                  (sxh, syh, ssz, ssz), 1)
-                # Inner hazard rect (matches Player.hitbox()'s shrink) in
-                # red so the user can see the killing-collision footprint.
                 shrink = max(2, int(6 * hsz / _HB_PSZ))
                 ssh = max(1, int(shrink * zoom_level))
                 inner_sz = max(1, ssz - 2 * ssh)
                 pygame.draw.rect(hb_layer, (255, 110, 110, 110),
                                  (sxh + ssh, syh + ssh,
                                   inner_sz, inner_sz), 1)
+            # Hazard hitboxes (spikes, half-spikes, saws) so the author
+            # can see EXACTLY where the kill zones are — distinct from
+            # the rendered sprite art which has decorative margins.
+            eff_left_gx = int(cam_x / zoom_level) // CELL - 1
+            eff_right_gx = int((cam_x + WIDTH) / zoom_level) // CELL + 2
+            eff_top_gy = int(cam_y / zoom_level) // CELL - 1
+            eff_bot_gy = int((cam_y + HEIGHT) / zoom_level) // CELL + 2
+            for o in objects:
+                t = o["t"]
+                if t not in (T_SPIKE, T_HALF_SPIKE, T_SAW):
+                    continue
+                gx = o["x"]
+                gy = o["y"]
+                if not (eff_left_gx <= gx <= eff_right_gx
+                        and eff_top_gy <= gy <= eff_bot_gy):
+                    continue
+                if t == T_SAW:
+                    hb = saw_hitbox(gx, gy)
+                    rects = [hb]
+                else:
+                    rects = spike_hitboxes(gx, gy, o.get("r", 0),
+                                           half=(t == T_HALF_SPIKE))
+                for rr in rects:
+                    sx = int(rr.x * zoom_level - cam_x)
+                    sy = int(rr.y * zoom_level - cam_y)
+                    sw = max(1, int(rr.w * zoom_level))
+                    sh = max(1, int(rr.h * zoom_level))
+                    # Semi-transparent fill so the hazard region reads
+                    # through decorations; bright outline for clarity.
+                    pygame.draw.rect(hb_layer, (255, 80, 80, 60),
+                                     (sx, sy, sw, sh))
+                    pygame.draw.rect(hb_layer, (255, 60, 60, 220),
+                                     (sx, sy, sw, sh), 1)
             screen.blit(hb_layer, (0, 0))
         # Draw bot path waypoints
         if bot_waypoints:
@@ -1934,10 +2248,22 @@ def run_editor(screen, clock):
         else:
             sel_name = {TOOL_ERASE: "Eraser", TOOL_GROUP: "Group Tool",
                         TOOL_EDIT: "Edit Tool", TOOL_BOT_PATH: "Bot Path"}[tool]
+        # Dark pill backdrop so these status labels remain readable no
+        # matter what the level background looks like (UI_AUDIT §11).
+        _pill_bg = pygame.Surface((170, 22), pygame.SRCALPHA)
+        _pill_bg.fill((0, 0, 0, 160))
+        screen.blit(_pill_bg, (4, TOP_H))
         txt(screen, sel_name, 10, TOP_H + 2, 13, C_WHITE)
+        _rot_pill = pygame.Surface((80, 22), pygame.SRCALPHA)
+        _rot_pill.fill((0, 0, 0, 160))
+        screen.blit(_rot_pill, (176, TOP_H))
         txt(screen, f"Rot {current_rotation}°", 180, TOP_H + 2, 13, C_GRAY)
         if selected_type == T_TELEPORT_ORB and tool == TOOL_BRUSH:
-            txt(screen, f"Next group: {current_group_id}", 300, TOP_H + 2, 13, C_GRAY)
+            _grp_pill = pygame.Surface((160, 22), pygame.SRCALPHA)
+            _grp_pill.fill((0, 0, 0, 160))
+            screen.blit(_grp_pill, (296, TOP_H))
+            txt(screen, f"Next group: {current_group_id}",
+                300, TOP_H + 2, 13, C_GRAY)
         pygame.draw.rect(screen, (20, 18, 40), (0, BAR_Y, WIDTH, HEIGHT - BAR_Y))
         pygame.draw.line(screen, C_GRID, (0, BAR_Y), (WIDTH, BAR_Y), 1)
         btn(screen, "Save [S]", 70, BAR_Y + 27, 84, 38, C_BTN, mpos)
@@ -2003,8 +2329,12 @@ def run_editor(screen, clock):
                 col = (130, 130, 150)
                 label = f"Last autosave {ago_str}"
             txt(screen, label, WIDTH - 230, BAR_Y + 54, 11, col)
-        txt(screen, "Tab·cats 1-9·pick B/E/N/I·tools F2·snippets K·bot L·auto T·test ^L·load ^Z/Y·undo H·hitboxes",
-            WIDTH // 2 - 40, BAR_Y + 6, 10, C_GRAY, True)
+        # One short hint line above the button row — the full list
+        # lives behind "?" / F1 / "/". Two-line variants intersected the
+        # button row and read as overlapping UI (UI_AUDIT §11).
+        txt(screen,
+            "Press ? for shortcuts  ·  Tab: categories  ·  1–9: pick",
+            WIDTH // 2, BAR_Y - 14, 11, C_GRAY, True)
         if msg_timer > 0:
             txt(screen, msg, WIDTH // 2, BAR_Y - 18, 18, C_PLAYER, True)
         # ---- Palette hover tooltip ---------------------------------------
@@ -2022,5 +2352,8 @@ def run_editor(screen, clock):
                 txt(screen, name, rr.x + 8, rr.y + 4, 14, C_WHITE)
                 if tip:
                     txt(screen, tip, rr.x + 8, rr.y + 22, 11, C_GRAY)
+        # Keyboard cheat sheet — toggled with `?` / F1 / `/`.
+        if show_shortcuts:
+            _draw_editor_cheat_sheet(screen)
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())

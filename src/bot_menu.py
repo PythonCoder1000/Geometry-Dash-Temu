@@ -28,6 +28,7 @@ from constants import (
 )
 from graphics import (
     draw_bg, txt, btn, make_stars, make_mountains, lighter, darker,
+    draw_panel_footer,
 )
 from input_guard import ClickGuard
 import bot_saves
@@ -518,9 +519,11 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
         # hint instead of silently no-op-ing — that "silent no-op" is what
         # made these feel "completely broken".
         view_disabled = not _last_waypoints
+        # Match the Find-Path green tone so Use-as-Hint doesn't read as
+        # "disabled" when it isn't (UI_AUDIT §13).
         b_view = btn(screen, "Use as Hint Overlay",
                      panel.centerx, row_y + 14, 320, 34,
-                     (80, 130, 80), mpos, font_size=15,
+                     (70, 140, 80), mpos, font_size=15,
                      disabled=view_disabled)
         if click_pos and b_view.collidepoint(click_pos):
             if view_disabled:
@@ -627,9 +630,7 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
         if click_pos and b_back.collidepoint(click_pos):
             return return_value
 
-        # Keep the keyboard hint INSIDE the panel (old code placed it at
-        # panel.bottom + 16 which clipped off the screen).
-        txt(screen, "Enter: solve  ·  Esc: back",
-            panel.centerx, panel.bottom - 8, 11, C_GRAY, True)
+        # (Keyboard hint line removed — Enter/Esc bindings still work
+        # but the footer hint cluttered the panel bottom.)
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())

@@ -15,7 +15,7 @@ from constants import (
     MODE_FROM_TYPE, SPEED_VALUES, PLAYER_COLORS, PLAYER_ICONS,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLACK_ORB, T_BLUE_ORB, T_GREEN_ORB,
-    T_PAD, T_BLUE_PAD, T_GRAV, T_END, T_START, T_COIN, T_CHECKPOINT,
+    T_PAD, T_BLUE_PAD, T_GRAV, T_END, T_START, T_COIN,
     T_MODE_MINI, T_MODE_BIG, T_MODE_DUAL, T_MODE_SOLO,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
@@ -170,6 +170,10 @@ class Player:
         self.vy = 0.0
         self.on_ground = False
         self.alive = True
+        # Human-readable reason for the last death — displayed on the
+        # death overlay so the player can tell "hit a spike" from "fell
+        # off the screen". Populated at every `self.alive = False` site.
+        self.death_reason = ""
         self.won = False
         self.angle = 0.0
         self.grav = 1
@@ -432,7 +436,46 @@ class Player:
                     if dist <= max_dist and (best is None or dist < best[0]):
                         best = (dist, br.top - self.size)
         if best is not None:
-            self.y = float(best[1])
+            # Swept-volume hazard check — the teleport is instantaneous
+            # but it still can't phase through spikes or saws. Build the
+            # union of pre- and post-teleport hitboxes (inflated by the
+            # same shrink as the regular hazard check) and test every
+            # hazard whose cell falls inside that swept band.
+            from graphics import spike_hitboxes as _sh, saw_hitbox as _saw
+            prev_y = self.y
+            new_y = float(best[1])
+            shrink = max(2, int(6 * self.size / PLAYER_SIZE))
+            pre_hazard = pygame.Rect(
+                round(self.x) + shrink, round(prev_y) + shrink,
+                self.size - shrink * 2, self.size - shrink * 2)
+            post_hazard = pygame.Rect(
+                round(self.x) + shrink, round(new_y) + shrink,
+                self.size - shrink * 2, self.size - shrink * 2)
+            swept = pre_hazard.union(post_hazard)
+            swept_trigger = swept.inflate(6, 6)
+            for o in self.nearby_for_rect(swept_trigger, 2):
+                t = o["t"]
+                if t in (T_SPIKE, T_HALF_SPIKE):
+                    for sr in _sh(o["x"], o["y"], o.get("r", 0),
+                                  t == T_HALF_SPIKE):
+                        if swept.colliderect(sr):
+                            self.alive = False
+                            self.death_reason = "Teleported into a spike"
+                            return
+                elif t == T_SAW:
+                    if swept.colliderect(_saw(o["x"], o["y"])):
+                        self.alive = False
+                        self.death_reason = "Teleported into a saw"
+                        return
+            # Drop a pair of trail samples at full alpha so the render
+            # draws an instant beam from the pre-teleport y to the
+            # post-teleport y (same style as wave/ship line trail, but
+            # compressed into one substep). Without this the teleport
+            # reads as a jump cut — the new line-mode spider trail has
+            # no natural samples between the old and new positions.
+            self.trail.append([self.x, self.y, self.angle, 220])
+            self.y = new_y
+            self.trail.append([self.x, self.y, self.angle, 220])
             self.grav *= -1
             self.vy = 0.0
             self.on_ground = False
@@ -640,6 +683,7 @@ class Player:
                 elif dx_step < 0:
                     self.x = br.right
                 self.alive = False
+                self.death_reason = "Crashed into a wall"
                 return True
         return False
 
@@ -707,11 +751,13 @@ class Player:
                 for sr in spike_hitboxes(o["x"], o["y"], o.get("r", 0), t == T_HALF_SPIKE):
                     if hazard_rect.colliderect(sr):
                         self.alive = False
+                        self.death_reason = "Hit a spike"
                         return True
                 continue
             if t == T_SAW:
                 if hazard_rect.colliderect(saw_hitbox(o["x"], o["y"])):
                     self.alive = False
+                    self.death_reason = "Hit a saw"
                     return True
                 continue
             if t in PAD_TYPES and key not in self.passed:
@@ -734,12 +780,10 @@ class Player:
                 if cid and cid not in self.coins_collected:
                     self.coins_collected.add(cid)
                 continue
-            if t == T_CHECKPOINT and key not in self.passed:
-                # Trigger a checkpoint save in practice mode (handled upstream).
-                self.passed.add(key)
-                # Mark a request flag for the play loop.
-                self._checkpoint_request = True
-                continue
+            # T_CHECKPOINT was removed from the editor — checkpoints
+            # are a player-session mechanic (placed with the C key in
+            # practice mode), not level data. Any old level files with
+            # checkpoint objects get stripped on load (see levels.py).
             if t in ORB_TYPES and key not in self.passed:
                 cell = (o["x"], o["y"])
                 if activated_orb_cell is None:
@@ -1010,7 +1054,32 @@ class Player:
                     if dist <= max_dist and (best is None or dist < best[0]):
                         best = (dist, br.top - msize)
         if best is not None:
-            m["y"] = float(best[1])
+            # Same swept hazard check as _spider_teleport so the mirror
+            # can't phase through spikes on its jump either.
+            from graphics import spike_hitboxes as _sh, saw_hitbox as _saw
+            prev_y = m["y"]
+            new_y = float(best[1])
+            shrink = max(2, int(6 * msize / PLAYER_SIZE))
+            pre_hazard = pygame.Rect(
+                round(self.x) + shrink, round(prev_y) + shrink,
+                msize - shrink * 2, msize - shrink * 2)
+            post_hazard = pygame.Rect(
+                round(self.x) + shrink, round(new_y) + shrink,
+                msize - shrink * 2, msize - shrink * 2)
+            swept = pre_hazard.union(post_hazard)
+            for o in self.nearby_for_rect(swept.inflate(6, 6), 2):
+                t = o["t"]
+                if t in (T_SPIKE, T_HALF_SPIKE):
+                    for sr in _sh(o["x"], o["y"], o.get("r", 0),
+                                  t == T_HALF_SPIKE):
+                        if swept.colliderect(sr):
+                            m["alive"] = False
+                            return
+                elif t == T_SAW:
+                    if swept.colliderect(_saw(o["x"], o["y"])):
+                        m["alive"] = False
+                        return
+            m["y"] = new_y
             m["grav"] = -m["grav"]
             m["vy"] = 0.0
             m["on_ground"] = False
@@ -1274,6 +1343,7 @@ class Player:
         _cam_y = self.target_cam_y
         if self.y > _cam_y + HEIGHT + 300 or self.y < _cam_y - 500:
             self.alive = False
+            self.death_reason = "Fell off the screen"
             return
         # Dual-mode: step the mirror body. If the mirror dies, the attempt
         # dies with it. This must run after the main physics so the mirror
@@ -1282,6 +1352,8 @@ class Player:
             self._step_mirror(input_held, input_pressed)
             if self.mirror is not None and not self.mirror["alive"]:
                 self.alive = False
+                if not self.death_reason:
+                    self.death_reason = "Mirror died"
                 return
         # Rotation (visual)
         if self.mode == MODE_SHIP:
@@ -1387,13 +1459,17 @@ class Player:
         # sample was stored. For simplicity we draw them at the current
         # self.size so shrinking/growing doesn't leave mismatched ghosts.
         size = self.size
-        # Wave and ship draw a continuous LINE trail (matches GD) instead of
-        # the ghost-sprite trail used by cube/ball/UFO/spider. The line
-        # connects consecutive trail samples on a single SRCALPHA surface
-        # so each segment can fade independently — drawing per-segment on
-        # the screen wouldn't compose alpha correctly against varying bg.
-        if self.mode in (MODE_WAVE, MODE_SHIP) and len(self.trail) >= 2:
-            trail_thickness = 5 if self.mode == MODE_SHIP else 3
+        # Wave / ship / spider all use the continuous LINE trail style:
+        # wave & ship because it matches GD's trail rendering, spider
+        # because the teleport beam (pre→post) needs to show as an
+        # instant line rather than as a discrete ghost between samples.
+        # The line connects consecutive trail samples on one SRCALPHA
+        # surface so each segment can fade independently.
+        if (self.mode in (MODE_WAVE, MODE_SHIP, MODE_SPIDER)
+                and len(self.trail) >= 2):
+            trail_thickness = (5 if self.mode == MODE_SHIP
+                               else 4 if self.mode == MODE_SPIDER
+                               else 3)
             line_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             half = size // 2
             for i in range(len(self.trail) - 1):

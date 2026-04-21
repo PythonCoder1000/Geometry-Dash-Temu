@@ -31,7 +31,7 @@ import json
 import os
 
 from constants import (
-    LEVELS_DIR, LEVEL_FORMAT_VERSION, DIFFICULTIES,
+    LEVELS_DIR, LEVEL_FORMAT_VERSION, DIFFICULTIES, LEGACY_DEMON_TARGET,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,
     T_PAD, T_BLUE_PAD, T_GRAV, T_END, T_START, T_COIN,
@@ -90,11 +90,15 @@ def _safe_filename(name):
     """Turn a human level name into a safe JSON filename (no extension).
 
     Leading underscores are stripped because filenames starting with `_` are
-    reserved (see `list_levels()` and the autosave slot). A level whose
-    sanitized name is empty falls back to `level`.
+    reserved (see `list_levels()` and the autosave slot). Runs of `_` are
+    collapsed to a single underscore so a name like "Blast   !!!" doesn't
+    produce `blast______.json`. A level whose sanitized name is empty falls
+    back to `level`.
     """
+    import re
     base = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name)
     base = base.strip().lower().replace(" ", "_")
+    base = re.sub(r"_+", "_", base)
     base = base.lstrip("_") or "level"
     return base[:60]
 
@@ -217,12 +221,15 @@ def _migrate(data):
     for k, v in data.items():
         if k != "objects":
             meta[k] = v
-    # Normalize fields
+    # Normalize fields. Legacy "Demon" tier → "Hard Demon" (the new
+    # middle-of-the-stack demon), so old levels don't jump to
+    # "Easy Demon" (too lenient) or "Extreme Demon" (undeserved credit).
+    if meta.get("difficulty") == "Demon":
+        meta["difficulty"] = LEGACY_DEMON_TARGET
+    if meta.get("requested_difficulty") == "Demon":
+        meta["requested_difficulty"] = LEGACY_DEMON_TARGET
     if meta.get("difficulty") not in DIFFICULTIES:
         meta["difficulty"] = "Normal"
-    # `requested_difficulty` defaults to whatever the current difficulty is,
-    # so older levels migrated forward don't suddenly advertise a different
-    # "requested" rating than what's already shown.
     if meta.get("requested_difficulty") not in DIFFICULTIES:
         meta["requested_difficulty"] = meta["difficulty"]
     meta["published"] = bool(meta.get("published", False))
@@ -298,10 +305,74 @@ def save_level(objects, name, filename=None, music_file=None, meta=None):
 # ---------------------------------------------------------------------------
 
 AUTOSAVE_FILENAME = "_autosave.json"
+# Rolling backup directory for time-stamped snapshots. QoL §A12 — the
+# single `_autosave.json` only covers the very last state; this rolling
+# history means a user can recover from mistakes they already saved
+# over.
+AUTOSAVE_BACKUP_DIR = "_autosave_backups"
+AUTOSAVE_BACKUP_MAX = 10
 
 
 def _autosave_path():
     return os.path.join(LEVELS_DIR, AUTOSAVE_FILENAME)
+
+
+def _autosave_backup_dir():
+    return os.path.join(LEVELS_DIR, AUTOSAVE_BACKUP_DIR)
+
+
+def _rotate_autosave_backups(data):
+    """Drop a timestamped copy of `data` into the rolling backup dir,
+    pruning the oldest entries so at most AUTOSAVE_BACKUP_MAX remain."""
+    import time
+    bdir = _autosave_backup_dir()
+    try:
+        os.makedirs(bdir, exist_ok=True)
+    except OSError:
+        return
+    fn = time.strftime("autosave-%Y%m%d-%H%M%S.json")
+    path = os.path.join(bdir, fn)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError:
+        return
+    # Prune oldest.
+    try:
+        entries = [f for f in os.listdir(bdir)
+                   if f.startswith("autosave-") and f.endswith(".json")]
+    except OSError:
+        return
+    if len(entries) <= AUTOSAVE_BACKUP_MAX:
+        return
+    entries.sort()  # timestamp prefix sorts chronologically
+    for stale in entries[:-AUTOSAVE_BACKUP_MAX]:
+        try:
+            os.remove(os.path.join(bdir, stale))
+        except OSError:
+            pass
+
+
+def list_autosave_backups():
+    """Return a list of (filename, mtime, meta) tuples for every
+    available backup, newest first. Used by the load-recovery dialog."""
+    bdir = _autosave_backup_dir()
+    if not os.path.isdir(bdir):
+        return []
+    out = []
+    for fn in os.listdir(bdir):
+        if not (fn.startswith("autosave-") and fn.endswith(".json")):
+            continue
+        path = os.path.join(bdir, fn)
+        try:
+            stat = os.stat(path)
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        out.append((fn, int(stat.st_mtime), data))
+    out.sort(key=lambda e: e[1], reverse=True)
+    return out
 
 
 def save_autosave(objects, name, music_file=None, meta=None,
@@ -311,6 +382,7 @@ def save_autosave(objects, name, music_file=None, meta=None,
     Mirrors `save_level` but writes to a fixed reserved filename and tags the
     snapshot with the original filename (if any) so recovery can restore it
     to the same slot. The autosave file is filtered out of `list_levels()`.
+    Also drops a timestamped copy into the rolling backup directory.
     """
     ensure_dirs()
     file_meta = dict(meta) if meta else _default_meta(name)
@@ -329,6 +401,7 @@ def save_autosave(objects, name, music_file=None, meta=None,
     path = _autosave_path()
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f)
+    _rotate_autosave_backups(data)
     return path
 
 
@@ -379,7 +452,11 @@ def load_level_full(path):
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     meta = _migrate(data)
-    objects = [normalize_object(o) for o in data.get("objects", [])]
+    # Strip legacy "checkpoint" objects — checkpoints are a player-
+    # session mechanic (C key in practice mode), not level data.
+    raw_objects = [o for o in data.get("objects", [])
+                   if o.get("t") != "checkpoint"]
+    objects = [normalize_object(o) for o in raw_objects]
     # Assign missing coin_ids deterministically so progress tracks them stably.
     next_cid = 1
     used = {o.get("coin_id", 0) for o in objects if o["t"] == T_COIN}

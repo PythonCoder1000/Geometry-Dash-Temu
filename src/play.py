@@ -17,7 +17,7 @@ from constants import (
     C_COIN, C_SUCCESS, C_PUBLISH, C_DANGER,
     DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES,
     T_TELEPORT_ORB, T_COIN, T_END, T_ORB, T_DASH_ORB, T_BLACK_ORB,
-    T_BLUE_ORB, T_GREEN_ORB, T_GRAV, T_CHECKPOINT,
+    T_BLUE_ORB, T_GREEN_ORB, T_GRAV,
 )
 from graphics import (
     draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
@@ -43,7 +43,6 @@ _SFX_FOR_TYPE = {
     T_BLUE_ORB: ("gravity", 0.45),
     T_GREEN_ORB: ("orb", 0.5),
     T_GRAV: ("gravity", 0.45),
-    T_CHECKPOINT: ("checkpoint", 0.4),
 }
 
 
@@ -68,7 +67,7 @@ def _play_interaction_sounds(before_passed, after_passed, before_pads, after_pad
 def run_play(screen, clock, objects, level_name="Level", editor_test=False,
              practice_mode=False, level_music=None, bot_controller=None,
              playback_inputs=None, meta=None, level_path=None,
-             out_hitboxes=None):
+             out_hitboxes=None, start_x=None):
     """Run a single play session.
 
     ``meta`` / ``level_path`` (optional) are used to persist verification,
@@ -80,6 +79,12 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     completed attempt. The list is cleared and refilled on every restart so
     the editor's "show hitboxes from last run" overlay always reflects the
     final attempt the user took before exiting back to the editor.
+
+    ``start_x`` (optional, pixels): teleport the player this far into
+    the level on spawn (and restart). The music is seeked to the
+    matching offset so the beat still lines up with the level layout
+    at the spawn position — essential for "test from cursor" when the
+    level is beat-synced.
     """
     objects = [dict(o) for o in objects]
     total_coins = _total_coins(objects)
@@ -90,6 +95,13 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     params = PhysicsParams.from_meta(meta)
     player = Player(objects, params=params)
     player.practice_mode = practice_mode
+    # Music-seek offset in seconds matching ``start_x``. Level traversal
+    # runs at `move_speed` px/frame × 60 fps — nominally 300 px/sec so
+    # a 1500px start_x seeks 5 s into the track.
+    _music_offset_sec = 0.0
+    if start_x and start_x > 0:
+        pps = max(1.0, float(player.params.base_move_speed) * 60.0)
+        _music_offset_sec = max(0.0, float(start_x) / pps)
     particles = Particles()
     stars = make_stars()
     mountains = make_mountains()
@@ -113,11 +125,15 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     best_run = []
     best_run_progress_x = 0.0
 
-    # Hitbox recording for the editor's "show hitboxes from last run" view.
-    # `current_hitboxes` is the in-progress per-attempt buffer. On
-    # restart/death/win/exit we copy it into out_hitboxes (replacing — we
-    # only show ONE attempt at a time to keep the overlay readable).
+    # Hitbox recording for the editor's "show hitboxes from best run" view.
+    # `current_hitboxes` is the in-progress per-attempt buffer.
+    # `best_hitboxes_progress` tracks how far the best-committed trace got;
+    # we only overwrite `out_hitboxes` when a new attempt beats that mark.
+    # Showing the deepest attempt instead of the most-recent is what the
+    # overlay is actually useful for — a last-attempt death on frame 1
+    # shouldn't blow away a trace that made it to 80% on the run before.
     current_hitboxes = []
+    best_hitboxes_progress = 0.0
 
     is_sim_run = bool(bot_controller is not None or playback_inputs is not None)
     # Don't persist progress for editor-test runs or bot/playback runs.
@@ -132,6 +148,9 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     hint_visible = False
     hint_solving = False
     hint_status = ""          # "" | "ok" | "partial" | "failed"
+    # Debug overlay: FPS, player state, frame time. Toggled with F3.
+    show_debug = False
+    _dbg_frame_times = []
 
     # GD-style music: play level music from the start. We used to gate
     # this on `not editor_test` (so the editor's Test button stayed silent),
@@ -141,13 +160,15 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     # silent, since their variable speeds don't sync to audio.
     if level_music:
         music.stop()
-        music.play_file(level_music)
+        music.play_file(level_music, start_sec=_music_offset_sec)
 
     def _restart_level_music():
-        """Restart level music from the beginning (GD-style on death)."""
+        """Restart level music — seeked to `start_x`'s offset if set,
+        otherwise from the beginning (GD-style on death). Keeps music in
+        sync with the level position when testing from cursor."""
         if level_music:
             music.stop()
-            music.play_file(level_music)
+            music.play_file(level_music, start_sec=_music_offset_sec)
 
     def _toggle_music_mute():
         """Toggle music mute without reverting to the menu track mid-level."""
@@ -167,10 +188,19 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
 
     prev_input_held = False
     sim_accum = 0.0
+    # Last render-frame wall duration in seconds. Used to advance
+    # `sim_accum` at a rate driven by the Settings-configured TPS value,
+    # decoupled from the render FPS cap.
+    last_dt_sec = 1.0 / 60.0
     pending_jump_press = False
     bot_frame = 0
     test_speeds = [0.01, 0.05, 0.1, 0.25, 0.5, 1.0]
     test_speed_idx = len(test_speeds) - 1
+    # Apply start_x on the initial spawn too (the `_full_reset` path
+    # handles subsequent attempts).
+    if start_x and start_x > 0:
+        player.x = float(start_x)
+        player._x_at_frame_start = player.x
     # Two lists sorted by x — decorations drawn first (behind), then the rest.
     # Pre-extracted x arrays enable bisect to slice directly to the visible
     # window instead of scanning every non-trigger object per frame.
@@ -198,10 +228,11 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     # Pause menu state
     paused = False
     pause_menu_buttons = {
-        "resume": make_rect(WIDTH // 2, HEIGHT // 2 - 30, 220, 50),
-        "restart": make_rect(WIDTH // 2, HEIGHT // 2 + 30, 220, 50),
-        "practice_toggle": make_rect(WIDTH // 2, HEIGHT // 2 + 90, 220, 50),
-        "menu": make_rect(WIDTH // 2, HEIGHT // 2 + 150, 220, 50),
+        "resume": make_rect(WIDTH // 2, HEIGHT // 2 - 60, 220, 48),
+        "restart": make_rect(WIDTH // 2, HEIGHT // 2 - 6, 220, 48),
+        "practice_toggle": make_rect(WIDTH // 2, HEIGHT // 2 + 48, 220, 48),
+        "settings": make_rect(WIDTH // 2, HEIGHT // 2 + 102, 220, 48),
+        "menu": make_rect(WIDTH // 2, HEIGHT // 2 + 156, 220, 48),
     }
     # Mute icon rects (populated each frame; only hit-tested while paused)
     r_mute_music = pygame.Rect(0, 0, 0, 0)
@@ -226,19 +257,29 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         nonlocal prev_input_held, pending_jump_press, sim_accum, bot_frame
         nonlocal cam_y, bg_top, bg_bot
         nonlocal attempt_frames, current_run, best_run, best_run_progress_x
-        nonlocal current_hitboxes
+        nonlocal current_hitboxes, best_hitboxes_progress
         # Commit the finished attempt as the new ghost if it got further.
         if current_run and current_run[-1][1] > best_run_progress_x:
             best_run = list(current_run)
             best_run_progress_x = current_run[-1][1]
         current_run = []
-        # Snapshot this attempt's hitbox path for the editor overlay before
-        # we start the next attempt. Only commit non-empty paths so a
-        # double-tap on R doesn't blow away the user's last real run.
-        if out_hitboxes is not None and current_hitboxes:
+        # Commit this attempt's hitbox trace to the editor overlay ONLY
+        # if it beat the furthest trace we've seen. That keeps the H-key
+        # overlay anchored on the most-informative run rather than being
+        # clobbered by the next panicked restart.
+        if (out_hitboxes is not None and current_hitboxes
+                and player.x >= best_hitboxes_progress):
             out_hitboxes[:] = current_hitboxes
+            best_hitboxes_progress = player.x
         current_hitboxes = []
         player.reset()
+        # Honour the test-from-cursor start position — player.reset
+        # puts the cube at the level's START object, so we teleport
+        # after reset to land at `start_x`. Camera re-derives from it
+        # below.
+        if start_x and start_x > 0:
+            player.x = float(start_x)
+            player._x_at_frame_start = player.x
         attempts += 1
         death_timer = 0
         death_slowmo_timer = 0
@@ -260,9 +301,25 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
             music.stop()
         # Commit the in-progress hitbox buffer on exit too — otherwise a
         # user who walks away mid-attempt loses the trace they just made.
-        # Same "only save non-empty" guard as _full_reset.
-        if out_hitboxes is not None and current_hitboxes:
+        # Same "best attempt wins" guard as _full_reset: don't overwrite a
+        # longer saved trace with a shorter exit-trace.
+        if (out_hitboxes is not None and current_hitboxes
+                and player.x >= best_hitboxes_progress):
             out_hitboxes[:] = current_hitboxes
+        # Persist Best% Normal on exit even when the player didn't win.
+        # Without this the carousel's "Best — Normal" bar never changes
+        # for levels a player is still trying to beat. Practice runs
+        # go to the local practice-best store instead.
+        if (level_path and can_persist and not practice_mode
+                and best_progress > 0):
+            try:
+                prev_best = int((meta or {}).get("best_progress", 0))
+                if best_progress > prev_best:
+                    update_meta(level_path, best_progress=best_progress)
+                    if meta is not None:
+                        meta["best_progress"] = best_progress
+            except Exception:
+                pass
         return result
 
     def _compute_hint_path():
@@ -373,6 +430,26 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                     sfx.toggle_mute()
                 elif ev.key == pygame.K_r and not player.won:
                     _full_reset()
+                elif (ev.key == pygame.K_c and practice_mode
+                      and player.alive and not player.won):
+                    # Drop a checkpoint at the player's current position.
+                    # Only in practice mode — normal runs have no
+                    # checkpoints. The next death respawns here. A
+                    # marker is drawn in-world at this position so the
+                    # player can see where they planted each one
+                    # (replaces the old green screen flash).
+                    player.save_checkpoint()
+                    sfx.play("practice_checkpoint", 0.4)
+                elif (ev.key == pygame.K_x and practice_mode
+                      and player.alive and not player.won
+                      and player.checkpoints):
+                    # Pop the most recent checkpoint. Mirrors the GD
+                    # convention (C drops, X removes). If the player
+                    # already queued a checkpoint-request via an orb,
+                    # clear that too so the next respawn uses whatever
+                    # is left in the stack.
+                    player.checkpoints.pop()
+                    sfx.play("click", 0.5)
                 elif ev.key == pygame.K_b and not is_sim_run and not player.won:
                     # Bot menu: opens the dedicated bot UI for solving / replay.
                     from bot_menu import run_bot_menu, get_last_mirror_waypoints
@@ -399,7 +476,19 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                             hint_status = new_status
                             hint_visible = True
                     guard.reset()
-                elif ev.key == pygame.K_h and not is_sim_run and not player.won:
+                elif ev.key == pygame.K_F3:
+                    show_debug = not show_debug
+                elif ev.key == pygame.K_F1 or (
+                        ev.key == pygame.K_SLASH and
+                        pygame.key.get_mods() & pygame.KMOD_SHIFT):
+                    from menus import help_modal, _PLAY_HELP_GROUPS
+                    _title = "Practice — Help" if practice_mode else "Play — Help"
+                    help_modal(screen, clock, _title, _PLAY_HELP_GROUPS)
+                    guard.reset()
+                elif (ev.key == pygame.K_h and not is_sim_run
+                      and not player.won and practice_mode):
+                    # Autobot hint overlay is a practice-mode learning
+                    # aid — normal attempts are meant to be unaided.
                     # Hint mode: toggle the autobot ghost overlay. First
                     # press blocks while the solver runs (its built-in
                     # progress UI takes the screen). Subsequent presses
@@ -414,11 +503,14 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                         guard.reset()
                     elif hint_path is not None:
                         hint_visible = not hint_visible
-                elif editor_test and ev.key in (pygame.K_LEFTBRACKET, pygame.K_MINUS):
+                elif (editor_test or practice_mode) and ev.key in (
+                        pygame.K_LEFTBRACKET, pygame.K_MINUS):
                     test_speed_idx = max(0, test_speed_idx - 1)
-                elif editor_test and ev.key in (pygame.K_RIGHTBRACKET, pygame.K_EQUALS):
+                elif (editor_test or practice_mode) and ev.key in (
+                        pygame.K_RIGHTBRACKET, pygame.K_EQUALS):
                     test_speed_idx = min(len(test_speeds) - 1, test_speed_idx + 1)
-                elif editor_test and ev.key in (pygame.K_0, pygame.K_BACKQUOTE):
+                elif (editor_test or practice_mode) and ev.key in (
+                        pygame.K_0, pygame.K_BACKQUOTE):
                     test_speed_idx = len(test_speeds) - 1
             if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if not guard.consume_click(ev):
@@ -470,6 +562,17 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 practice_mode = not practice_mode
                 player.practice_mode = practice_mode
                 guard.reset()
+            elif pause_menu_buttons["settings"].collidepoint(clicked_pos):
+                # Open the settings screen in-place. Re-apply the display
+                # surface (settings may have toggled fullscreen) and
+                # reset the click guard so the returning click doesn't
+                # leak into the physics tick.
+                from menus import run_settings
+                if level_music and music.is_playing():
+                    music.stop()  # avoid music bleeding into settings
+                run_settings(screen, clock)
+                _restart_level_music()
+                guard.reset()
             elif pause_menu_buttons["menu"].collidepoint(clicked_pos):
                 return _stop_music_and_return("menu")
             # A paused click should never trigger a jump — swallow it.
@@ -486,12 +589,26 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 win_sfx_played = False
                 guard.reset()
 
-        step_scale = test_speeds[test_speed_idx] if editor_test else 1.0
+        # Both editor-test and practice mode let the player slow the
+        # physics sim for easier practice on hard sections (QoL B6).
+        step_scale = (test_speeds[test_speed_idx]
+                      if (editor_test or practice_mode) else 1.0)
         if death_slowmo_timer > 0:
             step_scale *= 0.2  # slower slow-mo makes the moment punchier
             death_slowmo_timer -= 1
 
-        sim_accum += step_scale
+        # Decouple sim from render: the number of physics ticks per
+        # real second is `get_tps()`, regardless of the render FPS cap.
+        # At the default TPS=60 on a 60 FPS display this reduces to the
+        # old "one tick per frame" behavior. A 30 FPS display emits ~2
+        # sim ticks per render frame so the game still runs at real-time.
+        _tps = max(15, settings.get_tps())
+        sim_accum += last_dt_sec * _tps * step_scale
+        # Guard against spiral-of-death after a long stall (debugger
+        # break, tab switch) — clamp the accumulator so we don't try to
+        # catch up with 5000 ticks in one frame.
+        if sim_accum > _tps * 0.5:
+            sim_accum = _tps * 0.5
         while sim_accum >= 1.0:
             sim_accum -= 1.0
             if death_timer > 0:
@@ -541,20 +658,33 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                     before_pads, after_pads,
                     before_coins, after_coins,
                 )
-                # Handle checkpoint-request from player (practice-mode flag
-                # triggers or T_CHECKPOINT pickup). Only save when practice
-                # mode is actually on.
+                # Handle checkpoint-request from player (practice-mode
+                # flag triggers). Only save when practice mode is actually
+                # on.
                 if getattr(player, "_checkpoint_request", False):
                     player._checkpoint_request = False
                     if practice_mode and player.practice_mode:
                         player.save_checkpoint()
-                        checkpoint_flash_timer = 20
-                        sfx.play("checkpoint", 0.4)
+                        sfx.play("practice_checkpoint", 0.4)
 
                 # Track best progress for persistence.
                 progress_now = int(max(0.0, min(1.0, player.x / max_x)) * 100)
                 if progress_now > best_progress:
                     best_progress = progress_now
+                    # Practice best % is per-user / per-level and stored
+                    # locally for now (Chunk F moves it to the progress
+                    # server). Normal mode's best is persisted on win
+                    # through meta.best_progress.
+                    if practice_mode and level_path:
+                        try:
+                            from menus import _get_best_practice, _set_best_practice
+                            import os as _os_p
+                            _fn = _os_p.path.basename(level_path)
+                            prev = _get_best_practice(_fn)
+                            if progress_now > prev:
+                                _set_best_practice(_fn, progress_now)
+                        except Exception:
+                            pass
                 if len(player.coins_collected) > best_coins_this_run:
                     best_coins_this_run = len(player.coins_collected)
 
@@ -688,10 +818,57 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
             player.draw(screen, cam_x + shake_x, cam_y + shake_y)
         particles.draw(screen, cam_x + shake_x, cam_y + shake_y)
 
-        if death_flash_timer > 0:
-            flash_intensity = int(255 * (death_flash_timer / 30))
-            _overlay_scratch.fill((255, 0, 0, flash_intensity))
-            screen.blit(_overlay_scratch, (0, 0))
+        # Checkpoint markers — little flag drawn at every saved spot.
+        # Only in practice mode (that's the only mode that saves them)
+        # and before the player wins, so the win card isn't cluttered.
+        if practice_mode and player.checkpoints and not player.won:
+            _pulse_t = (pulse % 60) / 60.0
+            _glow = int(90 + 40 * math.sin(_pulse_t * math.tau))
+            for _i, _cp in enumerate(player.checkpoints):
+                fx = int(_cp["x"] - cam_x - shake_x)
+                fy = int(_cp["y"] - cam_y - shake_y)
+                # Cull off-screen markers cheaply.
+                if fx < -40 or fx > WIDTH + 40:
+                    continue
+                # Flag pole.
+                pole_top = fy - 28
+                pole_bot = fy + 44
+                pygame.draw.line(screen, (230, 230, 240),
+                                 (fx + 8, pole_top), (fx + 8, pole_bot), 2)
+                # Triangular flag.
+                flag_pts = [(fx + 8, pole_top),
+                            (fx + 30, pole_top + 8),
+                            (fx + 8, pole_top + 16)]
+                pygame.draw.polygon(screen, (90, 220, 140), flag_pts)
+                pygame.draw.polygon(screen, (20, 100, 50), flag_pts, 2)
+                # Soft pulsing halo around the flag so it reads as
+                # "interactive" rather than part of the level art.
+                halo = pygame.Surface((44, 44), pygame.SRCALPHA)
+                pygame.draw.circle(halo, (120, 255, 160, _glow),
+                                   (22, 22), 22)
+                screen.blit(halo, (fx - 14, pole_top - 6))
+                # Number label on the flag (1-indexed).
+                txt(screen, str(_i + 1), fx + 14, pole_top + 4, 11,
+                    (20, 40, 20), center=True)
+
+        # (Red full-screen death flash removed — the slow-mo vignette,
+        # explosion particles, camera shake and "Hit a spike" readout
+        # below already signal death clearly, and the flash felt
+        # visually heavy.)
+
+        # Death reason readout — shows shortly after death so the
+        # player gets a short explanation of what killed them ("Hit a
+        # spike", "Fell off the screen", etc.) before the next attempt.
+        if death_timer > 0 and getattr(player, "death_reason", ""):
+            fade = min(1.0, (45 - death_timer) / 12.0)
+            alpha = int(230 * max(0.0, fade))
+            _reason = player.death_reason
+            _rtxt = f"☠  {_reason}"
+            reason_surf = pygame.Surface((WIDTH, 46), pygame.SRCALPHA)
+            reason_surf.fill((0, 0, 0, int(140 * fade)))
+            screen.blit(reason_surf, (0, HEIGHT // 2 + 60))
+            txt(screen, _rtxt, WIDTH // 2, HEIGHT // 2 + 82,
+                22, (255, 220, 220), True, shadow=True)
 
         # Slow-mo vignette: bordered darkening when death_slowmo_timer is active.
         if death_slowmo_timer > 0:
@@ -713,36 +890,50 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
             screen.blit(_overlay_scratch, (0, 0))
         if death_flash_timer > 0:
             death_flash_timer -= 1
-        if checkpoint_flash_timer > 0:
-            flash_intensity = int(100 * (checkpoint_flash_timer / 20))
-            _overlay_scratch.fill((0, 255, 0, flash_intensity))
-            screen.blit(_overlay_scratch, (0, 0))
-            checkpoint_flash_timer -= 1
+        # (Checkpoint green flash removed — the in-world flag markers
+        # now convey "saved here" more clearly and don't obscure the
+        # player's surroundings at the moment the save happens.)
 
         # ---- HUD ----------------------------------------------------------
+        # Progress bar — spans most of the screen width, taller so the bar
+        # carries visual weight. Every 10% has a subtle tick for structure.
         progress = max(0.0, min(1.0, player.x / max_x))
-        bw = WIDTH - 100
+        bar_x = 50
+        bar_y = 10
+        bar_h = 12
+        bw = WIDTH - 2 * bar_x
         if progress < 0.5:
             bar_color = (255, int(255 * (progress / 0.5)), 0)
         else:
             bar_color = (int(255 * (1 - (progress - 0.5) / 0.5)), 255, 0)
-        pygame.draw.rect(screen, C_DARK, (50, 12, bw, 8), border_radius=4)
-        pygame.draw.rect(screen, bar_color, (50, 12, max(1, int(bw * progress)), 8),
+        pygame.draw.rect(screen, C_DARK, (bar_x, bar_y, bw, bar_h),
                          border_radius=4)
+        pygame.draw.rect(screen, bar_color,
+                         (bar_x, bar_y, max(1, int(bw * progress)), bar_h),
+                         border_radius=4)
+        for pct in range(10, 100, 10):
+            tx = bar_x + int(bw * pct / 100)
+            pygame.draw.rect(screen, (0, 0, 0, 80),
+                             (tx, bar_y + 2, 1, bar_h - 4))
         progress_percent = int(progress * 100)
-        txt(screen, f"{progress_percent}%", 50 + int(bw * progress) + 10, 6, 14,
+        txt(screen, f"{progress_percent}%",
+            bar_x + int(bw * progress) + 10, bar_y - 4, 14,
             C_GRAY, shadow=True)
 
-        txt(screen, f"Attempt {attempts}", 20, 28, 17, C_GRAY, shadow=True)
-        # Speedrun timer + best time (mm:ss.cc) — small, beside attempt count.
+        # Attempt / time stack sits BELOW the progress bar, clearly
+        # separated so nothing visually collides with the coin HUD.
+        hud_text_y = bar_y + bar_h + 10
+        txt(screen, f"Attempt {attempts}", 20, hud_text_y, 17, C_GRAY,
+            shadow=True)
         cur_time_s = attempt_frames / 60.0
         timer_label = f"Time {int(cur_time_s // 60):d}:{cur_time_s % 60:05.2f}"
-        txt(screen, timer_label, 20, 46, 14, C_GRAY, shadow=True)
+        txt(screen, timer_label, 20, hud_text_y + 20, 14, C_GRAY, shadow=True)
         prev_best_time = int((meta or {}).get("best_time_frames", 0)) if meta else 0
         if prev_best_time > 0:
             best_s = prev_best_time / 60.0
             best_label = f"Best {int(best_s // 60):d}:{best_s % 60:05.2f}"
-            txt(screen, best_label, 20, 62, 13, C_SUCCESS, shadow=True)
+            txt(screen, best_label, 20, hud_text_y + 38, 13, C_SUCCESS,
+                shadow=True)
         txt(screen, level_name, WIDTH // 2, 8, 15, C_WHITE, True, shadow=True)
         txt(screen, f"{player.mode.title()} · {player.move_speed:.1f}x",
             WIDTH - 170, 28, 14, C_GRAY, shadow=True)
@@ -763,6 +954,15 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 coin_y - 8, 14, C_WHITE, shadow=True)
 
         if practice_mode:
+            # Stack the CP chip ABOVE the PRACTICE label so the two never
+            # collide horizontally — on narrow windows the centred
+            # PRACTICE text and the right-anchored chip used to share a
+            # row and risked overlap.
+            _cp_n = len(player.checkpoints)
+            _cp_label = (f"CP: {_cp_n}  ·  C drop · X pop" if _cp_n
+                         else "CP: 0  ·  press C to drop a checkpoint")
+            txt(screen, _cp_label, WIDTH - 140, HEIGHT - 46, 12,
+                (180, 220, 255) if _cp_n else C_GRAY, True, shadow=True)
             txt(screen, "PRACTICE MODE", WIDTH // 2, HEIGHT - 22, 15, (0, 255, 0),
                 True, shadow=True)
         # Hint-mode status: a subtle top-left line the player can ignore
@@ -774,9 +974,12 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
             txt(screen, badge, 20, 78, 13, (255, 200, 80), shadow=True)
         elif hint_path is not None and not hint_visible:
             txt(screen, "HINT off — press H", 20, 78, 12, C_GRAY, shadow=True)
-        if editor_test:
-            txt(screen, f"Test {test_speeds[test_speed_idx]:.2f}x",
-                WIDTH - 85, 26, 15, C_GRAY, shadow=True)
+        if editor_test or (practice_mode and
+                           test_speed_idx != len(test_speeds) - 1):
+            _speed_label = ("Test" if editor_test else "Practice")
+            txt(screen,
+                f"{_speed_label} {test_speeds[test_speed_idx]:.2f}x",
+                WIDTH - 110, 26, 15, C_GRAY, shadow=True)
             if bot_controller is not None:
                 txt(screen, "BOT", WIDTH // 2 - 220, HEIGHT - 22, 18,
                     (255, 180, 60), True, shadow=True)
@@ -787,22 +990,67 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
             txt(screen, "[/- slower  ]/= faster  0 reset", WIDTH // 2,
                 HEIGHT - 22, 15, C_GRAY, True, shadow=True)
 
+        # ---- Debug overlay (F3) -------------------------------------------
+        if show_debug:
+            import time as _time_dbg
+            now = _time_dbg.perf_counter()
+            _dbg_frame_times.append(now)
+            # Keep only the last ~1 sec of timestamps for FPS calc.
+            cutoff = now - 1.0
+            while _dbg_frame_times and _dbg_frame_times[0] < cutoff:
+                _dbg_frame_times.pop(0)
+            _fps = (len(_dbg_frame_times) - 1) / max(
+                0.001, (_dbg_frame_times[-1] - _dbg_frame_times[0])
+                if len(_dbg_frame_times) > 1 else 0.001)
+            _frame_ms = (now - _dbg_frame_times[-2]) * 1000 \
+                if len(_dbg_frame_times) > 1 else 0.0
+            lines = [
+                f"FPS {_fps:.1f}  ·  {_frame_ms:.1f}ms",
+                f"pos ({player.x:.1f}, {player.y:.1f})",
+                f"vy {player.vy:.2f}  grav {player.grav}",
+                f"mode {player.mode}  speed {player.move_speed:.1f}x",
+                f"on_ground {player.on_ground}  size {player.size}",
+                f"frame {player.frame}  attempts {attempts}",
+                f"objects {len(objects)}",
+            ]
+            if player.mirror is not None:
+                mm = player.mirror
+                lines.append(f"mirror y {mm['y']:.1f} vy {mm['vy']:.2f} "
+                             f"grav {mm['grav']}")
+            dbg_w, dbg_h = 260, 14 * len(lines) + 12
+            pad = pygame.Rect(WIDTH - dbg_w - 10, HEIGHT - dbg_h - 40,
+                              dbg_w, dbg_h)
+            bg = pygame.Surface((dbg_w, dbg_h), pygame.SRCALPHA)
+            bg.fill((0, 0, 0, 180))
+            screen.blit(bg, pad.topleft)
+            for i, ln in enumerate(lines):
+                txt(screen, ln, pad.x + 8, pad.y + 6 + i * 14,
+                    11, (180, 240, 180))
+
         # ---- Pause overlay ------------------------------------------------
         if paused:
             ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             ov.fill((0, 0, 0, 180))
             screen.blit(ov, (0, 0))
-            txt(screen, "PAUSED", WIDTH // 2, HEIGHT // 2 - 110, 56, C_PLAYER, True)
+            txt(screen, "PAUSED", WIDTH // 2, HEIGHT // 2 - 140, 56, C_PLAYER, True)
+            # Status sub-line: show attempt count + current % so the pause
+            # menu is informative, not just a cover (QoL B5).
+            _pct = int(max(0.0, min(1.0, player.x / max_x)) * 100)
+            txt(screen, f"Attempt {attempts}  ·  {_pct}%",
+                WIDTH // 2, HEIGHT // 2 - 100, 16, C_GRAY, True)
             btn(screen, "Resume", pause_menu_buttons["resume"].centerx,
-                pause_menu_buttons["resume"].centery, 220, 50, C_BTN, mpos)
+                pause_menu_buttons["resume"].centery, 220, 48, C_BTN, mpos)
             btn(screen, "Restart", pause_menu_buttons["restart"].centerx,
-                pause_menu_buttons["restart"].centery, 220, 50, C_BTN, mpos)
+                pause_menu_buttons["restart"].centery, 220, 48, C_BTN, mpos)
             practice_label = "Practice: ON" if practice_mode else "Practice: OFF"
             practice_col = C_SUCCESS if practice_mode else C_BTN
             btn(screen, practice_label, pause_menu_buttons["practice_toggle"].centerx,
-                pause_menu_buttons["practice_toggle"].centery, 220, 50, practice_col, mpos)
+                pause_menu_buttons["practice_toggle"].centery, 220, 48, practice_col, mpos)
+            btn(screen, "Settings", pause_menu_buttons["settings"].centerx,
+                pause_menu_buttons["settings"].centery, 220, 48,
+                (80, 100, 160), mpos)
             btn(screen, "Main Menu", pause_menu_buttons["menu"].centerx,
-                pause_menu_buttons["menu"].centery, 220, 50, C_DANGER, mpos)
+                pause_menu_buttons["menu"].centery, 220, 48, C_DANGER, mpos)
             # Mute toggles — bottom row, centered below menu button
             r_mute_music = icon_button(
                 screen, speaker_icon(22, music.is_muted()),
@@ -873,4 +1121,8 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 rc_replay.w, rc_replay.h, C_SUCCESS, mpos)
 
         pygame.display.flip()
-        clock.tick(settings.get_fps_cap())
+        # clock.tick sleeps to cap at fps_cap and returns the ms that
+        # elapsed since the previous call — stash it as the next frame's
+        # dt so sim_accum can advance by wall-clock * TPS.
+        _dt_ms = clock.tick(settings.get_fps_cap())
+        last_dt_sec = _dt_ms / 1000.0
