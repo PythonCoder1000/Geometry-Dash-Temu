@@ -296,8 +296,6 @@ def run_menu(screen, clock):
                      (50, 70, 110) if _user else (70, 60, 120),
                      mpos, font_size=13)
 
-        txt(screen, "Space / Click to jump  ·  Hold in ship / wave",
-            WIDTH // 2, HEIGHT - 30, 14, C_GRAY, True, shadow=True)
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())
 
