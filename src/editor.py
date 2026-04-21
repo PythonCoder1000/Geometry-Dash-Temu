@@ -796,8 +796,13 @@ def run_editor(screen, clock, preload_filename=None):
     # editor picker) skip autosave recovery and load that level instead.
     if preload_filename:
         try:
-            from .levels import load_level_full, LEVELS_DIR
-            _pre_path = os.path.join(LEVELS_DIR, preload_filename)
+            # `load_level_full` is already imported at module scope —
+            # re-importing it here would shadow that binding for the
+            # whole function and trigger UnboundLocalError when any
+            # later code path (e.g. Save / Publish) runs without first
+            # passing through the preload branch.
+            from .constants import LEVELS_DIR as _PRELOAD_LEVELS_DIR
+            _pre_path = os.path.join(_PRELOAD_LEVELS_DIR, preload_filename)
             pl_meta, pl_objs = load_level_full(_pre_path)
             objects = pl_objs
             level_name = pl_meta.get("name", "Untitled")

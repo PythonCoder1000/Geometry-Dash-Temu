@@ -19,5 +19,5 @@ unshared dev builds and tests.
 # Examples:
 #   "http://203.0.113.42:8000"           # bare IP, plain HTTP (dev only)
 #   "https://play.trigsprint.example"    # domain + TLS (recommended)
-DEFAULT_SERVER_URL = ""
+DEFAULT_SERVER_URL = "http://35.162.142.94:8000"   
 # ---------------------------------------------------------------------
