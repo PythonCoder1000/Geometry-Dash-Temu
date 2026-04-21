@@ -1265,30 +1265,23 @@ def _slider(screen, mpos, mb_down, x, y, w, value):
 
 
 def run_editor_picker(screen, clock):
-    """Pre-editor picker — lists the signed-in user's levels plus a
+    """Pre-editor picker — lists every level on the local disk plus a
     "New level" tile. Returns one of:
 
         ("open", filename)  — open this level in the editor
         ("new", None)       — start an empty level
         None                — user backed out
 
-    Until Chunk F's cloud store lands, "my levels" is resolved from
-    the local filesystem: any level whose meta.author matches the
-    signed-in username, plus unpublished drafts (no author gate) when
-    signed out.
+    The picker is filesystem-scoped on purpose: anything under the user
+    data dir is openable regardless of whose username is stamped in the
+    meta.author field. That way levels authored under a previous
+    username (e.g. an "alice" account used pre-auth) stay editable
+    after switching to a new signed-in user.
     """
     from .prefs import get as _pget
     current_user = _pget("signed_in_username", None)
     summaries = list_level_summaries()
-
-    def _is_mine(meta):
-        if current_user is None:
-            # Not signed in → show everything local (backcompat for
-            # single-user dev workflow before auth existed).
-            return True
-        return (meta.get("author") or "") == current_user
-
-    my_levels = [(fn, m) for fn, m in summaries if _is_mine(m)]
+    my_levels = list(summaries)
     my_levels.sort(key=lambda e: (e[1].get("name") or e[0]).lower())
 
     stars = _stars()

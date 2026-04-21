@@ -1786,8 +1786,13 @@ def run_editor(screen, clock, preload_filename=None):
                     if save_meta is None:
                         from .levels import _default_meta as _dm
                         save_meta = _dm(name)
-                    if not save_meta.get("author") or save_meta.get("author") == "Player":
-                        save_meta["author"] = _cu
+                    # Always claim the level for the signed-in user on
+                    # Save. If they opened a legacy level stamped under
+                    # an old account (e.g. "alice") and press Save, the
+                    # saved version belongs to them now — consistent with
+                    # the picker showing all local levels regardless of
+                    # the original author.
+                    save_meta["author"] = _cu
                 save_level(objects, name, fn, music_file=level_music, meta=save_meta)
                 level_filename = fn + ".json"
                 # Reload meta so we have the current on-disk state.
@@ -1838,8 +1843,7 @@ def run_editor(screen, clock, preload_filename=None):
                     # signed-in user who just published it.
                     from .prefs import get as _pget_pub
                     _cu_pub = _pget_pub("signed_in_username", None)
-                    if _cu_pub and (not save_meta.get("author")
-                                    or save_meta.get("author") == "Player"):
+                    if _cu_pub:
                         save_meta["author"] = _cu_pub
                     # Until verified, the displayed difficulty mirrors the request.
                     if not save_meta.get("verified"):
