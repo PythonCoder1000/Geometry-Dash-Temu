@@ -19,8 +19,8 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-import prefs
-from constants import LEVELS_DIR
+from . import prefs
+from .constants import LEVELS_DIR
 
 
 # --------------------------------------------------------------------------
@@ -163,7 +163,7 @@ class LocalLevelStore(LevelStore):
         return level_id if level_id.endswith(".json") else level_id + ".json"
 
     def list_mine(self, username: Optional[str]) -> List[Tuple[str, Dict]]:
-        from levels import list_level_summaries
+        from .levels import list_level_summaries
         out = []
         for fn, meta in list_level_summaries():
             if username is None or (meta.get("author") or "") == username:
@@ -171,12 +171,12 @@ class LocalLevelStore(LevelStore):
         return out
 
     def list_public(self) -> List[Tuple[str, Dict]]:
-        from levels import list_level_summaries
+        from .levels import list_level_summaries
         return [(fn, m) for fn, m in list_level_summaries()
                 if m.get("published") or m.get("verified")]
 
     def load(self, level_id: str) -> Optional[Tuple[Dict, List[Dict]]]:
-        from levels import load_level_full
+        from .levels import load_level_full
         path = self._path_for(level_id)
         if not os.path.isfile(path):
             return None
@@ -186,7 +186,7 @@ class LocalLevelStore(LevelStore):
             return None
 
     def save(self, level_id, meta, objects, *, author=None):
-        from levels import save_level, _safe_filename  # noqa
+        from .levels import save_level, _safe_filename  # noqa
         if author is not None:
             meta = dict(meta)
             meta["author"] = author
@@ -196,7 +196,7 @@ class LocalLevelStore(LevelStore):
         return fn or _safe_filename(name)
 
     def set_state(self, level_id, state, *, username=None):
-        from levels import load_level_full, save_level
+        from .levels import load_level_full, save_level
         if state not in LEVEL_STATES:
             return False
         path = self._path_for(level_id)
@@ -222,7 +222,7 @@ class LocalLevelStore(LevelStore):
         if not os.path.isfile(path):
             return False
         try:
-            from levels import load_level_full
+            from .levels import load_level_full
             meta, _ = load_level_full(path)
             if username is not None and (meta.get("author") or "") != username:
                 return False
@@ -383,7 +383,7 @@ def get_stores() -> Tuple[AuthStore, LevelStore]:
     url = os.environ.get("TRIGSPRINT_SERVER_URL", "").strip()
     if not url:
         try:
-            from server_config import DEFAULT_SERVER_URL
+            from .server_config import DEFAULT_SERVER_URL
             url = (DEFAULT_SERVER_URL or "").strip()
         except ImportError:
             url = ""

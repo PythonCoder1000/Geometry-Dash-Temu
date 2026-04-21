@@ -18,7 +18,7 @@ import os
 
 import pygame
 
-from constants import (
+from .constants import (
     LEVELS_DIR,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,

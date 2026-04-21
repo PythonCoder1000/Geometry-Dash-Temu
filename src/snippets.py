@@ -14,7 +14,7 @@ followed by user entries.
 import json
 import os
 
-from constants import (
+from .constants import (
     LEVELS_DIR,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_PAD, T_BLUE_PAD, T_ORB, T_DASH_ORB, T_GRAV,

@@ -7,25 +7,25 @@ from collections import OrderedDict
 
 import pygame
 
-from constants import (
+from .constants import (
     WIDTH, HEIGHT, FPS, LEVELS_DIR,
     C_PLAYER, C_GRAY, C_WHITE, C_BTN, C_BTN_H, C_DANGER, C_DARK, C_BLOCK_H,
     C_SUCCESS, C_PUBLISH, C_COIN,
     DIFFICULTIES, DIFFICULTY_COLORS,
     PLAYER_COLORS, PLAYER_ICONS, PLAYER_SIZE,
 )
-from graphics import (
+from .graphics import (
     draw_bg, txt, btn, make_stars, make_mountains, lighter, darker,
     speaker_icon, icon_button, draw_obj, draw_cube_icon_glyph,
     draw_panel_footer, draw_title_glow,
 )
-from levels import list_levels, list_level_summaries, load_level_full
-import music
-import sfx
-import settings
-import gamepad
-import thumbnails
-from input_guard import ClickGuard
+from .levels import list_levels, list_level_summaries, load_level_full
+from . import music
+from . import sfx
+from . import settings
+from . import gamepad
+from . import thumbnails
+from .input_guard import ClickGuard
 
 
 def _maybe_click_sfx(pos, rects):
@@ -308,7 +308,7 @@ def _current_username():
     now it lets the main menu show a placeholder indicator without
     crashing when the server isn't wired up yet."""
     try:
-        from prefs import get as _pget
+        from .prefs import get as _pget
         return _pget("signed_in_username", None)
     except Exception:
         return None
@@ -344,7 +344,7 @@ def _get_best_practice(filename):
     Stored per-level in prefs until the server-backed progress store
     lands in Chunk F."""
     try:
-        from prefs import get as _pget
+        from .prefs import get as _pget
         key = _best_practice_key(filename)
         return int(_pget(key, 0)) if key else 0
     except Exception:
@@ -353,7 +353,7 @@ def _get_best_practice(filename):
 
 def _set_best_practice(filename, pct):
     try:
-        from prefs import set as _pset
+        from .prefs import set as _pset
         key = _best_practice_key(filename)
         if key:
             _pset(key, max(0, min(100, int(pct))))
@@ -447,7 +447,7 @@ def run_select(screen, clock, practice=False):
     the cloud store lands (Chunk F), we treat all local levels as
     visible and authored by the current signed-in user.
     """
-    from prefs import get as _pget
+    from .prefs import get as _pget
     current_user = _pget("signed_in_username", None)
 
     summaries = list_level_summaries()
@@ -1106,7 +1106,7 @@ def snippet_picker(screen, clock):
     that snippet; the editor then drops it where the user clicks next.
     Right-click a user snippet to delete it (built-ins are immutable).
     """
-    from snippets import get_snippets, delete_user_snippet
+    from .snippets import get_snippets, delete_user_snippet
 
     stars = _stars()
     guard = ClickGuard()
@@ -1275,7 +1275,7 @@ def run_editor_picker(screen, clock):
     signed-in username, plus unpublished drafts (no author gate) when
     signed out.
     """
-    from prefs import get as _pget
+    from .prefs import get as _pget
     current_user = _pget("signed_in_username", None)
     summaries = list_level_summaries()
 
@@ -1427,7 +1427,7 @@ def run_settings(screen, clock, on_fullscreen_change=None):
     stars = _stars()
     mountains = _mountains()
     guard = ClickGuard()
-    from constants import ASSETS_DIR as _ASSETS_DIR
+    from .constants import ASSETS_DIR as _ASSETS_DIR
     theme_path = os.path.join(_ASSETS_DIR, "ui", "theme.json")
     manager = pygame_gui.UIManager((WIDTH, HEIGHT),
                                    theme_path if os.path.isfile(theme_path)
@@ -1657,7 +1657,7 @@ def run_settings(screen, clock, on_fullscreen_change=None):
                     return run_settings(screen, clock,
                                         on_fullscreen_change=on_fullscreen_change)
                 elif ev.ui_element is music_lib_btn:
-                    from music_menu import run_music_menu
+                    from .music_menu import run_music_menu
                     manager.clear_and_reset()
                     run_music_menu(screen, clock)
                     return run_settings(screen, clock,

@@ -11,17 +11,15 @@ from typing import NamedTuple
 
 import pygame
 
-from constants import (
+from .constants import (
     CELL, PLAYER_SIZE, HEIGHT, WIDTH,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     HAZARD_TYPES, ORB_TYPES,
     T_END,
     C_PLAYER,
 )
-from player import Player
-import sfx
-
-
+from .player import Player
+from . import sfx
 # Snapshot value tuple — every reader (_dedup_key, _restore, tests) used
 # to index this by raw integer position. Naming the fields eliminates the
 # class of bug where extending the tuple but forgetting to update a
@@ -476,7 +474,7 @@ class AutoBot:
         # Coin columns — used by the scoring heuristic to nudge the beam
         # toward opportunistic coin pickups (part of an "easy / clean"
         # solve is picking up the coins on the way).
-        from constants import T_COIN as _T_COIN
+        from .constants import T_COIN as _T_COIN
         self._coin_xs = set(o["x"] for o in objects if o["t"] == _T_COIN)
 
     # Frames of cached input we discard before resuming beam search after a
@@ -1300,7 +1298,7 @@ class AutoBot:
     def _draw_parallel_progress(self, screen, clock, n_pending, n_workers):
         """Minimal progress display for the parallel phase. Returns True
         if the user pressed ESC (cancel)."""
-        from graphics import txt
+        from .graphics import txt
         completed = n_workers - n_pending
         screen.fill((10, 8, 24))
         txt(screen, "AUTO-BOT  PARALLEL BEAM SEARCH",
@@ -1380,7 +1378,7 @@ class AutoBot:
         is (X), and how much of the level is left. Frame count / dual
         marker / beam count were dropped because they confused more than
         they informed."""
-        from graphics import txt
+        from .graphics import txt
         level_pct = 0
         if self._end_x > 0:
             level_pct = min(100, max(0, int(best_x / self._end_x * 100)))

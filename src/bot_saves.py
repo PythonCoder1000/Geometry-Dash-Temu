@@ -23,7 +23,7 @@ import json
 import os
 import time
 
-from constants import BOT_RUNS_DIR
+from .constants import BOT_RUNS_DIR
 
 
 # Fields that the solver adds at runtime and that shouldn't change the

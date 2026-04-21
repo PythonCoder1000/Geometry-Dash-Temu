@@ -11,8 +11,7 @@ import random
 
 import pygame
 
-import prefs
-
+from . import prefs
 _initialized = False
 _sounds = {}
 _enabled = True

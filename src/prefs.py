@@ -14,7 +14,7 @@ Keys in use:
 import json
 import os
 
-from constants import PREFS_FILE
+from .constants import PREFS_FILE
 
 # Canonical location is resolved in constants.py — packaged builds get a
 # per-user writable dir, dev checkouts (GDT_DEV_LOCAL=1) use the repo.

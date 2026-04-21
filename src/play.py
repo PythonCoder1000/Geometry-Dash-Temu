@@ -11,7 +11,7 @@ import sys
 
 import pygame
 
-from constants import (
+from .constants import (
     WIDTH, HEIGHT, CELL, FPS,
     C_DARK, C_PLAYER, C_GRAY, C_WHITE, C_BTN, C_BG_TOP, C_BG_BOT,
     C_COIN, C_SUCCESS, C_PUBLISH, C_DANGER,
@@ -19,19 +19,19 @@ from constants import (
     T_TELEPORT_ORB, T_COIN, T_END, T_ORB, T_DASH_ORB, T_BLACK_ORB,
     T_BLUE_ORB, T_GREEN_ORB, T_GRAV,
 )
-from graphics import (
+from .graphics import (
     draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
     update_shake, apply_shake, shake_offset, lighter, darker,
     speaker_icon, icon_button, draw_end_wall,
 )
-import settings
-import gamepad
-import music
-import sfx
-from input_guard import ClickGuard
-from particles import Particles
-from player import Player
-from levels import update_meta
+from . import settings
+from . import gamepad
+from . import music
+from . import sfx
+from .input_guard import ClickGuard
+from .particles import Particles
+from .player import Player
+from .levels import update_meta
 
 
 # Keys / cells that, when added to player.passed during an update(),
@@ -91,7 +91,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     # Per-level physics override (B5): `meta["physics"]` is a flat dict of
     # tunables; absent → vanilla defaults. Built here rather than inside
     # Player so bot replays / editor tests see the same per-level feel.
-    from physics import PhysicsParams
+    from .physics import PhysicsParams
     params = PhysicsParams.from_meta(meta)
     player = Player(objects, params=params)
     player.practice_mode = practice_mode
@@ -334,7 +334,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         currently attempting.
         """
         try:
-            from autobot import AutoBot
+            from .autobot import AutoBot
             # Strip the _orig_x/_orig_y bookkeeping fields the live Player
             # added — the solver expects clean object dicts.
             clean = []
@@ -385,7 +385,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         # or override the difficulty. Skip the dialog if the level was never
         # published (editor-quick-verify path) or already verified.
         if meta and meta.get("published") and not meta.get("verified"):
-            from menus import difficulty_picker
+            from .menus import difficulty_picker
             requested = meta.get("requested_difficulty", meta.get("difficulty", "Normal"))
             chosen = difficulty_picker(
                 screen, clock,
@@ -452,7 +452,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                     sfx.play("click", 0.5)
                 elif ev.key == pygame.K_b and not is_sim_run and not player.won:
                     # Bot menu: opens the dedicated bot UI for solving / replay.
-                    from bot_menu import run_bot_menu, get_last_mirror_waypoints
+                    from .bot_menu import run_bot_menu, get_last_mirror_waypoints
                     # Pass the level's filename (extracted from level_path)
                     # so Save/Load bot runs key off a stable identifier.
                     _lfn = None
@@ -481,7 +481,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 elif ev.key == pygame.K_F1 or (
                         ev.key == pygame.K_SLASH and
                         pygame.key.get_mods() & pygame.KMOD_SHIFT):
-                    from menus import help_modal, _PLAY_HELP_GROUPS
+                    from .menus import help_modal, _PLAY_HELP_GROUPS
                     _title = "Practice — Help" if practice_mode else "Play — Help"
                     help_modal(screen, clock, _title, _PLAY_HELP_GROUPS)
                     guard.reset()
@@ -567,7 +567,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 # surface (settings may have toggled fullscreen) and
                 # reset the click guard so the returning click doesn't
                 # leak into the physics tick.
-                from menus import run_settings
+                from .menus import run_settings
                 if level_music and music.is_playing():
                     music.stop()  # avoid music bleeding into settings
                 run_settings(screen, clock)
@@ -677,7 +677,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                     # through meta.best_progress.
                     if practice_mode and level_path:
                         try:
-                            from menus import _get_best_practice, _set_best_practice
+                            from .menus import _get_best_practice, _set_best_practice
                             import os as _os_p
                             _fn = _os_p.path.basename(level_path)
                             prev = _get_best_practice(_fn)

@@ -17,7 +17,7 @@ from collections import OrderedDict
 
 import pygame
 
-from constants import (
+from .constants import (
     ASSETS_DIR, CELL, WIDTH, HEIGHT, GROUND_Y, _USER_DATA,
     C_BG_TOP, C_BG_BOT, C_GROUND, C_GROUND_L, C_GROUND_DARK, C_WHITE, C_GRAY,
     C_BLOCK, C_BLOCK_H, C_BLOCK_D, C_SPIKE, C_ORB, C_DASH_ORB, C_TELEPORT_ORB,
@@ -1371,7 +1371,7 @@ def regenerate_sprite_assets(size=CELL):
     for each (type, frame) and recomputes it so future loads pick up the
     new art.
     """
-    from constants import ALL_TYPES
+    from .constants import ALL_TYPES
     os.makedirs(SPRITES_DIR, exist_ok=True)
     _OBJECT_CACHE.clear()
     for t in ALL_TYPES:

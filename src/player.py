@@ -9,7 +9,7 @@ import math
 
 import pygame
 
-from constants import (
+from .constants import (
     CELL, WIDTH, HEIGHT, PLAYER_SIZE, MINI_PLAYER_SIZE, PLAYER_START_GX,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_FROM_TYPE, SPEED_VALUES, PLAYER_COLORS, PLAYER_ICONS,
@@ -22,15 +22,13 @@ from constants import (
     C_PLAYER, C_DASH_ORB, C_PAD, C_MODE_WAVE, C_MODE_UFO, C_MODE_SPIDER,
     DEFAULT_MOVE_CURVE, PAD_TYPES, ORB_TYPES, SOLID_TYPES,
 )
-from graphics import (
+from .graphics import (
     cell_rect, slab_rect, spike_hitboxes, pad_trigger_rect, saw_hitbox,
     lighter, darker, clamp, draw_cube_icon_glyph,
 )
-from levels import get_group_id
-from physics import PhysicsParams, DEFAULT_PARAMS
-import settings
-
-
+from .levels import get_group_id
+from .physics import PhysicsParams, DEFAULT_PARAMS
+from . import settings
 # ---------------------------------------------------------------------------
 # Move-trigger timing curve integration
 # ---------------------------------------------------------------------------
@@ -441,7 +439,7 @@ class Player:
             # union of pre- and post-teleport hitboxes (inflated by the
             # same shrink as the regular hazard check) and test every
             # hazard whose cell falls inside that swept band.
-            from graphics import spike_hitboxes as _sh, saw_hitbox as _saw
+            from .graphics import spike_hitboxes as _sh, saw_hitbox as _saw
             prev_y = self.y
             new_y = float(best[1])
             shrink = max(2, int(6 * self.size / PLAYER_SIZE))
@@ -1056,7 +1054,7 @@ class Player:
         if best is not None:
             # Same swept hazard check as _spider_teleport so the mirror
             # can't phase through spikes on its jump either.
-            from graphics import spike_hitboxes as _sh, saw_hitbox as _saw
+            from .graphics import spike_hitboxes as _sh, saw_hitbox as _saw
             prev_y = m["y"]
             new_y = float(best[1])
             shrink = max(2, int(6 * msize / PLAYER_SIZE))

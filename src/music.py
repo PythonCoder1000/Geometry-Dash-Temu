@@ -16,9 +16,8 @@ import shutil
 
 import pygame
 
-from constants import ASSETS_DIR, USER_MUSIC_DIR
-import prefs
-
+from .constants import ASSETS_DIR, USER_MUSIC_DIR
+from . import prefs
 MUSIC_DIR = os.path.join(ASSETS_DIR, "music")  # Read-only (bundled)
 _initialized = False
 _current_track = None

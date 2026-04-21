@@ -8,27 +8,24 @@ owns the top-level state machine (menu ↔ select ↔ play ↔ editor).
 import os
 import sys
 
-# Game modules live under src/. Make them importable before anything
-# else is loaded. PyInstaller uses the spec's `pathex` for the same
-# reason at freeze time; this block covers plain `python main.py`.
-_SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
-if os.path.isdir(_SRC_DIR) and _SRC_DIR not in sys.path:
-    sys.path.insert(0, _SRC_DIR)
+# When the script is launched as ``python main.py`` the CWD is usually
+# the repo root; when launched via a frozen bundle the parent of this
+# file is the app root. Either way, make sure the repo root is on
+# sys.path so `import src.*` resolves cleanly.
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import pygame
 
-from constants import WIDTH, HEIGHT, ASSETS_DIR
-from editor import run_editor
-
-from levels import ensure_dirs, load_level_full
-import music
-import sfx
-import settings
-import gamepad
-from menus import (run_menu, run_select, run_settings, run_customize,
-                   run_editor_picker)
-from music_menu import run_music_menu
-from play import run_play
+from src.constants import WIDTH, HEIGHT, ASSETS_DIR
+from src.editor import run_editor
+from src.levels import ensure_dirs, load_level_full
+from src import music, sfx, settings, gamepad
+from src.menus import (run_menu, run_select, run_settings, run_customize,
+                       run_editor_picker)
+from src.music_menu import run_music_menu
+from src.play import run_play
 
 
 def _set_window_icon():
@@ -133,8 +130,8 @@ def _auth_stub(screen, clock):
     the real FastAPI server when `TRIGSPRINT_SERVER_URL` is set, and
     falls back to the local disk store when offline / for tests.
     """
-    from menus import text_input_dialog, confirm_dialog
-    from stores import get_stores
+    from src.menus import text_input_dialog, confirm_dialog
+    from src.stores import get_stores
     auth, _ = get_stores()
     cur = auth.current_username()
     if cur:

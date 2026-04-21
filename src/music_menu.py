@@ -14,19 +14,17 @@ import sys
 
 import pygame
 
-from constants import (
+from .constants import (
     WIDTH, HEIGHT,
     C_DARK, C_WHITE, C_GRAY, C_BLOCK_H, C_BTN, C_BTN_H, C_DANGER, C_SUCCESS,
 )
-from graphics import (
+from .graphics import (
     draw_bg, txt, btn, make_stars, make_mountains, lighter, darker,
     speaker_icon, icon_button, draw_panel_footer,
 )
-from input_guard import ClickGuard
-import music
-import settings
-
-
+from .input_guard import ClickGuard
+from . import music
+from . import settings
 # Track-list scroll state survives between visits so re-opening the menu
 # leaves you where you were.
 _scroll = 0

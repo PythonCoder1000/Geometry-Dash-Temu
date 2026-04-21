@@ -22,19 +22,17 @@ import traceback
 
 import pygame
 
-from constants import (
+from .constants import (
     WIDTH, HEIGHT,
     C_DARK, C_WHITE, C_GRAY, C_BLOCK_H, C_BTN, C_DANGER, C_SUCCESS,
 )
-from graphics import (
+from .graphics import (
     draw_bg, txt, btn, make_stars, make_mountains, lighter, darker,
     draw_panel_footer,
 )
-from input_guard import ClickGuard
-import bot_saves
-import settings
-
-
+from .input_guard import ClickGuard
+from . import bot_saves
+from . import settings
 # ---------------------------------------------------------------------------
 # Persistent (within-session) bot tuning knobs
 # ---------------------------------------------------------------------------
@@ -113,7 +111,7 @@ def _run_solver(screen, clock, objects, params=None):
     (e.g. the user only added decoration), the solve returns instantly.
     """
     try:
-        from autobot import AutoBot
+        from .autobot import AutoBot
         clean = _strip_internal(objects)
         solver = AutoBot(clean, params=params)
         solver.BEAM_WIDTH = _bot_beam_widths[_bot_beam_idx]
@@ -302,7 +300,7 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
 
     # B5: per-level physics override — fetch once so Find Path and the
     # Enter-to-solve shortcut both see the level's feel, not vanilla.
-    from physics import PhysicsParams
+    from .physics import PhysicsParams
     params = PhysicsParams.from_meta(meta)
 
     # Prefer filename-based keys (human-debuggable, stable across edits
@@ -579,7 +577,7 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                 info_msg = "Solve first — nothing to save."
                 info_color = (250, 200, 80)
             else:
-                from menus import text_input_dialog
+                from .menus import text_input_dialog
                 name = text_input_dialog(
                     screen, clock, prompt="Save bot run as:",
                     default=f"run_{time.strftime('%Y%m%d_%H%M')}")

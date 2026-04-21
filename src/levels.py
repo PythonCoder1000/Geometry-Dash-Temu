@@ -30,7 +30,7 @@ Older versions are migrated on load.
 import json
 import os
 
-from constants import (
+from .constants import (
     LEVELS_DIR, LEVEL_FORMAT_VERSION, DIFFICULTIES, LEGACY_DEMON_TARGET,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,
@@ -60,7 +60,7 @@ def _seed_bundled_levels():
     subsequent launches don't stomp edits.
     """
     try:
-        from constants import _BUNDLED_LEVELS_DIR
+        from .constants import _BUNDLED_LEVELS_DIR
     except ImportError:
         return
     # Same path → dev checkout, nothing to seed.
@@ -292,7 +292,7 @@ def save_level(objects, name, filename=None, music_file=None, meta=None):
     # Best-effort thumbnail refresh — kept lazy-imported so headless callers
     # that haven't initialized pygame display can still save levels.
     try:
-        from thumbnails import save_thumbnail
+        from .thumbnails import save_thumbnail
         save_thumbnail(fn, data["objects"])
     except Exception:
         pass

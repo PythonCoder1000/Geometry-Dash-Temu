@@ -9,7 +9,7 @@ preemptively over spikes and saws that sit on the planned path.
 
 import os
 
-from constants import (
+from .constants import (
     CELL, PLAYER_SIZE,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     HAZARD_TYPES, SOLID_TYPES,

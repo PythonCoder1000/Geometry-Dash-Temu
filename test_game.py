@@ -10,10 +10,11 @@ import os
 import sys
 import tempfile
 
-# Game modules live in src/ after the 2026-04-20 reorganisation.
-_SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
-if os.path.isdir(_SRC_DIR) and _SRC_DIR not in sys.path:
-    sys.path.insert(0, _SRC_DIR)
+# Ensure the repo root (parent of src/) is on sys.path so `import src.*`
+# works even when the test is invoked from another CWD.
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 os.environ["SDL_AUDIODRIVER"] = "dummy"
@@ -22,8 +23,8 @@ import pygame
 pygame.init()
 pygame.display.set_mode((1, 1))
 
-import constants as C
-from constants import (
+from src import constants as C
+from src.constants import (
     CELL, FPS, PLAYER_SIZE, GRAVITY, JUMP_FORCE, SPEED_VALUES,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLACK_ORB, T_BLUE_ORB, T_GREEN_ORB,
@@ -34,18 +35,18 @@ from constants import (
     SOLID_TYPES, HAZARD_TYPES, ORB_TYPES, PAD_TYPES,
     DIFFICULTIES, LEVEL_FORMAT_VERSION, LEVELS_DIR,
 )
-from graphics import (
+from src.graphics import (
     normalize_rotation, cell_rect, slab_rect, spike_hitboxes, saw_hitbox,
     pad_trigger_rect, clamp, lerp, lerp_col, lighter, darker,
 )
-from levels import (
+from src.levels import (
     save_level, load_level, load_level_full, update_meta, list_levels,
     list_level_summaries, normalize_object, next_group_id, next_teleport_link,
     next_object_id, next_coin_id, ensure_dirs, _default_meta,
     save_autosave, load_autosave, has_autosave, clear_autosave,
     get_group_id, AUTOSAVE_FILENAME,
 )
-from player import Player
+from src.player import Player
 
 
 passed = 0
@@ -131,7 +132,7 @@ check("spike_hitboxes returns list", len(spike_hitboxes(0, 0, 0, False)) >= 1)
 section("Level I/O / migration")
 tmpdir = tempfile.mkdtemp()
 C.LEVELS_DIR = tmpdir
-import levels as _levels_mod
+from src import levels as _levels_mod
 _levels_mod.LEVELS_DIR = tmpdir
 ensure_dirs()
 
@@ -407,7 +408,7 @@ check("load_autosave returns (None, None) when missing",
       nameta is None and naobjs is None)
 
 # Reserved-prefix guard: user-named levels can't shadow the autosave slot.
-from levels import _safe_filename as _sf
+from src.levels import _safe_filename as _sf
 check("_safe_filename strips leading underscore",
       not _sf("_autosave").startswith("_"))
 check("_safe_filename strips repeated leading underscores",
@@ -420,7 +421,7 @@ check("_safe_filename keeps non-leading underscores",
 # Editor copy/paste id remapping
 # ---------------------------------------------------------------------------
 section("Editor clone (copy/paste/duplicate)")
-from editor import _clone_objects
+from src.editor import _clone_objects
 
 # Source: a move-trigger pointing at two blocks via target_oids, plus a pair
 # of linked teleport orbs. Cloning must allocate fresh oids/links so the
@@ -510,8 +511,8 @@ check("clone strips coin_id", "coin_id" not in coin_clone[0])
 # Snippet palette — built-ins, normalize, user I/O round-trip, stamp via clone
 # ---------------------------------------------------------------------------
 section("Snippet palette")
-import snippets as _snip_mod
-from snippets import (
+from src import snippets as _snip_mod
+from src.snippets import (
     BUILTIN_SNIPPETS, get_snippets, normalize_to_origin,
     load_user_snippets, save_user_snippet, delete_user_snippet,
 )
@@ -602,8 +603,8 @@ check("stamp third offset preserved",
 # Level thumbnails — generation, save/load round-trip, save_level hook
 # ---------------------------------------------------------------------------
 section("Level thumbnails")
-import thumbnails as _thumbs_mod
-from thumbnails import (
+from src import thumbnails as _thumbs_mod
+from src.thumbnails import (
     THUMB_W, THUMB_H, THUMBS_DIR,
     render_thumbnail, save_thumbnail, load_thumbnail,
     thumbnail_path, clear_thumbnail,
@@ -677,9 +678,8 @@ check("load_thumbnail returns None when file absent",
 # Settings — typed accessors, persistence round-trip, defensive coercion
 # ---------------------------------------------------------------------------
 section("Settings")
-import prefs as _prefs_mod
-import settings as _settings_mod
-
+from src import prefs as _prefs_mod
+from src import settings as _settings_mod
 # Redirect the prefs file at a temp path and reset the in-memory cache so
 # the real user prefs aren't clobbered.
 _orig_prefs_path = _prefs_mod._PREFS_PATH
@@ -782,8 +782,7 @@ finally:
 # Gamepad — every accessor must stay safe with no controller attached
 # ---------------------------------------------------------------------------
 section("Gamepad (no controller)")
-import gamepad as _gp_mod
-
+from src import gamepad as _gp_mod
 # init() is idempotent and never raises.
 _gp_mod.init()
 _gp_mod.init()
@@ -818,10 +817,10 @@ check("DEADZONE in (0, 1)", 0 < _gp_mod.DEADZONE < 1)
 # Player customization — icon glyph + body color persist via settings
 # ---------------------------------------------------------------------------
 section("Player customization")
-import settings as _cust_settings
-import prefs as _cust_prefs
-from constants import PLAYER_COLORS, PLAYER_ICONS
-from graphics import draw_cube_icon_glyph as _glyph
+from src import settings as _cust_settings
+from src import prefs as _cust_prefs
+from src.constants import PLAYER_COLORS, PLAYER_ICONS
+from src.graphics import draw_cube_icon_glyph as _glyph
 
 # PLAYER_ICONS table is populated and matches the glyph branches.
 check("PLAYER_ICONS has 8 entries", len(PLAYER_ICONS) == 8)
@@ -908,7 +907,7 @@ with tempfile.TemporaryDirectory() as _td2:
 
 # The customize screen helper exists and is importable. The actual UI
 # loop needs an event pump, but we can at least verify the symbol.
-import menus as _cust_menus
+from src import menus as _cust_menus
 check("run_customize is callable",
       callable(getattr(_cust_menus, "run_customize", None)))
 check("_draw_player_swatch helper exists",
@@ -920,7 +919,7 @@ check("_draw_player_swatch helper exists",
 # ---------------------------------------------------------------------------
 section("Hint mode")
 
-import play as _play_mod
+from src import play as _play_mod
 # run_play is the entry point that owns the hint toggle. We don't exercise
 # the full loop here (it requires a real event pump and would block), but
 # the symbol must exist and be callable.
@@ -930,7 +929,7 @@ check("play.run_play exists",
 # The autobot itself must be importable and solve a trivial flat level.
 # This is the same path the H key triggers, so a passing test gives us
 # reasonable confidence the hint button won't crash on a real level.
-from autobot import AutoBot as _HintBot
+from src.autobot import AutoBot as _HintBot
 flat = make_flat_level(length=20)
 # Strip any runtime-only keys the test level doesn't have.
 _hb = _HintBot([dict(o) for o in flat])
@@ -996,8 +995,8 @@ if _owon:
 # Dual mode — mirror inherits player state, autobot snapshots it
 # ---------------------------------------------------------------------------
 section("Dual mode")
-from constants import T_MODE_DUAL, HEIGHT as _DH
-from autobot import _snap as _ab_snap, _restore as _ab_restore, _build_obj_index, _SimPlayer
+from src.constants import T_MODE_DUAL, HEIGHT as _DH
+from src.autobot import _snap as _ab_snap, _restore as _ab_restore, _build_obj_index, _SimPlayer
 
 # 1) `_enter_dual` should inherit the player's current motion state.
 #    A grounded player crossing a dual portal should produce a grounded
@@ -1101,7 +1100,7 @@ check("Restore tolerates legacy 4-tuple snapshot",
 #    portal, then a solo portal further along; after the player crosses
 #    solo, mirror must be None and the player should still be alive (no
 #    crash from clearing self.mirror mid-substep).
-from constants import T_MODE_SOLO, T_COIN, T_BG_TRIGGER
+from src.constants import T_MODE_SOLO, T_COIN, T_BG_TRIGGER
 def _make_dual_corridor(length, extras=None):
     """Flat ground at y=10 plus a ceiling at y=2 so a -grav mirror has
     something to land on instead of falling off the top of the screen."""
@@ -1158,7 +1157,7 @@ check("Mirror fires global triggers (bg_preset changed)",
 # 7) Per-body mode/size portals: a portal in the MIRROR's path (cell y=3,
 #    just below the ceiling) should change the mirror's mode/size only,
 #    leaving the main player untouched. And vice-versa.
-from constants import (
+from src.constants import (
     T_MODE_WAVE, T_MODE_BALL, T_MODE_MINI, T_MODE_BIG,
     MODE_CUBE as _MC, MODE_WAVE as _MW, MODE_BALL as _MB,
     MINI_PLAYER_SIZE as _MINI, PLAYER_SIZE as _BIG,
@@ -1237,7 +1236,7 @@ check("Mirror portal consumption stays out of shared passed",
 #    on the player's path AND another in the mirror's path at the same x.
 #    With one shared input_buffer the main consumed it first and the mirror
 #    silently missed out — the fix gave the mirror its own buffer.
-from constants import T_ORB
+from src.constants import T_ORB
 _dual_orb_objs = _make_dual_corridor(60, extras=[
     {"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0},
     # Player orb: just above the floor at the player's jump-arc height.
@@ -1285,9 +1284,8 @@ check("Same click also activates mirror's orb",
 # ---------------------------------------------------------------------------
 section("Editor test-mode music wiring")
 import inspect
-import play as _play_mod
-import editor as _editor_mod
-
+from src import play as _play_mod
+from src import editor as _editor_mod
 _play_src = inspect.getsource(_play_mod.run_play)
 # The four music gates inside run_play used to read `level_music and not
 # editor_test`, which silenced editor-test runs even when the editor passed
@@ -1333,8 +1331,7 @@ if _test_block_start >= 0 and _test_block_end > _test_block_start:
 #     hint paths so the user gets feedback instead of silence.
 # ---------------------------------------------------------------------------
 section("Bot menu click-handling guards")
-import bot_menu as _bm
-
+from src import bot_menu as _bm
 # 1. _run_solver signature: required positional args are (screen, clock, objects);
 # `params=None` was added in B5 for per-level physics overrides.
 _solver_sig = inspect.signature(_bm._run_solver)
@@ -1386,8 +1383,8 @@ check("Replay callback crash surfaces in info_msg, not silent",
 # per frame so per-segment alpha blends cleanly against varying bg.
 # ---------------------------------------------------------------------------
 section("Wave / ship line trail")
-import player as _player_mod
-from constants import MODE_WAVE as _MW, MODE_SHIP as _MSh, MODE_BALL as _MB
+from src import player as _player_mod
+from src.constants import MODE_WAVE as _MW, MODE_SHIP as _MSh, MODE_BALL as _MB
 
 _draw_src = inspect.getsource(_player_mod.Player.draw)
 check("Player.draw branches on MODE_WAVE/MODE_SHIP for line trail",
@@ -1407,8 +1404,8 @@ _os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 import pygame as _pg
 _pg.init()
 _pg.display.set_mode((1280, 720))
-from player import Player as _PB
-from constants import T_BLOCK as _TB, T_START as _TS, T_END as _TE
+from src.player import Player as _PB
+from src.constants import T_BLOCK as _TB, T_START as _TS, T_END as _TE
 _objs = ([{"t": _TS, "x": 1, "y": 9, "r": 0}]
          + [{"t": _TB, "x": x, "y": 10, "r": 0} for x in range(40)]
          + [{"t": _TE, "x": 38, "y": 9, "r": 0}])
@@ -1554,7 +1551,7 @@ check("Player.reset clears mirror_passed to empty set",
 
 # CR2 #6: sprite cache is LRU, not FIFO. Fill past max, then assert the
 # oldest *inserted* key was evicted only if it was the least-recently-used.
-from graphics import _OBJECT_CACHE, _OBJECT_CACHE_MAX, _load_or_render
+from src.graphics import _OBJECT_CACHE, _OBJECT_CACHE_MAX, _load_or_render
 _OBJECT_CACHE.clear()
 # Prime entry (key A).
 _load_or_render(T_BLOCK, 44, 0)
@@ -1589,7 +1586,7 @@ check("Spatial index: close rect finds the objects in that cell range",
 
 # CR3 #2: _restore must un-move objects that animated after the snap was
 # taken. Without this fix the beam search's sibling expansions desync.
-from autobot import _SimPlayer, _snap as _ab_snap2, _restore as _ab_restore2
+from src.autobot import _SimPlayer, _snap as _ab_snap2, _restore as _ab_restore2
 _dm_objs = [
     {"t": T_START, "x": 3, "y": 9, "oid": 1},
     {"t": T_BLOCK, "x": 20, "y": 10, "oid": 2},
@@ -1613,7 +1610,7 @@ check("_restore un-moved the post-snap mutation back to origin",
 
 # CR3 #4: dedup key must distinguish candidates with different
 # mirror_input_buffer when a mirror is present.
-from autobot import _dedup_key as _dk, SnapVals
+from src.autobot import _dedup_key as _dk, SnapVals
 _make_snap = lambda mib: (
     SnapVals(  # vals
         0.0, 0.0, 0.0, True, True, False, 0.0, 1, 0, MODE_CUBE,
@@ -1634,7 +1631,7 @@ check("Dedup key distinguishes different mirror_input_buffer values",
 # creation fails, the solver must still try wider-beam attempts via the
 # sequential path. We verify the guard logic is intact by reading the
 # source for the updated condition.
-import autobot as _ab_mod
+from src import autobot as _ab_mod
 _ab_src = inspect.getsource(_ab_mod.AutoBot.solve)
 check("Sequential fallback guards on parallel_launched",
       "parallel_launched" in _ab_src and "not parallel_launched" in _ab_src)
@@ -1682,7 +1679,7 @@ check("Physics is object-order invariant (spatial index works)",
 # ---------------------------------------------------------------------------
 section("PhysicsParams per-level override")
 
-from physics import PhysicsParams, DEFAULT_PARAMS
+from src.physics import PhysicsParams, DEFAULT_PARAMS
 _pp_default = PhysicsParams.from_meta(None)
 check("PhysicsParams.from_meta(None) returns defaults",
       _pp_default == DEFAULT_PARAMS)
@@ -1841,7 +1838,7 @@ check(f"Per-frame sim time {_per_frame_ms:.2f}ms well under 16.6ms budget",
 section("Save/load round-trip")
 
 import tempfile as _tmpfile, shutil as _shutil
-from levels import save_level, load_level_full
+from src.levels import save_level, load_level_full
 
 _rtlvl = make_flat_level(length=40, extras=[
     {"t": T_ORB, "x": 15, "y": 7, "r": 0},
@@ -1850,7 +1847,7 @@ _rtlvl = make_flat_level(length=40, extras=[
 ])
 _tdir = _tmpfile.mkdtemp(prefix="gdt_rt_")
 try:
-    import levels as _lvls_mod
+    from src import levels as _lvls_mod
     _old_dir = _lvls_mod.LEVELS_DIR
     _lvls_mod.LEVELS_DIR = _tdir
     _saved_path = save_level(_rtlvl, "roundtrip_test")
@@ -1867,7 +1864,7 @@ finally:
 # Legacy "Demon" tag round-trip — pre-ladder levels used a bare "Demon"
 # difficulty; on load _migrate should remap it to LEGACY_DEMON_TARGET.
 import json as _json_migr, tempfile as _tmp_migr, os as _os_migr
-from constants import LEGACY_DEMON_TARGET as _LDT
+from src.constants import LEGACY_DEMON_TARGET as _LDT
 _migr_dir = _tmp_migr.mkdtemp(prefix="trigsprint_migr_")
 try:
     _migr_path = _os_migr.path.join(_migr_dir, "legacy_demon.json")
@@ -1893,7 +1890,7 @@ finally:
 # ---------------------------------------------------------------------------
 section("Static hitbox cache")
 
-from graphics import spike_hitboxes as _sh, _spike_base_rotated
+from src.graphics import spike_hitboxes as _sh, _spike_base_rotated
 _sh_1 = _sh(10, 5, 0, False)
 _sh_2 = _sh(10, 5, 0, False)
 check("spike_hitboxes returns fresh list each call (no shared mutation)",
@@ -1920,22 +1917,22 @@ import tempfile as _tmp_st
 # user's real levels. Reload `levels` so its LEVELS_DIR constant uses
 # the override too.
 _stores_tmp = _tmp_st.mkdtemp(prefix="trigsprint_stores_")
-import constants as _C_st
+from src import constants as _C_st
 _prev_levels_dir = _C_st.LEVELS_DIR
 _prev_users_dir = _C_st._USER_DATA
 _C_st.LEVELS_DIR = _stores_tmp
 _C_st._USER_DATA = _stores_tmp
-import levels as _lvls_st
+from src import levels as _lvls_st
 _lvls_st.LEVELS_DIR = _stores_tmp
 try:
-    import stores as _stores_mod
+    from src import stores as _stores_mod
     _il.reload(_stores_mod)
-    from stores import LocalAuthStore, LocalLevelStore, LEVEL_STATES
+    from src.stores import LocalAuthStore, LocalLevelStore, LEVEL_STATES
 
     # AuthStore: signup/login/logout round-trip. Clear any leftover
     # signed-in pref from a previous run so the initial-state assertion
     # starts from a known baseline.
-    import prefs as _prefs_st
+    from src import prefs as _prefs_st
     _prefs_st.set("signed_in_username", None)
     auth = LocalAuthStore()
     auth._users_path = os.path.join(_stores_tmp, "auth_local.json")

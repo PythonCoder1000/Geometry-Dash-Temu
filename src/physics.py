@@ -30,7 +30,7 @@ crash the physics loop.
 
 from dataclasses import dataclass, fields, asdict
 
-from constants import (
+from .constants import (
     GRAVITY as _GRAVITY,
     SHIP_GRAVITY as _SHIP_GRAVITY,
     SHIP_THRUST as _SHIP_THRUST,

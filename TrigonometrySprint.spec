@@ -33,13 +33,14 @@ if os.path.isdir("levels"):
 
 a = Analysis(
     ["main.py"],
-    # `src/` contains every game module after the 2026-04-20 reorg.
-    # PyInstaller's static import scanner needs it on pathex to find
-    # the modules that main.py imports (editor, menus, play, ...).
-    pathex=["src"],
+    # After the 2026-04-20 reorg every game module lives inside the
+    # ``src`` package. The repo root is on sys.path at runtime (main.py
+    # ensures that) so PyInstaller just needs to see the package —
+    # no extra pathex entries required.
+    pathex=[],
     binaries=[],
     datas=datas,
-    hiddenimports=["server_config"],
+    hiddenimports=["src.server_config"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

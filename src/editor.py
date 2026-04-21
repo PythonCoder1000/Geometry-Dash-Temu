@@ -2,7 +2,7 @@ import os
 
 import pygame
 
-from constants import (
+from .constants import (
     WIDTH, HEIGHT, CELL, FPS,
     C_GRID, C_WHITE, C_GRAY, C_PLAYER, C_BTN, C_DANGER, C_DARK,
     C_PUBLISH, C_SUCCESS,
@@ -11,26 +11,26 @@ from constants import (
     T_MOVE_TRIGGER, T_SAW, T_COLOR_TRIGGER, T_COIN, T_END, T_MODE_DUAL,
     DEFAULT_MOVE_CURVE, MOVE_CURVE_SPEED_MAX,
 )
-from graphics import (
+from .graphics import (
     draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
     lighter, darker, normalize_rotation,
     speaker_icon, icon_button, draw_end_wall,
     spike_hitboxes, saw_hitbox,
 )
-from levels import (
+from .levels import (
     save_level, load_level, load_level_full, update_meta,
     next_group_id, next_object_id, next_coin_id, get_group_id,
     save_autosave, load_autosave, has_autosave, clear_autosave,
 )
-from menus import (
+from .menus import (
     text_input_dialog, load_level_dialog, difficulty_picker, confirm_dialog,
     snippet_picker,
 )
-from snippets import save_user_snippet, normalize_to_origin
-import music
-import sfx
-import settings
-from input_guard import ClickGuard
+from .snippets import save_user_snippet, normalize_to_origin
+from . import music
+from . import sfx
+from . import settings
+from .input_guard import ClickGuard
 
 
 # Reusable fullscreen SRCALPHA scratch for the hitbox overlay — allocated on
@@ -51,7 +51,7 @@ def _export_level_png(objects, level_name, cell_px=10):
     import os as _os_exp
     import re as _re_exp
     import time as _time_exp
-    from constants import _USER_DATA
+    from .constants import _USER_DATA
     if not objects:
         return None
     min_x = min(o["x"] for o in objects)
@@ -214,8 +214,8 @@ def _get_grid_surface(effective_cell):
         _grid_cache["cell"] = effective_cell
         _grid_cache["surf"] = surf
     return _grid_cache["surf"]
-from play import run_play
-from bot import BotController, load_bot_inputs
+from .play import run_play
+from .bot import BotController, load_bot_inputs
 # `autobot` is no longer imported here — the bot menu (`bot_menu.py`) owns
 # all solver invocations. The legacy K-key shortcut still uses BotController.
 
@@ -796,7 +796,7 @@ def run_editor(screen, clock, preload_filename=None):
     # editor picker) skip autosave recovery and load that level instead.
     if preload_filename:
         try:
-            from levels import load_level_full, LEVELS_DIR
+            from .levels import load_level_full, LEVELS_DIR
             _pre_path = os.path.join(LEVELS_DIR, preload_filename)
             pl_meta, pl_objs = load_level_full(_pre_path)
             objects = pl_objs
@@ -1775,7 +1775,7 @@ def run_editor(screen, clock, preload_filename=None):
                 # Reload meta so we have the current on-disk state.
                 try:
                     import os as _os
-                    from constants import LEVELS_DIR as _LEVELS_DIR
+                    from .constants import LEVELS_DIR as _LEVELS_DIR
                     level_meta, _ = load_level_full(_os.path.join(_LEVELS_DIR, level_filename))
                 except (OSError, ValueError):
                     level_meta = None
@@ -1809,7 +1809,7 @@ def run_editor(screen, clock, preload_filename=None):
                           if level_filename else name_for_pub.lower().replace(" ", "_"))
                     save_meta = dict(level_meta) if level_meta else None
                     if save_meta is None:
-                        from levels import _default_meta as _dm
+                        from .levels import _default_meta as _dm
                         save_meta = _dm(name_for_pub)
                     save_meta["name"] = name_for_pub
                     save_meta["published"] = True
@@ -1825,7 +1825,7 @@ def run_editor(screen, clock, preload_filename=None):
                     level_filename = fn + ".json"
                     try:
                         import os as _os
-                        from constants import LEVELS_DIR as _LEVELS_DIR
+                        from .constants import LEVELS_DIR as _LEVELS_DIR
                         level_meta, _ = load_level_full(_os.path.join(_LEVELS_DIR, level_filename))
                     except (OSError, ValueError):
                         level_meta = save_meta
@@ -1920,7 +1920,7 @@ def run_editor(screen, clock, preload_filename=None):
         if do_bot_menu:
             # Editor-side bot menu: when the user clicks Replay, run the
             # solved inputs against a real Player in the test-play screen.
-            from bot_menu import (run_bot_menu, get_last_inputs,
+            from .bot_menu import (run_bot_menu, get_last_inputs,
                                   get_last_mirror_waypoints)
 
             def _replay_in_editor(inputs):
@@ -2024,7 +2024,7 @@ def run_editor(screen, clock, preload_filename=None):
         # band while quick traversals stay legible. Drawn here so palette /
         # bot path / selection rings render on top.
         if show_hitboxes:
-            from constants import (PLAYER_SIZE as _HB_PSZ, T_SPIKE,
+            from .constants import (PLAYER_SIZE as _HB_PSZ, T_SPIKE,
                                     T_HALF_SPIKE, T_SAW)
             if _hb_scratch[0] is None:
                 _hb_scratch[0] = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)

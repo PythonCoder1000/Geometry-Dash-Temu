@@ -9,8 +9,8 @@ Anything more game-mechanical (level progress, best times, etc.) stays in
 `levels.py` — this module is strictly for player preferences.
 """
 
-import prefs
-from constants import FPS as DEFAULT_FPS
+from . import prefs
+from .constants import FPS as DEFAULT_FPS
 
 # ---------------------------------------------------------------------------
 # Defaults — also serve as the "Reset to defaults" target.
@@ -170,7 +170,7 @@ def set_music_vol(value):
     v = _coerce_float_01(value, DEFAULTS["music_vol"])
     prefs.set("music_vol", v)
     try:
-        import music
+        from . import music
         music.set_volume(v)
     except Exception:
         pass
@@ -223,7 +223,7 @@ def reset_to_defaults():
         prefs.set(k, v)
     # Push live audio values too so the change is audible right away.
     try:
-        import music
+        from . import music
         music.set_volume(DEFAULTS["music_vol"])
     except Exception:
         pass
