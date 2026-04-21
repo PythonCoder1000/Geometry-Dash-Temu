@@ -7,6 +7,7 @@ legitimate win — bumps the level's ``verified`` / ``best_progress`` /
 """
 
 import bisect
+import math
 import sys
 
 import pygame
