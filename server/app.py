@@ -55,6 +55,13 @@ DB_PATH = os.environ.get(
                  "trigsprint.db"),
 )
 
+# Server-side mirror of src/constants.py's ADMIN_USERNAME. The signup
+# path auto-promotes this username to admin so the first time the
+# admin-in-waiting creates their account they immediately have the
+# `is_admin` bit and can verify levels / promote difficulty ratings.
+# Override via env var for deployments that want a different handle.
+ADMIN_USERNAME = os.environ.get("TRIGSPRINT_ADMIN_USERNAME", "TopRob")
+
 
 def _conn() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -191,10 +198,16 @@ def signup(body: AuthIn):
             raise HTTPException(409, "username_taken")
         salt = secrets.token_bytes(16)
         pw_hash = _hash_password(body.password, salt)
+        # Auto-promote the designated ADMIN_USERNAME on first signup so
+        # the admin account can verify levels without a follow-up CLI
+        # step. Any subsequent signup attempt on this username is
+        # rejected above as username_taken, so this only ever fires once.
+        is_admin = 1 if body.username == ADMIN_USERNAME else 0
         c.execute(
             "INSERT INTO users(username, password_hash, password_salt, "
-            "created_at) VALUES (?, ?, ?, ?)",
-            (body.username, pw_hash, salt.hex(), int(time.time())))
+            "created_at, is_admin) VALUES (?, ?, ?, ?, ?)",
+            (body.username, pw_hash, salt.hex(), int(time.time()),
+             is_admin))
         user_id = c.execute(
             "SELECT id FROM users WHERE username = ?",
             (body.username,)).fetchone()["id"]

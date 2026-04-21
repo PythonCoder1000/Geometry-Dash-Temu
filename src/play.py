@@ -19,6 +19,7 @@ from .constants import (
     DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES,
     T_TELEPORT_ORB, T_COIN, T_END, T_ORB, T_DASH_ORB, T_BLACK_ORB,
     T_BLUE_ORB, T_GREEN_ORB, T_GRAV,
+    ADMIN_USERNAME,
 )
 from .graphics import (
     draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
@@ -352,12 +353,14 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
             return "failed", None, None
 
     def _persist_win():
-        """Persist meta: verified / attempts / best_progress / coins_collected.
+        """Persist meta: attempts / best_progress / coins_collected / etc.
 
-        When this win is the *first* verification (level was published but not
-        yet verified), prompt the verifier for the final official difficulty,
-        defaulting to what the publisher requested. Subsequent wins don't
-        re-prompt.
+        Every player's win records their session stats. *Verifying* a
+        published level — flipping the ✓ and stamping the canonical
+        difficulty — is admin-only (constants.ADMIN_USERNAME). A
+        non-admin win on an unverified published level still counts
+        toward attempts / best / coins / best-time / deaths, but it
+        never flips `verified` and never shows the difficulty prompt.
         """
         nonlocal meta_persisted
         if meta_persisted or not can_persist:
@@ -375,27 +378,34 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
 
         prev_deaths = int((meta or {}).get("deaths", 0)) if meta else 0
         updates = {
-            "verified": True,
             "attempts": prev_attempts + attempts,
             "best_progress": max(prev_best, 100),
             "coins_collected": max(prev_coins, coins_now),
             "best_time_frames": new_best_time,
             "deaths": prev_deaths + deaths_this_session,
         }
-        # First-time verification of a published level: let the verifier confirm
-        # or override the difficulty. Skip the dialog if the level was never
-        # published (editor-quick-verify path) or already verified.
-        if meta and meta.get("published") and not meta.get("verified"):
-            from .menus import difficulty_picker
-            requested = meta.get("requested_difficulty", meta.get("difficulty", "Normal"))
-            chosen = difficulty_picker(
-                screen, clock,
-                prompt="You verified this level!",
-                default=requested,
-                subtitle=f"Publisher requested: {requested}.  Set the official difficulty:",
-            )
-            if chosen:
-                updates["difficulty"] = chosen
+        # Admin-only verification path: only the ADMIN_USERNAME account
+        # can flip `verified` and stamp an official difficulty on a
+        # published level. Anyone else's first win still bumps their
+        # session stats above but leaves the rating untouched.
+        from .prefs import get as _pget_usr
+        _cur_user = _pget_usr("signed_in_username", None)
+        _is_admin = (_cur_user == ADMIN_USERNAME)
+        if _is_admin:
+            updates["verified"] = True
+            if meta and meta.get("published") and not meta.get("verified"):
+                from .menus import difficulty_picker
+                requested = meta.get("requested_difficulty",
+                                     meta.get("difficulty", "Normal"))
+                chosen = difficulty_picker(
+                    screen, clock,
+                    prompt="You verified this level!",
+                    default=requested,
+                    subtitle=f"Publisher requested: {requested}.  "
+                             f"Set the official difficulty:",
+                )
+                if chosen:
+                    updates["difficulty"] = chosen
         try:
             update_meta(level_path, **updates)
             meta_persisted = True

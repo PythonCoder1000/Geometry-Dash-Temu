@@ -290,6 +290,12 @@ DIFFICULTIES = [
 # migrate to "Hard Demon". levels._migrate maps this at load time.
 LEGACY_DEMON_TARGET = "Hard Demon"
 
+# Only this signed-in username can flip a published level's `verified`
+# flag and stamp its official difficulty. Every other user who beats a
+# level still gets their attempts / best_progress / coins tracked, but
+# the ✓ badge and the canonical rating are locked to the admin account.
+ADMIN_USERNAME = "TopRob"
+
 DIFFICULTY_COLORS = {
     "Auto":           (180, 255, 180),
     "Easy":           (100, 230, 255),
