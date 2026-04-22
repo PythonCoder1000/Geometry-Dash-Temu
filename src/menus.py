@@ -1054,7 +1054,12 @@ def load_level_dialog(screen, clock):
     from .prefs import get as _pget
     current_user = _pget("signed_in_username", None)
     summaries = list_level_summaries()
-    if current_user is not None:
+    # Strict mode: unsigned sessions get an empty list — the editor
+    # entry point in main.py bounces to the auth prompt before we ever
+    # reach this dialog, but belt-and-suspenders anyway.
+    if current_user is None:
+        summaries = []
+    else:
         summaries = [
             (fn, m) for fn, m in summaries
             if (m.get("author") or "").strip() in ("", "Player",
@@ -1339,16 +1344,17 @@ def run_editor_picker(screen, clock):
 
     def _load_my_levels():
         summaries = list_level_summaries()
+        # Strict mode: unsigned sessions see nothing. main.py already
+        # blocks entry to the editor without a signed-in user, so this
+        # branch is only reachable via direct function calls (tests,
+        # future call sites) — empty list is the safe default.
         if current_user is None:
-            # Not signed in → single-user dev workflow; everything on
-            # disk is considered mine.
-            out = list(summaries)
-        else:
-            out = []
-            for fn, meta in summaries:
-                author = (meta.get("author") or "").strip()
-                if author == current_user or author in ("", "Player"):
-                    out.append((fn, meta))
+            return []
+        out = []
+        for fn, meta in summaries:
+            author = (meta.get("author") or "").strip()
+            if author == current_user or author in ("", "Player"):
+                out.append((fn, meta))
         out.sort(key=lambda e: (e[1].get("name") or e[0]).lower())
         return out
 

@@ -101,14 +101,28 @@ def main():
             run_rate_menu(screen, clock)
             state = "menu"
         elif state == "editor":
+            # Strict mode: editing is a per-account action. Require a
+            # signed-in user before we even show the picker — without
+            # an account there's no way to stamp authorship, and
+            # giving unsigned sessions full access bypasses the owner
+            # lock on everyone else's levels. Bounce back to menu and
+            # surface the auth screen as the suggested next step.
+            from src.prefs import get as _pget
+            from src.menus import confirm_dialog
+            if not _pget("signed_in_username", None):
+                go_auth = confirm_dialog(
+                    screen, clock,
+                    "Sign in to edit levels.",
+                    subtitle="The editor stamps your username as the "
+                             "level's author so only you can re-save or "
+                             "delete it.",
+                    ok_label="Sign in", cancel_label="Back",
+                )
+                state = "auth" if go_auth else "menu"
+                continue
             pick = run_editor_picker(screen, clock)
             if pick is not None:
                 action, fn = pick
-                # The editor owns its own load flow (autosave recovery
-                # prompt, internal Load dialog); for now "New" just
-                # runs the editor with its default empty level, and
-                # "Open" loads via the editor's Ctrl+L path. A proper
-                # preloaded-level path is Chunk E+F work.
                 run_editor(screen, clock, preload_filename=fn if action == "open" else None)
             state = "menu"
         elif state == "settings":
