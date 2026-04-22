@@ -1042,8 +1042,24 @@ def _diff_btn_rect(idx, btn_w, btn_h, gap, cols, box_w, box_h):
 
 
 def load_level_dialog(screen, clock):
-    """Editor's load dialog — returns path or None."""
+    """Editor's load dialog — returns path or None.
+
+    Same ownership rule as run_editor_picker: if signed in, only list
+    levels authored by the current user (plus legacy files with no
+    author or the default "Player"). Without this, the Ctrl+L load
+    dialog becomes a back door around the picker's owner filter and
+    lets you open (and view / copy) someone else's level even though
+    the Save path then refuses to overwrite.
+    """
+    from .prefs import get as _pget
+    current_user = _pget("signed_in_username", None)
     summaries = list_level_summaries()
+    if current_user is not None:
+        summaries = [
+            (fn, m) for fn, m in summaries
+            if (m.get("author") or "").strip() in ("", "Player",
+                                                   current_user)
+        ]
     summaries.sort(key=lambda it: it[1].get("name", it[0]).lower())
     scroll = 0
     stars = _stars()
