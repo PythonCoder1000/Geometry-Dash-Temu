@@ -1485,13 +1485,30 @@ check("out_hitboxes defaults to None (opt-in)",
       _play_sig.parameters["out_hitboxes"].default is None)
 
 _play_src2 = inspect.getsource(_play_mod.run_play)
-check("run_play appends per-frame (x, y, size) when out_hitboxes is set",
-      "current_hitboxes.append" in _play_src2
-      and "player.size" in _play_src2)
+# Recording is driven by the Player now: run_play hands the buffer to
+# `player.hitbox_trace` and the player appends (x, y, size) at every
+# collision-check point — each physics substep + teleport brackets —
+# so the overlay shows *every* check position, not just one per frame.
+check("run_play wires player.hitbox_trace = current_hitboxes",
+      "player.hitbox_trace = current_hitboxes" in _play_src2)
 check("run_play commits the buffer on _full_reset",
       "out_hitboxes[:] = current_hitboxes" in _play_src2)
 check("run_play also commits the buffer on _stop_music_and_return",
       _play_src2.count("out_hitboxes[:] = current_hitboxes") >= 2)
+check("run_play clears the in-place buffer on reset (not reassigned)",
+      "current_hitboxes.clear()" in _play_src2)
+
+# Player side: the recorder helper exists and fires per substep.
+from src.player import Player as _PlayerCls
+_player_src = inspect.getsource(_PlayerCls)
+check("Player has _record_hitbox helper",
+      "def _record_hitbox" in _player_src
+      and "self.hitbox_trace.append" in _player_src)
+check("Player physics substep loop calls _record_hitbox",
+      _player_src.count("self._record_hitbox()") >= 3)
+check("Player spider-teleport fills the swept volume with hitbox samples",
+      "self.hitbox_trace.append((self.x, y, self.size))" in _player_src
+      and "self.hitbox_trace.append((self.x, hi, self.size))" in _player_src)
 
 # Editor wiring: state, H toggle, run_play hand-off, draw overlay.
 check("editor declares last_run_hitboxes state",
@@ -1516,6 +1533,66 @@ check("editor draws the hitbox overlay layer when toggle is on",
 _doc = _play_mod.run_play.__doc__ or ""
 check("run_play docstring documents out_hitboxes contract",
       "out_hitboxes" in _doc and "(x, y, size)" in _doc)
+
+# Behavioural: spider teleport fills the swept column with multiple
+# samples, not just two endpoints. This is what lets the editor's
+# Hitbox view preview where a scale-based teleport hazard has to sit.
+from src.player import Player as _PCls
+from src.constants import (
+    T_BLOCK as _TB, T_END as _TE, MODE_SPIDER as _MSP,
+    PLAYER_START_GX as _PSG,
+)
+_spider_objs = [{'t': _TB, 'x': i, 'y': 15, 'r': 0} for i in range(40)]
+_spider_objs += [{'t': _TB, 'x': i, 'y': 10, 'r': 0} for i in range(40) if i != _PSG]
+_spider_objs.append({'t': _TE, 'x': 39, 'y': 0, 'r': 0})
+_sp = _PCls(_spider_objs)
+_sp.mode = _MSP
+_sp.hitbox_trace = []
+for _ in range(40):
+    _sp.update(False, False)
+_pre_len = len(_sp.hitbox_trace)
+_pre_y = _sp.y
+_sp.update(True, True)
+_delta = _sp.hitbox_trace[_pre_len:]
+# Same-x samples that span the teleport — at least 3 fill samples
+# across the sweep, proving the column was filled (not just endpoints).
+_cols = {}
+for _x, _y, _s in _delta:
+    _cols.setdefault(round(_x, 2), set()).add(round(_y, 2))
+_widest = max((len(v) for v in _cols.values()), default=0)
+check("spider teleport fills sweep with >=3 intermediate hitbox samples",
+      _widest >= 3)
+
+# Invisible flag: only persisted for solids, visible is the default,
+# and collision still runs when set (player physics reads by type).
+from src.levels import normalize_object as _norm
+_inv_block = _norm({'t': _TB, 'x': 5, 'y': 10, 'r': 0, 'invisible': True})
+check("normalize_object persists invisible=True on solid blocks",
+      _inv_block.get('invisible') is True)
+_inv_spike = _norm({'t': 'spike', 'x': 5, 'y': 10, 'r': 0, 'invisible': True})
+check("normalize_object strips invisible on non-solid types",
+      'invisible' not in _inv_spike)
+_visible = _norm({'t': _TB, 'x': 5, 'y': 10, 'r': 0})
+check("normalize_object omits invisible when not set",
+      'invisible' not in _visible)
+_inv_floor = [{'t': _TB, 'x': i, 'y': 12, 'r': 0, 'invisible': True}
+              for i in range(10)]
+_inv_floor.append({'t': _TE, 'x': 9, 'y': 0, 'r': 0})
+_ip = _PCls(_inv_floor)
+for _ in range(60):
+    _ip.update(False, False)
+check("invisible blocks still collide (player lands, stays alive)",
+      _ip.alive and _ip.on_ground)
+
+# Editor wiring for the invisible toggle.
+_editor_full_src = inspect.getsource(_editor_mod)
+check("editor edit panel exposes invisible_toggle for solids",
+      'rects["invisible_toggle"]' in _editor_full_src
+      and 'SOLID_TYPES' in _editor_full_src)
+check("editor click handler toggles invisible on selected blocks",
+      '"invisible_toggle"' in _editor_src2)
+check("play.py skips draw_obj when o.get('invisible')",
+      'if o.get("invisible")' in inspect.getsource(_play_mod))
 
 
 # ---------------------------------------------------------------------------

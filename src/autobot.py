@@ -9,6 +9,15 @@ import pickle as _pickle
 import time as _time
 from typing import NamedTuple
 
+# Spawn workers re-import this module (and therefore pygame) to unpickle
+# the solver entry point. Each fresh pygame import prints its support
+# banner, so a parallel solve on a many-core box spams the console with
+# one line per worker. The parent process has already imported pygame via
+# main.py before this module is first loaded, so this setdefault is a
+# no-op there; it only matters for the spawned subprocesses that haven't
+# imported pygame yet.
+_os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "hide")
+
 import pygame
 
 from .constants import (

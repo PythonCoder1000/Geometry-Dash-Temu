@@ -99,6 +99,13 @@ class Player:
         self.practice_mode = False
         self.checkpoints = []
         self.attempt_count = 0
+        # Optional per-substep hitbox recorder. When the caller (run_play
+        # via the editor's Hitbox view) assigns a list here, the player
+        # appends (x, y, size) at every collision-check point — each
+        # substep of the physics loop and the bracket positions around
+        # spider-teleport / teleport-orb warps. Left untouched by
+        # reset() so the caller's reference survives across attempts.
+        self.hitbox_trace = None
         self.reset()
 
     def _rebuild_teleport_index(self):
@@ -254,6 +261,16 @@ class Player:
         return pygame.Rect(round(self.x) + shrink, round(self.y) + shrink,
                            self.size - shrink * 2, self.size - shrink * 2)
 
+    def _record_hitbox(self):
+        """Append the current (x, y, size) to hitbox_trace if recording.
+
+        Called at every collision-check point — substep boundaries and
+        teleport brackets — so the editor's Hitbox view shows exactly
+        where each check happened, not just a once-per-frame sample.
+        """
+        if self.hitbox_trace is not None:
+            self.hitbox_trace.append((self.x, self.y, self.size))
+
     def save_checkpoint(self):
         """Save current player state as a checkpoint for practice mode."""
         checkpoint = {
@@ -393,8 +410,12 @@ class Player:
             return
         dests = [o for o in group if o.get("dest")]
         dest = dests[0] if dests else group[0]
+        # Bracket the warp so the hitbox view shows both endpoints of the
+        # teleport rather than a jump-cut with no visual trace.
+        self._record_hitbox()
         self.x = dest["x"] * CELL + (CELL - PLAYER_SIZE) / 2
         self.y = dest["y"] * CELL + (CELL - PLAYER_SIZE) / 2
+        self._record_hitbox()
         self.vy *= 0.25
         self.teleport_cooldown = 10
         self.trail = []
@@ -418,7 +439,7 @@ class Player:
         for o in self.nearby_for_rect(probe, extra=self.params.spider_teleport_range + 1):
             if o["t"] != T_BLOCK:
                 continue
-            br = cell_rect(o["x"], o["y"])
+            br = cell_rect(o["x"], o["y"], float(o.get("scale", 1.0)))
             if not (br.left < probe.right and br.right > probe.left):
                 continue
             if self.grav == 1:
@@ -451,17 +472,33 @@ class Player:
                 self.size - shrink * 2, self.size - shrink * 2)
             swept = pre_hazard.union(post_hazard)
             swept_trigger = swept.inflate(6, 6)
+            # Fill the swept volume with per-step hitbox samples so the
+            # editor's Hitbox view shows exactly what span the hazard
+            # check covers — not just the two endpoints. Lets the author
+            # design scale-based teleport gauntlets and know precisely
+            # where a hazard has to be to catch the sweep.
+            if self.hitbox_trace is not None:
+                step = max(4, self.size // 2)
+                lo = prev_y if prev_y <= new_y else new_y
+                hi = prev_y if prev_y > new_y else new_y
+                y = lo
+                while y < hi:
+                    self.hitbox_trace.append((self.x, y, self.size))
+                    y += step
+                self.hitbox_trace.append((self.x, hi, self.size))
             for o in self.nearby_for_rect(swept_trigger, 2):
                 t = o["t"]
                 if t in (T_SPIKE, T_HALF_SPIKE):
+                    sc = float(o.get("scale", 1.0))
                     for sr in _sh(o["x"], o["y"], o.get("r", 0),
-                                  t == T_HALF_SPIKE):
+                                  t == T_HALF_SPIKE, sc):
                         if swept.colliderect(sr):
                             self.alive = False
                             self.death_reason = "Teleported into a spike"
                             return
                 elif t == T_SAW:
-                    if swept.colliderect(_saw(o["x"], o["y"])):
+                    sc = float(o.get("scale", 1.0))
+                    if swept.colliderect(_saw(o["x"], o["y"], sc)):
                         self.alive = False
                         self.death_reason = "Teleported into a saw"
                         return
@@ -663,10 +700,11 @@ class Player:
 
     # ---- collision -------------------------------------------------------
     def _solid_rect(self, o):
+        sc = float(o.get("scale", 1.0))
         if o["t"] == T_BLOCK:
-            return cell_rect(o["x"], o["y"])
+            return cell_rect(o["x"], o["y"], sc)
         if o["t"] == T_SLAB:
-            return slab_rect(o["x"], o["y"], o.get("r", 0))
+            return slab_rect(o["x"], o["y"], o.get("r", 0), sc)
         return None
 
     def _resolve_x_collision(self, dx_step):
@@ -746,14 +784,17 @@ class Player:
                 continue
             key = (t, o["x"], o["y"])
             if t in (T_SPIKE, T_HALF_SPIKE):
-                for sr in spike_hitboxes(o["x"], o["y"], o.get("r", 0), t == T_HALF_SPIKE):
+                sc = float(o.get("scale", 1.0))
+                for sr in spike_hitboxes(o["x"], o["y"], o.get("r", 0),
+                                         t == T_HALF_SPIKE, sc):
                     if hazard_rect.colliderect(sr):
                         self.alive = False
                         self.death_reason = "Hit a spike"
                         return True
                 continue
             if t == T_SAW:
-                if hazard_rect.colliderect(saw_hitbox(o["x"], o["y"])):
+                sc = float(o.get("scale", 1.0))
+                if hazard_rect.colliderect(saw_hitbox(o["x"], o["y"], sc)):
                     self.alive = False
                     self.death_reason = "Hit a saw"
                     return True
@@ -770,7 +811,7 @@ class Player:
                     self.on_ground = False
                     self.passed.add(key)
                 continue
-            cr = cell_rect(o["x"], o["y"])
+            cr = cell_rect(o["x"], o["y"], float(o.get("scale", 1.0)))
             if not trigger_rect.colliderect(cr):
                 continue
             if t == T_COIN:
@@ -980,13 +1021,15 @@ class Player:
         for o in self.nearby_for_rect(trigger_rect, 2):
             t = o["t"]
             if t in (T_SPIKE, T_HALF_SPIKE):
+                sc = float(o.get("scale", 1.0))
                 for sr in spike_hitboxes(o["x"], o["y"], o.get("r", 0),
-                                         t == T_HALF_SPIKE):
+                                         t == T_HALF_SPIKE, sc):
                     if hazard_rect.colliderect(sr):
                         m["alive"] = False
                         return
             elif t == T_SAW:
-                if hazard_rect.colliderect(saw_hitbox(o["x"], o["y"])):
+                sc = float(o.get("scale", 1.0))
+                if hazard_rect.colliderect(saw_hitbox(o["x"], o["y"], sc)):
                     m["alive"] = False
                     return
         # Pads / orbs / gravity portal / mode portals / solo portal collapse.
@@ -1038,7 +1081,7 @@ class Player:
         for o in self.nearby_for_rect(probe, extra=self.params.spider_teleport_range + 1):
             if o["t"] != T_BLOCK:
                 continue
-            br = cell_rect(o["x"], o["y"])
+            br = cell_rect(o["x"], o["y"], float(o.get("scale", 1.0)))
             if not (br.left < probe.right and br.right > probe.left):
                 continue
             if m["grav"] == 1:
@@ -1068,13 +1111,15 @@ class Player:
             for o in self.nearby_for_rect(swept.inflate(6, 6), 2):
                 t = o["t"]
                 if t in (T_SPIKE, T_HALF_SPIKE):
+                    sc = float(o.get("scale", 1.0))
                     for sr in _sh(o["x"], o["y"], o.get("r", 0),
-                                  t == T_HALF_SPIKE):
+                                  t == T_HALF_SPIKE, sc):
                         if swept.colliderect(sr):
                             m["alive"] = False
                             return
                 elif t == T_SAW:
-                    if swept.colliderect(_saw(o["x"], o["y"])):
+                    sc = float(o.get("scale", 1.0))
+                    if swept.colliderect(_saw(o["x"], o["y"], sc)):
                         m["alive"] = False
                         return
             m["y"] = new_y
@@ -1144,7 +1189,7 @@ class Player:
                     m["on_ground"] = False
                     self.passed.add(key)
                 continue
-            cr = cell_rect(o["x"], o["y"])
+            cr = cell_rect(o["x"], o["y"], float(o.get("scale", 1.0)))
             if not trigger_rect.colliderect(cr):
                 continue
             if t == T_COIN:
@@ -1325,15 +1370,19 @@ class Player:
             prev_rect = self.rect()
             self.x += dx_step
             if self._resolve_x_collision(dx_step):
+                self._record_hitbox()
                 return
             dy_step = self.vy / steps
             self.y += dy_step
             if self._resolve_y_collision(dy_step):
+                self._record_hitbox()
                 return
             trigger_rect = prev_rect.union(self.rect()).inflate(6, 6)
             hazard_rect = self.hitbox()
             if self._handle_interactions(trigger_rect, hazard_rect, input_active):
+                self._record_hitbox()
                 return
+            self._record_hitbox()
         # Fell off the *visible* screen: kill cutoff is relative to the
         # camera's target Y so vertical-camera sections (ship segments
         # rising into the sky, UFO drops) don't false-kill when the player

@@ -133,8 +133,16 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
     # Showing the deepest attempt instead of the most-recent is what the
     # overlay is actually useful for — a last-attempt death on frame 1
     # shouldn't blow away a trace that made it to 80% on the run before.
+    #
+    # The player writes directly into this list at every collision-check
+    # point (each physics substep + teleport brackets) via its
+    # `hitbox_trace` hook, so the overlay shows EVERY check position, not
+    # just one sample per rendered frame. Opt-in: only enabled when the
+    # caller passed `out_hitboxes`.
     current_hitboxes = []
     best_hitboxes_progress = 0.0
+    if out_hitboxes is not None:
+        player.hitbox_trace = current_hitboxes
 
     is_sim_run = bool(bot_controller is not None or playback_inputs is not None)
     # Don't persist progress for editor-test runs or bot/playback runs.
@@ -258,7 +266,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         nonlocal prev_input_held, pending_jump_press, sim_accum, bot_frame
         nonlocal cam_y, bg_top, bg_bot
         nonlocal attempt_frames, current_run, best_run, best_run_progress_x
-        nonlocal current_hitboxes, best_hitboxes_progress
+        nonlocal best_hitboxes_progress
         # Commit the finished attempt as the new ghost if it got further.
         if current_run and current_run[-1][1] > best_run_progress_x:
             best_run = list(current_run)
@@ -272,7 +280,10 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 and player.x >= best_hitboxes_progress):
             out_hitboxes[:] = current_hitboxes
             best_hitboxes_progress = player.x
-        current_hitboxes = []
+        # In-place clear so `player.hitbox_trace` still points at the
+        # same list after reset — otherwise the next attempt would
+        # append into a list run_play no longer reads from.
+        current_hitboxes.clear()
         player.reset()
         # Honour the test-from-cursor start position — player.reset
         # puts the cube at the level's START object, so we teleport
@@ -681,12 +692,9 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 # Ghost replay: sample every 2 frames to keep the list modest.
                 if attempt_frames % 2 == 0:
                     current_run.append((attempt_frames, player.x, player.y))
-                # Hitbox trace for the editor's overlay. Sample every other
-                # frame — matches the ghost-replay cadence and still has
-                # ample resolution for a 300 px/sec hitbox (6 px per sample).
-                if out_hitboxes is not None and attempt_frames % 2 == 0:
-                    current_hitboxes.append(
-                        (player.x, player.y, player.size))
+                # Hitbox trace is filled per-substep by the player itself
+                # via its `hitbox_trace` hook — see the assignment where
+                # `current_hitboxes` was declared. Nothing to sample here.
                 cam_x = max(0, player.x - 200)
 
                 after_passed = set(player.passed)
@@ -789,9 +797,16 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                     draw_end_wall(screen, ox * CELL - cam_x + shake_x,
                                   oy * CELL - cam_y + shake_y, CELL, pulse)
                     continue
+                # Invisible blocks: collision still runs (player.py reads by
+                # type, not visibility) but the sprite is skipped so the
+                # author can hide solid surfaces behind scale-based
+                # teleport gauntlets and other hidden-path tricks.
+                if o.get("invisible"):
+                    continue
                 draw_obj(screen, o["t"], ox * CELL - cam_x + shake_x,
                          oy * CELL - cam_y + shake_y, CELL, pulse, o.get("r", 0),
-                         o if o["t"] == T_TELEPORT_ORB else None)
+                         o if o["t"] == T_TELEPORT_ORB else None,
+                         scale=float(o.get("scale", 1.0)))
         # Hint path overlay: when the player has toggled hint mode on, draw
         # the autobot's solved waypoints as a translucent dotted line so
         # they can preview the optimal route. Drawn BEFORE the per-run

@@ -41,6 +41,7 @@ from .constants import (
     T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
+    SOLID_TYPES,
 )
 
 
@@ -145,6 +146,17 @@ def normalize_object(o):
         "y": int(o.get("y", 0)),
         "r": _normalize_rotation(o.get("r", 0)),
     }
+    # Scale is an optional visual+hitbox multiplier (1.0 = native cell
+    # size). Clamped to a reasonable range so a typo can't silently
+    # create absurd-sized collision rects.
+    if "scale" in o and o["scale"] is not None:
+        try:
+            sc = float(o["scale"])
+        except (TypeError, ValueError):
+            sc = 1.0
+        sc = max(0.25, min(8.0, sc))
+        if abs(sc - 1.0) > 1e-6:
+            out["scale"] = sc
     if o["t"] == T_TELEPORT_ORB:
         out["group_id"] = get_group_id(o)
         if o.get("dest"):
@@ -189,6 +201,11 @@ def normalize_object(o):
         out["oid"] = int(o["oid"])
     if o.get("group"):
         out["group"] = int(o["group"])
+    # Invisible flag: solid blocks/slabs can be hidden while keeping
+    # collision. Only persisted when True so default-visible objects
+    # don't carry dead fields around.
+    if o["t"] in SOLID_TYPES and o.get("invisible"):
+        out["invisible"] = True
     return out
 
 

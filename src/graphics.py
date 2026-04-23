@@ -361,8 +361,27 @@ def normalize_rotation(r):
         return 0
 
 
-def cell_rect(gx, gy):
-    return pygame.Rect(gx * CELL, gy * CELL, CELL, CELL)
+def _scale_rect_around_cell_center(rect, gx, gy, scale):
+    """Return ``rect`` scaled uniformly around the cell's center point.
+
+    Used by every collision helper so a scaled object's visual footprint
+    and its hitbox stay in lock-step regardless of where within the cell
+    the base rect was anchored.
+    """
+    if scale == 1.0:
+        return rect
+    cx = gx * CELL + CELL / 2.0
+    cy = gy * CELL + CELL / 2.0
+    nw = rect.w * scale
+    nh = rect.h * scale
+    nx = cx + (rect.x - cx) * scale
+    ny = cy + (rect.y - cy) * scale
+    return pygame.Rect(round(nx), round(ny), max(1, round(nw)), max(1, round(nh)))
+
+
+def cell_rect(gx, gy, scale=1.0):
+    base = pygame.Rect(gx * CELL, gy * CELL, CELL, CELL)
+    return _scale_rect_around_cell_center(base, gx, gy, scale)
 
 
 # Slab local offsets (pre-rotation) in cell-local coords. Precomputed so
@@ -376,10 +395,11 @@ _SLAB_LOCAL = {
 }
 
 
-def slab_rect(gx, gy, rotation=0):
+def slab_rect(gx, gy, rotation=0, scale=1.0):
     """Slab is half-height; rotation determines which edge it sits on."""
     lx, ly, lw, lh = _SLAB_LOCAL[normalize_rotation(rotation)]
-    return pygame.Rect(gx * CELL + lx, gy * CELL + ly, lw, lh)
+    base = pygame.Rect(gx * CELL + lx, gy * CELL + ly, lw, lh)
+    return _scale_rect_around_cell_center(base, gx, gy, scale)
 
 
 def rotate_local_rect(local_rect, rotation, size=CELL):
@@ -426,11 +446,14 @@ def _spike_base_rotated(rotation, half):
     return tuple(rotate_local_rect(r, rotation) for r in base)
 
 
-def spike_hitboxes(gx, gy, rotation=0, half=False):
+def spike_hitboxes(gx, gy, rotation=0, half=False, scale=1.0):
     x = gx * CELL
     y = gy * CELL
-    return [r.move(x, y) for r in
-            _spike_base_rotated(normalize_rotation(rotation), bool(half))]
+    rects = [r.move(x, y) for r in
+             _spike_base_rotated(normalize_rotation(rotation), bool(half))]
+    if scale == 1.0:
+        return rects
+    return [_scale_rect_around_cell_center(r, gx, gy, scale) for r in rects]
 
 
 @functools.lru_cache(maxsize=8)
@@ -444,9 +467,10 @@ def pad_trigger_rect(gx, gy, rotation=0):
         gx * CELL, gy * CELL)
 
 
-def saw_hitbox(gx, gy):
+def saw_hitbox(gx, gy, scale=1.0):
     """Circular saw hitbox — smaller than the grid cell for fairness."""
-    return cell_rect(gx, gy).inflate(-10, -10)
+    base = cell_rect(gx, gy).inflate(-10, -10)
+    return _scale_rect_around_cell_center(base, gx, gy, scale)
 
 
 # ---------------------------------------------------------------------------
@@ -1287,8 +1311,12 @@ def _load_or_render(t, s, frame, variant=None):
     return img
 
 
-def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None):
-    """Blit the pre-rendered sprite image for this object type."""
+def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None, scale=1.0):
+    """Blit the pre-rendered sprite image for this object type.
+
+    ``scale`` enlarges (or shrinks) the sprite uniformly around the cell
+    center so scaled objects still occupy the same grid anchor.
+    """
     rot = normalize_rotation(rot)
     variant = None
     if t == T_TELEPORT_ORB and meta is not None:
@@ -1303,6 +1331,11 @@ def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None):
                 variant = int(gid)
             except (TypeError, ValueError):
                 variant = None
+    if scale != 1.0:
+        obj_s = max(1, int(round(s * scale)))
+        x = x + (s - obj_s) / 2.0
+        y = y + (s - obj_s) / 2.0
+        s = obj_s
     frames = _frame_count(t)
     frame = int(pulse / (60 / frames)) % frames if frames > 1 else 0
     img = _load_or_render(t, s, frame, variant)

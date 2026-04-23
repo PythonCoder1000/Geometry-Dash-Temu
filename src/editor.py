@@ -7,15 +7,17 @@ from .constants import (
     C_GRID, C_WHITE, C_GRAY, C_PLAYER, C_BTN, C_DANGER, C_DARK,
     C_PUBLISH, C_SUCCESS,
     PALETTE_CATEGORIES, TYPE_NAMES, TYPE_TIPS, ALL_TYPES, BG_PRESETS,
-    T_BLOCK, T_START, T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER,
+    T_BLOCK, T_SLAB, T_START, T_TELEPORT_ORB, T_CAMERA_TRIGGER,
+    T_BG_TRIGGER,
     T_MOVE_TRIGGER, T_SAW, T_COLOR_TRIGGER, T_COIN, T_END, T_MODE_DUAL,
     DEFAULT_MOVE_CURVE, MOVE_CURVE_SPEED_MAX,
+    SOLID_TYPES,
 )
 from .graphics import (
     draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
     lighter, darker, normalize_rotation,
     speaker_icon, icon_button, draw_end_wall,
-    spike_hitboxes, saw_hitbox,
+    spike_hitboxes, saw_hitbox, cell_rect, slab_rect,
 )
 from .levels import (
     save_level, load_level, load_level_full, update_meta,
@@ -78,7 +80,8 @@ def _export_level_png(objects, level_name, cell_px=10):
                      T_MOVE_TRIGGER, T_COLOR_TRIGGER) else None)
         try:
             draw_obj(surf, o["t"], sx, sy, cell_px, 0,
-                     o.get("r", 0), meta_arg)
+                     o.get("r", 0), meta_arg,
+                     scale=float(o.get("scale", 1.0)))
         except Exception:
             continue
     out_dir = _os_exp.path.join(_USER_DATA, "exports")
@@ -526,10 +529,37 @@ def _palette_rects(active_cat):
     return tab_rects, item_rects, tool_rects
 
 
-def _panel_button_rects(obj, stack_len=1):
+SCALE_STEP = 0.25
+SCALE_MIN = 0.25
+SCALE_MAX = 8.0
+
+
+def _step_scale(current, delta):
+    """Quantize ``current + delta`` to the nearest SCALE_STEP, clamped."""
+    new = current + delta * SCALE_STEP
+    return max(SCALE_MIN, min(SCALE_MAX, round(new / SCALE_STEP) * SCALE_STEP))
+
+
+def _shared_type(objs):
+    """Type string if every object shares it, else None."""
+    if not objs:
+        return None
+    t = objs[0]["t"]
+    return t if all(o["t"] == t for o in objs) else None
+
+
+def _panel_button_rects(obj, stack_len=1, multi_count=1, shared_type=None):
+    """Button rects for the EDIT panel.
+
+    When ``multi_count`` > 1 the single-object affordances (stack, dest
+    toggle, curve editor) are suppressed and type-specific param buttons
+    are only laid out when ``shared_type`` matches — meaning every
+    selected object is the same type and the bulk delta is meaningful.
+    """
     rects = {}
     y = PANEL_Y + 156
-    if stack_len > 1:
+    is_multi = multi_count > 1
+    if not is_multi and stack_len > 1:
         rects["stack_prev"] = pygame.Rect(PANEL_X + 20, y, 28, 26)
         rects["stack_next"] = pygame.Rect(PANEL_X + PANEL_W - 48, y, 28, 26)
         y += 32
@@ -539,15 +569,26 @@ def _panel_button_rects(obj, stack_len=1):
     rects["rot_prev"] = pygame.Rect(PANEL_X + 70, y + 6, 30, 30)
     rects["rot_next"] = pygame.Rect(PANEL_X + 170, y + 6, 30, 30)
     y += 44
-    t = obj["t"]
-    if t in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_MODE_DUAL):
+    rects["scale_prev"] = pygame.Rect(PANEL_X + 70, y + 6, 30, 30)
+    rects["scale_next"] = pygame.Rect(PANEL_X + 170, y + 6, 30, 30)
+    y += 44
+    t = shared_type if is_multi else obj["t"]
+    if t in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER,
+             T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_MODE_DUAL):
         rects["param_prev"] = pygame.Rect(PANEL_X + 70, y + 6, 30, 30)
         rects["param_next"] = pygame.Rect(PANEL_X + 170, y + 6, 30, 30)
         y += 44
-    if t == T_TELEPORT_ORB:
+    if not is_multi and t == T_TELEPORT_ORB:
         rects["dest_toggle"] = pygame.Rect(PANEL_X + 20, y + 4, PANEL_W - 40, 30)
         y += 38
-    if t == T_MOVE_TRIGGER:
+    # Invisible toggle for solid blocks/slabs: kept in play (collision
+    # still runs) but skipped by the renderer. Available in multi-select
+    # too so the author can bulk-hide a whole surface.
+    if t in SOLID_TYPES:
+        rects["invisible_toggle"] = pygame.Rect(
+            PANEL_X + 20, y + 4, PANEL_W - 40, 30)
+        y += 38
+    if not is_multi and t == T_MOVE_TRIGGER:
         rects["curve"] = pygame.Rect(PANEL_X + 15, y + 14, PANEL_W - 30, CURVE_H)
         y += CURVE_H + 34
     rects["delete"] = pygame.Rect(PANEL_X + 20, y + 4, PANEL_W - 40, 34)
@@ -607,22 +648,56 @@ def _adjust_param(obj, delta):
         obj["spawn_y"] = obj.get("spawn_y", obj["y"]) + delta
 
 
-def _draw_edit_panel(screen, obj, mpos, pulse, stack_info=(0, 1)):
+def _draw_edit_panel(screen, target, mpos, pulse, stack_info=(0, 1)):
+    """Render the edit panel for either a single object or a multi-selection.
+
+    ``target`` may be a dict (single select) or a list of dicts
+    (multi-select). Shared controls (rotation / scale / delete) always
+    appear; type-specific buttons only show when every selected object
+    has the same type so the bulk delta is meaningful.
+    """
+    if isinstance(target, list):
+        objs = target
+        obj = objs[0]
+        multi_count = len(objs)
+    else:
+        objs = [target]
+        obj = target
+        multi_count = 1
+    is_multi = multi_count > 1
+    shared_t = _shared_type(objs) if is_multi else obj["t"]
     stack_idx, stack_len = stack_info
-    has_stack = stack_len > 1
-    rects, panel_h = _panel_button_rects(obj, stack_len)
+    has_stack = not is_multi and stack_len > 1
+    rects, panel_h = _panel_button_rects(obj, stack_len, multi_count, shared_t)
     panel_rect = pygame.Rect(PANEL_X, PANEL_Y, PANEL_W, panel_h)
     pygame.draw.rect(screen, (18, 14, 36), panel_rect, border_radius=8)
-    pygame.draw.rect(screen, (70, 90, 170), panel_rect, 2, border_radius=8)
-    txt(screen, "EDIT OBJECT", PANEL_X + PANEL_W // 2, PANEL_Y + 18, 18, C_WHITE, True)
+    border_col = (70, 170, 110) if is_multi else (70, 90, 170)
+    pygame.draw.rect(screen, border_col, panel_rect, 2, border_radius=8)
+    header = f"EDIT {multi_count} OBJECTS" if is_multi else "EDIT OBJECT"
+    txt(screen, header, PANEL_X + PANEL_W // 2, PANEL_Y + 18, 18, C_WHITE, True)
     pv = pygame.Rect(PANEL_X + PANEL_W // 2 - 32, PANEL_Y + 36, 64, 64)
     pygame.draw.rect(screen, (10, 8, 24), pv, border_radius=6)
-    meta = obj if obj["t"] in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER) else None
-    draw_obj(screen, obj["t"], pv.x + 8, pv.y + 8, 48, pulse, obj.get("r", 0), meta)
-    type_name = TYPE_NAMES.get(obj["t"], obj["t"])
+    if is_multi and shared_t is None:
+        txt(screen, "MIXED", pv.centerx, pv.centery, 16, C_GRAY, True)
+    else:
+        preview_obj = obj if shared_t in (
+            T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER,
+            T_MOVE_TRIGGER, T_COLOR_TRIGGER) else None
+        draw_obj(screen, shared_t, pv.x + 8, pv.y + 8, 48, pulse,
+                 obj.get("r", 0), preview_obj,
+                 scale=float(obj.get("scale", 1.0)))
+    if is_multi:
+        type_name = (TYPE_NAMES.get(shared_t, shared_t)
+                     if shared_t else "Mixed types")
+    else:
+        type_name = TYPE_NAMES.get(obj["t"], obj["t"])
     txt(screen, type_name, PANEL_X + PANEL_W // 2, PANEL_Y + 112, 16, C_WHITE, True)
-    txt(screen, f"Pos ({obj['x']}, {obj['y']})",
-        PANEL_X + PANEL_W // 2, PANEL_Y + 135, 14, C_GRAY, True)
+    if is_multi:
+        txt(screen, f"{multi_count} selected",
+            PANEL_X + PANEL_W // 2, PANEL_Y + 135, 14, C_GRAY, True)
+    else:
+        txt(screen, f"Pos ({obj['x']}, {obj['y']})",
+            PANEL_X + PANEL_W // 2, PANEL_Y + 135, 14, C_GRAY, True)
     if has_stack:
         sp = rects["stack_prev"]
         txt(screen, f"Stack {stack_idx + 1}/{stack_len}",
@@ -647,19 +722,39 @@ def _draw_edit_panel(screen, obj, mpos, pulse, stack_info=(0, 1)):
         c = lighter(C_BTN, 30) if r.collidepoint(mpos) else C_BTN
         pygame.draw.rect(screen, c, r, border_radius=4)
         txt(screen, label, r.centerx, r.centery, 18, C_WHITE, True)
-    txt(screen, f"{obj.get('r', 0)}°",
-        PANEL_X + PANEL_W // 2, rp.centery, 16, C_WHITE, True)
-    param_label, param_value = _param_info(obj)
-    if "param_prev" in rects and param_label is not None:
-        pp = rects["param_prev"]
-        txt(screen, param_label, PANEL_X + 20, pp.y - 16, 14, C_GRAY)
-        for key, label in [("param_prev", "<"), ("param_next", ">")]:
-            r = rects[key]
-            c = lighter(C_BTN, 30) if r.collidepoint(mpos) else C_BTN
-            pygame.draw.rect(screen, c, r, border_radius=4)
-            txt(screen, label, r.centerx, r.centery, 18, C_WHITE, True)
-        txt(screen, param_value,
-            PANEL_X + PANEL_W // 2, pp.centery, 16, C_WHITE, True)
+    rot_vals = {int(o.get("r", 0)) for o in objs}
+    rot_disp = "Mixed" if len(rot_vals) > 1 else f"{next(iter(rot_vals))}°"
+    txt(screen, rot_disp, PANEL_X + PANEL_W // 2, rp.centery,
+        16, C_WHITE, True)
+    sp = rects["scale_prev"]
+    txt(screen, "Scale", PANEL_X + 20, sp.y - 16, 14, C_GRAY)
+    for key, label in [("scale_prev", "<"), ("scale_next", ">")]:
+        r = rects[key]
+        c = lighter(C_BTN, 30) if r.collidepoint(mpos) else C_BTN
+        pygame.draw.rect(screen, c, r, border_radius=4)
+        txt(screen, label, r.centerx, r.centery, 18, C_WHITE, True)
+    scale_vals = {round(float(o.get("scale", 1.0)), 4) for o in objs}
+    scale_disp = ("Mixed" if len(scale_vals) > 1
+                  else f"{next(iter(scale_vals)):.2f}x")
+    txt(screen, scale_disp, PANEL_X + PANEL_W // 2, sp.centery,
+        16, C_WHITE, True)
+    if "param_prev" in rects:
+        param_label, param_value = _param_info(obj)
+        if is_multi:
+            # Show "Mixed" when the per-object value differs.
+            vals = {_param_info(o)[1] for o in objs}
+            if len(vals) > 1:
+                param_value = "Mixed"
+        if param_label is not None:
+            pp = rects["param_prev"]
+            txt(screen, param_label, PANEL_X + 20, pp.y - 16, 14, C_GRAY)
+            for key, label in [("param_prev", "<"), ("param_next", ">")]:
+                r = rects[key]
+                c = lighter(C_BTN, 30) if r.collidepoint(mpos) else C_BTN
+                pygame.draw.rect(screen, c, r, border_radius=4)
+                txt(screen, label, r.centerx, r.centery, 18, C_WHITE, True)
+            txt(screen, param_value,
+                PANEL_X + PANEL_W // 2, pp.centery, 16, C_WHITE, True)
     if "dest_toggle" in rects:
         dr = rects["dest_toggle"]
         is_dest = bool(obj.get("dest"))
@@ -668,6 +763,23 @@ def _draw_edit_panel(screen, obj, mpos, pulse, stack_info=(0, 1)):
         pygame.draw.rect(screen, c, dr, border_radius=5)
         label = "Destination: ON" if is_dest else "Destination: OFF"
         txt(screen, label, dr.centerx, dr.centery, 13, C_WHITE, True)
+    if "invisible_toggle" in rects:
+        ir = rects["invisible_toggle"]
+        inv_vals = {bool(o.get("invisible")) for o in objs}
+        if len(inv_vals) > 1:
+            mixed = True
+            is_inv = False
+        else:
+            mixed = False
+            is_inv = next(iter(inv_vals))
+        base = (100, 70, 160) if is_inv else (50, 50, 70)
+        c = lighter(base, 30) if ir.collidepoint(mpos) else base
+        pygame.draw.rect(screen, c, ir, border_radius=5)
+        if mixed:
+            label = "Invisible: Mixed"
+        else:
+            label = "Invisible: ON" if is_inv else "Invisible: OFF"
+        txt(screen, label, ir.centerx, ir.centery, 13, C_WHITE, True)
     if obj["t"] == T_MOVE_TRIGGER and "curve" in rects:
         cr = rects["curve"]
         txt(screen, "Speed curve (click=add, drag=move, R-click=del)",
@@ -867,6 +979,10 @@ def run_editor(screen, clock, preload_filename=None):
     active_cat = 0
     selected_type = PALETTE_CATEGORIES[0][1][0]
     tool = TOOL_BRUSH
+    # Tracks the tool value at the end of the previous frame. When it
+    # changes away from EDIT we drop any lingering selection so the user
+    # doesn't keep editing stale objects after switching to Brush/Erase.
+    prev_tool = tool
     current_rotation = 0
     pending_link = None
     current_group_id = 1
@@ -1045,9 +1161,10 @@ def run_editor(screen, clock, preload_filename=None):
                 if ev.key == pygame.K_g:
                     show_grid = not show_grid
                 elif ev.key == pygame.K_h:
-                    # Hitbox overlay: shows the player's recorded rects from
-                    # the most recent test/bot run. Off by default so the
-                    # canvas stays clean during normal editing.
+                    # Hitbox-only view: hides sprite art so the canvas is
+                    # a pure collision diagram (blocks / slabs / spikes /
+                    # saws + the player's recorded trace from the most
+                    # recent test / bot run).
                     show_hitboxes = not show_hitboxes
                     if show_hitboxes and not last_run_hitboxes:
                         msg, msg_timer = (
@@ -1347,37 +1464,66 @@ def run_editor(screen, clock, preload_filename=None):
                 continue
             if ev.type == pygame.MOUSEBUTTONDOWN:
                 panel_hit = False
-                if ev.button == 1 and tool == TOOL_EDIT and len(selected_objs) == 1:
+                if ev.button == 1 and tool == TOOL_EDIT and len(selected_objs) >= 1:
                     active_obj = selected_objs[0]
-                    stack_here = objects_at_cell(objects, active_obj["x"], active_obj["y"])
-                    stack_len_here = len(stack_here)
-                    pbr, panel_h_here = _panel_button_rects(active_obj, stack_len_here)
+                    n_sel = len(selected_objs)
+                    is_multi_click = n_sel > 1
+                    shared_t_click = (_shared_type(selected_objs)
+                                      if is_multi_click else active_obj["t"])
+                    if is_multi_click:
+                        stack_here = []
+                        stack_len_here = 1
+                    else:
+                        stack_here = objects_at_cell(
+                            objects, active_obj["x"], active_obj["y"])
+                        stack_len_here = len(stack_here)
+                    pbr, panel_h_here = _panel_button_rects(
+                        active_obj, stack_len_here, n_sel, shared_t_click)
                     panel_rect = pygame.Rect(PANEL_X, PANEL_Y, PANEL_W, panel_h_here)
                     if panel_rect.collidepoint(ev.pos):
                         panel_hit = True
                         zero_rect = pygame.Rect(0, 0, 0, 0)
                         if pbr["rot_prev"].collidepoint(ev.pos):
                             push_undo()
-                            active_obj["r"] = normalize_rotation(active_obj.get("r", 0) - 90)
+                            for _o in selected_objs:
+                                _o["r"] = normalize_rotation(_o.get("r", 0) - 90)
                         elif pbr["rot_next"].collidepoint(ev.pos):
                             push_undo()
-                            active_obj["r"] = normalize_rotation(active_obj.get("r", 0) + 90)
+                            for _o in selected_objs:
+                                _o["r"] = normalize_rotation(_o.get("r", 0) + 90)
+                        elif pbr["scale_prev"].collidepoint(ev.pos):
+                            push_undo()
+                            for _o in selected_objs:
+                                _o["scale"] = _step_scale(
+                                    float(_o.get("scale", 1.0)), -1)
+                        elif pbr["scale_next"].collidepoint(ev.pos):
+                            push_undo()
+                            for _o in selected_objs:
+                                _o["scale"] = _step_scale(
+                                    float(_o.get("scale", 1.0)), +1)
                         elif pbr["delete"].collidepoint(ev.pos):
                             push_undo()
-                            if active_obj in objects:
-                                objects.remove(active_obj)
+                            for _o in list(selected_objs):
+                                if _o in objects:
+                                    objects.remove(_o)
+                            msg_n = n_sel
                             selected_objs = []
                             last_edit_cell = None
-                            msg, msg_timer = "Deleted object", 80
+                            msg, msg_timer = (
+                                f"Deleted {msg_n} object{'s' if msg_n != 1 else ''}",
+                                80,
+                            )
                         elif pbr["close"].collidepoint(ev.pos):
                             selected_objs = []
                             last_edit_cell = None
                         elif pbr.get("param_prev", zero_rect).collidepoint(ev.pos):
                             push_undo()
-                            _adjust_param(active_obj, -1)
+                            for _o in selected_objs:
+                                _adjust_param(_o, -1)
                         elif pbr.get("param_next", zero_rect).collidepoint(ev.pos):
                             push_undo()
-                            _adjust_param(active_obj, 1)
+                            for _o in selected_objs:
+                                _adjust_param(_o, 1)
                         elif pbr.get("stack_prev", zero_rect).collidepoint(ev.pos):
                             if active_obj in stack_here:
                                 idx = (stack_here.index(active_obj) - 1) % stack_len_here
@@ -1400,6 +1546,27 @@ def run_editor(screen, clock, preload_filename=None):
                             msg, msg_timer = (
                                 "Marked as destination" if active_obj["dest"]
                                 else "Cleared destination"), 70
+                        elif pbr.get("invisible_toggle", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            # If anything in the selection is still
+                            # visible, flip everything to invisible;
+                            # otherwise flip the whole group back to
+                            # visible. Matches how other bulk toggles
+                            # behave (all-on or all-off, no half-state).
+                            any_visible = any(
+                                not _o.get("invisible") for _o in selected_objs)
+                            for _o in selected_objs:
+                                if any_visible:
+                                    _o["invisible"] = True
+                                else:
+                                    _o.pop("invisible", None)
+                            n = len(selected_objs)
+                            msg, msg_timer = (
+                                f"Hid {n} block{'s' if n != 1 else ''}"
+                                if any_visible
+                                else f"Revealed {n} block{'s' if n != 1 else ''}",
+                                70,
+                            )
                         elif ("curve" in pbr
                               and pbr["curve"].collidepoint(ev.pos)
                               and active_obj["t"] == T_MOVE_TRIGGER):
@@ -1662,6 +1829,17 @@ def run_editor(screen, clock, preload_filename=None):
                     )
                 drag_mode = None
                 drag_moved = False
+        # Switching tools should drop any active EDIT selection so the
+        # edit panel / selection highlight don't linger into a Brush or
+        # Erase session. Ctrl+A auto-switches to EDIT on the same frame
+        # that fills `selected_objs`, so we only clear when the *previous*
+        # tool was EDIT and the user left it.
+        if tool != prev_tool:
+            if prev_tool == TOOL_EDIT and tool != TOOL_EDIT:
+                selected_objs = []
+                last_edit_cell = None
+                drag_mode = None
+            prev_tool = tool
         # mouse_held() is the guard-aware version of get_pressed()[0] — it
         # returns False until the user has released the entry click and
         # pressed again, so a residual mouse-down never triggers an edit.
@@ -1673,11 +1851,22 @@ def run_editor(screen, clock, preload_filename=None):
         except pygame.error:
             mb = (held_l, False, False)
         single_selected = selected_objs[0] if len(selected_objs) == 1 else None
-        panel_visible = tool == TOOL_EDIT and single_selected is not None
+        multi_selected = len(selected_objs) > 1
+        panel_visible = tool == TOOL_EDIT and (
+            single_selected is not None or multi_selected)
         if panel_visible:
-            panel_stack = objects_at_cell(objects, single_selected["x"], single_selected["y"])
-            panel_stack_len = len(panel_stack)
-            _, panel_h_loop = _panel_button_rects(single_selected, panel_stack_len)
+            if single_selected is not None:
+                panel_stack = objects_at_cell(
+                    objects, single_selected["x"], single_selected["y"])
+                panel_stack_len = len(panel_stack)
+                _, panel_h_loop = _panel_button_rects(
+                    single_selected, panel_stack_len, 1, single_selected["t"])
+            else:
+                panel_stack = []
+                panel_stack_len = 0
+                shared_t_loop = _shared_type(selected_objs)
+                _, panel_h_loop = _panel_button_rects(
+                    selected_objs[0], 1, len(selected_objs), shared_t_loop)
             panel_rect = pygame.Rect(PANEL_X, PANEL_Y, PANEL_W, panel_h_loop)
         else:
             panel_stack = []
@@ -2038,18 +2227,46 @@ def run_editor(screen, clock, preload_filename=None):
         right_gx = left_gx + WIDTH // effective_cell + 3
         top_gy = int(cam_y // effective_cell) - 1
         bot_gy = top_gy + HEIGHT // effective_cell + 3
-        for o in objects:
-            if left_gx <= o["x"] <= right_gx and top_gy <= o["y"] <= bot_gy:
-                if o["t"] == T_END:
-                    # Win line is an infinite-height wall, not a 50x50 sprite.
+        # Hitbox-only view: skip sprite blits entirely so the canvas is a
+        # clean schematic of collision rects. Start/End still render so the
+        # author knows where the level begins/ends.
+        if not show_hitboxes:
+            for o in objects:
+                if left_gx <= o["x"] <= right_gx and top_gy <= o["y"] <= bot_gy:
+                    if o["t"] == T_END:
+                        # Win line is an infinite-height wall, not a 50x50 sprite.
+                        draw_end_wall(screen,
+                                      o["x"] * effective_cell - cam_x,
+                                      o["y"] * effective_cell - cam_y,
+                                      effective_cell, pulse)
+                        continue
+                    meta = o if o["t"] in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER) else None
+                    sx_e = o["x"] * effective_cell - cam_x
+                    sy_e = o["y"] * effective_cell - cam_y
+                    draw_obj(screen, o["t"], sx_e, sy_e,
+                             effective_cell, pulse, o.get("r", 0), meta,
+                             scale=float(o.get("scale", 1.0)))
+                    # Invisible flag: sprite still draws in the editor so
+                    # the author can select / reposition it, but we dim
+                    # it and outline it to signal "won't render in play".
+                    if o.get("invisible"):
+                        dim_rect = pygame.Rect(sx_e, sy_e,
+                                               effective_cell, effective_cell)
+                        dim = pygame.Surface(
+                            (effective_cell, effective_cell), pygame.SRCALPHA)
+                        dim.fill((0, 0, 0, 140))
+                        screen.blit(dim, dim_rect)
+                        pygame.draw.rect(screen, (200, 200, 255), dim_rect, 1)
+        else:
+            # Even in hitbox mode, keep a faint start-line / end-wall so the
+            # level bounds are legible.
+            for o in objects:
+                if (left_gx <= o["x"] <= right_gx and top_gy <= o["y"] <= bot_gy
+                        and o["t"] == T_END):
                     draw_end_wall(screen,
                                   o["x"] * effective_cell - cam_x,
                                   o["y"] * effective_cell - cam_y,
                                   effective_cell, pulse)
-                    continue
-                meta = o if o["t"] in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER) else None
-                draw_obj(screen, o["t"], o["x"] * effective_cell - cam_x, o["y"] * effective_cell - cam_y,
-                         effective_cell, pulse, o.get("r", 0), meta)
         for o in objects:
             if o["t"] != T_MOVE_TRIGGER:
                 continue
@@ -2113,38 +2330,49 @@ def run_editor(screen, clock, preload_filename=None):
                 pygame.draw.rect(hb_layer, (255, 110, 110, 110),
                                  (sxh + ssh, syh + ssh,
                                   inner_sz, inner_sz), 1)
-            # Hazard hitboxes (spikes, half-spikes, saws) so the author
-            # can see EXACTLY where the kill zones are — distinct from
-            # the rendered sprite art which has decorative margins.
+            # Hazard + solid hitboxes so the author can see EXACTLY where
+            # kill zones and landable surfaces live — distinct from the
+            # rendered sprite art which has decorative margins.
             eff_left_gx = int(cam_x / zoom_level) // CELL - 1
             eff_right_gx = int((cam_x + WIDTH) / zoom_level) // CELL + 2
             eff_top_gy = int(cam_y / zoom_level) // CELL - 1
             eff_bot_gy = int((cam_y + HEIGHT) / zoom_level) // CELL + 2
             for o in objects:
                 t = o["t"]
-                if t not in (T_SPIKE, T_HALF_SPIKE, T_SAW):
+                if t not in (T_SPIKE, T_HALF_SPIKE, T_SAW,
+                             T_BLOCK, T_SLAB):
                     continue
                 gx = o["x"]
                 gy = o["y"]
                 if not (eff_left_gx <= gx <= eff_right_gx
                         and eff_top_gy <= gy <= eff_bot_gy):
                     continue
+                sc = float(o.get("scale", 1.0))
                 if t == T_SAW:
-                    hb = saw_hitbox(gx, gy)
-                    rects = [hb]
-                else:
+                    rects = [saw_hitbox(gx, gy, sc)]
+                    fill = (255, 80, 80, 60)
+                    outline = (255, 60, 60, 220)
+                elif t in (T_SPIKE, T_HALF_SPIKE):
                     rects = spike_hitboxes(gx, gy, o.get("r", 0),
-                                           half=(t == T_HALF_SPIKE))
+                                           half=(t == T_HALF_SPIKE),
+                                           scale=sc)
+                    fill = (255, 80, 80, 60)
+                    outline = (255, 60, 60, 220)
+                elif t == T_BLOCK:
+                    rects = [cell_rect(gx, gy, sc)]
+                    fill = (120, 180, 255, 50)
+                    outline = (100, 160, 240, 220)
+                else:  # T_SLAB
+                    rects = [slab_rect(gx, gy, o.get("r", 0), sc)]
+                    fill = (120, 180, 255, 50)
+                    outline = (100, 160, 240, 220)
                 for rr in rects:
                     sx = int(rr.x * zoom_level - cam_x)
                     sy = int(rr.y * zoom_level - cam_y)
                     sw = max(1, int(rr.w * zoom_level))
                     sh = max(1, int(rr.h * zoom_level))
-                    # Semi-transparent fill so the hazard region reads
-                    # through decorations; bright outline for clarity.
-                    pygame.draw.rect(hb_layer, (255, 80, 80, 60),
-                                     (sx, sy, sw, sh))
-                    pygame.draw.rect(hb_layer, (255, 60, 60, 220),
+                    pygame.draw.rect(hb_layer, fill, (sx, sy, sw, sh))
+                    pygame.draw.rect(hb_layer, outline,
                                      (sx, sy, sw, sh), 1)
             screen.blit(hb_layer, (0, 0))
         # Draw bot path waypoints
@@ -2198,13 +2426,22 @@ def run_editor(screen, clock, preload_filename=None):
                 trry = tr["y"] * effective_cell - cam_y + effective_cell // 2
                 pygame.draw.circle(screen, (200, 150, 255), (trx, trry), 26, 2)
         for sobj in selected_objs:
-            sxb = sobj["x"] * effective_cell - cam_x
-            syb = sobj["y"] * effective_cell - cam_y
-            pygame.draw.rect(screen, (120, 255, 140), (sxb, syb, effective_cell, effective_cell), 2)
+            sc_sel = float(sobj.get("scale", 1.0))
+            cell_sz = max(1, int(effective_cell * sc_sel))
+            cx = sobj["x"] * effective_cell - cam_x + effective_cell // 2
+            cy = sobj["y"] * effective_cell - cam_y + effective_cell // 2
+            sxb = cx - cell_sz // 2
+            syb = cy - cell_sz // 2
+            pygame.draw.rect(screen, (120, 255, 140),
+                             (sxb, syb, cell_sz, cell_sz), 2)
         if single_selected is not None:
-            sxb = single_selected["x"] * effective_cell - cam_x
-            syb = single_selected["y"] * effective_cell - cam_y
-            ring = pygame.Surface((effective_cell + 12, effective_cell + 12), pygame.SRCALPHA)
+            sc_sel = float(single_selected.get("scale", 1.0))
+            cell_sz = max(1, int(effective_cell * sc_sel))
+            cx = single_selected["x"] * effective_cell - cam_x + effective_cell // 2
+            cy = single_selected["y"] * effective_cell - cam_y + effective_cell // 2
+            sxb = cx - cell_sz // 2
+            syb = cy - cell_sz // 2
+            ring = pygame.Surface((cell_sz + 12, cell_sz + 12), pygame.SRCALPHA)
             pygame.draw.rect(ring, (120, 255, 140, 110), ring.get_rect(), 3, border_radius=6)
             screen.blit(ring, (sxb - 6, syb - 6))
             if single_selected["t"] == T_CAMERA_TRIGGER:
@@ -2263,7 +2500,8 @@ def run_editor(screen, clock, preload_filename=None):
                     )
                     gs.set_alpha(140)
                     draw_obj(gs, so["t"], 0, 0, effective_cell, pulse,
-                             so.get("r", 0))
+                             so.get("r", 0),
+                             scale=float(so.get("scale", 1.0)))
                     screen.blit(gs, (cx, cy))
                 # Outline the bounding box so the user sees the footprint.
                 bw = (max_sx - min_sx + 1) * effective_cell
@@ -2291,17 +2529,13 @@ def run_editor(screen, clock, preload_filename=None):
                 screen.blit(gs, (sx, sy))
                 pygame.draw.rect(screen, C_WHITE, (sx, sy, effective_cell, effective_cell), 1)
         if panel_visible:
-            stack_idx = panel_stack.index(single_selected) if single_selected in panel_stack else 0
-            _draw_edit_panel(screen, single_selected, mpos, pulse, (stack_idx, panel_stack_len))
-        elif tool == TOOL_EDIT and len(selected_objs) > 1:
-            banner_w, banner_h = 220, 44
-            br = pygame.Rect(WIDTH - banner_w - 12, PANEL_Y, banner_w, banner_h)
-            pygame.draw.rect(screen, (18, 14, 36), br, border_radius=8)
-            pygame.draw.rect(screen, (70, 170, 110), br, 2, border_radius=8)
-            txt(screen, f"{len(selected_objs)} selected",
-                br.centerx, br.y + 12, 15, C_WHITE, True)
-            txt(screen, "Drag=move R/Q=rot Del ^C/X/V=cpy/cut/paste ^D=dup",
-                br.centerx, br.y + 30, 10, C_GRAY, True)
+            if single_selected is not None:
+                stack_idx = (panel_stack.index(single_selected)
+                             if single_selected in panel_stack else 0)
+                _draw_edit_panel(screen, single_selected, mpos, pulse,
+                                 (stack_idx, panel_stack_len))
+            else:
+                _draw_edit_panel(screen, list(selected_objs), mpos, pulse)
         hovered_item = _draw_palette(screen, mpos, active_cat, selected_type,
                                      tool, pulse, tab_rects, item_rects, tool_rects)
         if tool == TOOL_BRUSH:
