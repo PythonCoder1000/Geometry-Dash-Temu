@@ -540,7 +540,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
 
     def _enter_dual(self, obj=None):
         """Spawn the mirror with opposite gravity, inheriting the main
-        body's motion (vy / angle sign-flipped)."""
+        body's current gamemode, size and motion (vy / angle sign-flipped)."""
         if self._mirror is not None:
             return
         spawn_row = obj.get("spawn_y") if obj else None
@@ -551,9 +551,9 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self._mirror = MirrorBody(
             y=float(mirror_y), vy=-float(self.vy), grav=-self.grav,
             on_ground=bool(self._was_on_ground), angle=-float(self.angle),
-            alive=True, mode=MODE_CUBE, size=int(self.size),
-            flight_budget=int(self.params.robot_flight_seconds * 60),
-            thrust_disabled=False)
+            alive=True, mode=self.mode, size=int(self.size),
+            flight_budget=int(self.flight_budget),
+            thrust_disabled=bool(self.thrust_disabled))
 
     def _collapse_dual(self):
         """Solo portal: the mirror becomes the main body's pose."""
