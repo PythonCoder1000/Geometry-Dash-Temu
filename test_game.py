@@ -28,7 +28,7 @@ from src.constants import (
     CELL, FPS, PLAYER_SIZE, GRAVITY, JUMP_FORCE, SPEED_VALUES,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLACK_ORB, T_BLUE_ORB, T_GREEN_ORB,
-    T_PAD, T_BLUE_PAD, T_GRAV, T_END, T_START, T_COIN, T_CHECKPOINT,
+    T_PAD, T_BLUE_PAD, T_GRAV_UP, T_GRAV_DOWN, T_END, T_START, T_COIN, T_CHECKPOINT,
     T_MODE_CUBE, T_MODE_SHIP, T_MODE_BALL, T_MODE_WAVE, T_MODE_UFO, T_MODE_SPIDER,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
@@ -191,7 +191,9 @@ check("next_group_id sees both group_id and legacy link",
 ob = normalize_object({"t": T_BLOCK, "x": "5", "y": 3.7, "r": 91,
                        "unknown": "ignored"})
 check("normalize_object coerces x to int", isinstance(ob["x"], int) and ob["x"] == 5)
-check("normalize_object rounds r to 90", ob["r"] == 90)
+# Free rotation: levels persist any angle (the visual rotates exactly,
+# collision helpers snap to 90° internally). 91° passes through as 91.
+check("normalize_object preserves free rotation", ob["r"] == 91)
 check("normalize_object drops unknown keys", "unknown" not in ob)
 
 # Backwards-compat migration: a teleport orb with only the legacy "link"
@@ -695,33 +697,47 @@ try:
     check("settings.DEFAULTS has fps_cap", "fps_cap" in _settings_mod.DEFAULTS)
     check("settings.DEFAULTS has fullscreen",
           "fullscreen" in _settings_mod.DEFAULTS)
-    check("FPS_CAP_OPTIONS contains 60", 60 in _settings_mod.FPS_CAP_OPTIONS)
-    check("FPS_CAP_OPTIONS contains 0 (uncapped)",
-          0 in _settings_mod.FPS_CAP_OPTIONS)
+    # Render rate is now locked to GAME_RATE (120). The options list
+    # collapses to that single value; the cycle / set helpers are
+    # no-ops; the getter always returns the locked value regardless
+    # of what's persisted in prefs.
+    check("FPS_CAP_OPTIONS contains GAME_RATE",
+          _settings_mod.GAME_RATE in _settings_mod.FPS_CAP_OPTIONS)
+    check("FPS_CAP_OPTIONS is locked to a single value",
+          len(_settings_mod.FPS_CAP_OPTIONS) == 1)
 
     # Defaults returned when nothing persisted yet.
-    check("get_fps_cap default", _settings_mod.get_fps_cap() == FPS)
+    check("get_fps_cap returns GAME_RATE",
+          _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     check("get_fullscreen default False",
           _settings_mod.get_fullscreen() is False)
 
-    # set/get round-trip.
-    _settings_mod.set_fps_cap(120)
-    check("fps_cap persists 120", _settings_mod.get_fps_cap() == 120)
+    # set is a no-op now — locked value never changes.
+    _settings_mod.set_fps_cap(60)
+    check("set_fps_cap is a no-op (locked)",
+          _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     _settings_mod.set_fps_cap(0)
-    check("fps_cap=0 (uncapped) round-trips",
-          _settings_mod.get_fps_cap() == 0)
+    check("set_fps_cap(0) does not unlock the rate",
+          _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
 
-    # Defensive coercion — corrupt prefs fall back to default.
+    # Defensive: corrupt prefs values are ignored — the locked value
+    # is hardcoded so they can't take effect.
     _prefs_mod.set("fps_cap", "garbage")
-    check("garbage fps_cap falls back to default",
-          _settings_mod.get_fps_cap() == FPS)
+    check("garbage fps_cap ignored (locked)",
+          _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     _prefs_mod.set("fps_cap", -10)
-    check("negative fps_cap falls back to default",
-          _settings_mod.get_fps_cap() == FPS)
+    check("negative fps_cap ignored (locked)",
+          _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     _prefs_mod.set("fps_cap", 99999)
-    check("absurdly large fps_cap clamped to 1000",
-          _settings_mod.get_fps_cap() == 1000)
-    _prefs_mod.set("fps_cap", 60)  # restore baseline
+    check("absurdly large fps_cap ignored (locked)",
+          _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
+    _prefs_mod.set("fps_cap", _settings_mod.GAME_RATE)  # restore baseline
+
+    # TPS lock — same value as fps_cap, single source of truth.
+    check("get_tps == GAME_RATE",
+          _settings_mod.get_tps() == _settings_mod.GAME_RATE)
+    check("get_tps == get_fps_cap",
+          _settings_mod.get_tps() == _settings_mod.get_fps_cap())
 
     # Volume coercion clamps to [0, 1].
     _settings_mod.set_music_vol(2.5)
@@ -741,28 +757,25 @@ try:
     check("toggle_fullscreen persists",
           _settings_mod.get_fullscreen() == after)
 
-    # cycle_fps_cap walks through the option list.
-    _settings_mod.set_fps_cap(60)
-    expected = _settings_mod.FPS_CAP_OPTIONS[
-        (_settings_mod.FPS_CAP_OPTIONS.index(60) + 1) %
-        len(_settings_mod.FPS_CAP_OPTIONS)
-    ]
+    # cycle_fps_cap is locked — returns GAME_RATE without changing prefs.
     actual = _settings_mod.cycle_fps_cap()
-    check("cycle_fps_cap advances through options", actual == expected)
+    check("cycle_fps_cap returns GAME_RATE (locked)",
+          actual == _settings_mod.GAME_RATE)
 
-    # fps_cap_label maps 0 → "Unlimited".
-    check("fps_cap_label(0) == 'Unlimited'",
-          _settings_mod.fps_cap_label(0) == "Unlimited")
-    check("fps_cap_label(60) == '60'",
-          _settings_mod.fps_cap_label(60) == "60")
+    # fps_cap_label always shows the locked value.
+    check("fps_cap_label includes 'locked'",
+          "locked" in _settings_mod.fps_cap_label())
+    check("fps_cap_label(GAME_RATE) shows the rate",
+          str(_settings_mod.GAME_RATE) in
+          _settings_mod.fps_cap_label(_settings_mod.GAME_RATE))
 
     # reset_to_defaults wipes all keys back to baseline.
-    _settings_mod.set_fps_cap(144)
+    _settings_mod.set_fps_cap(144)  # no-op — locked
     _settings_mod.set_fullscreen(True)
     _settings_mod.set_music_vol(0.1)
     _settings_mod.reset_to_defaults()
-    check("reset returns fps_cap to default",
-          _settings_mod.get_fps_cap() == _settings_mod.DEFAULTS["fps_cap"])
+    check("reset keeps fps_cap at GAME_RATE",
+          _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     check("reset returns fullscreen to default",
           _settings_mod.get_fullscreen() ==
           _settings_mod.DEFAULTS["fullscreen"])
@@ -987,8 +1000,337 @@ _owp, _omwp, _oin, _owon = _obstacle_bot.solve(screen=None, clock=None, max_fram
 check("AutoBot solves single-spike level", _owon is True)
 # When the bot solves with a jump, at least one frame must have pressed=True
 if _owon:
-    check("Spike solution contains a jump press",
-          any(pressed for _, pressed in _oin))
+    # Three-action bot: cube can now jump with (T, F) "hold" alone,
+    # so a clean spike clear may not contain a pressed=True frame.
+    # The meaningful invariant is that the bot held the button at
+    # least once (otherwise it never left the ground).
+    check("Spike solution holds the button at least once",
+          any(held for held, _ in _oin))
+
+
+# ---------------------------------------------------------------------------
+# Spider orb — trail crash fix + directional teleport
+# ---------------------------------------------------------------------------
+section("Spider orb")
+import pygame as _pg_spider
+_pg_spider.init()
+_sp_screen = _pg_spider.display.set_mode((800, 600))
+
+from src.constants import T_SPIDER_ORB as _TSOrb
+
+# 1) Render loop must survive a spider-teleport + many subsequent frames.
+#    Regression: the orb used to inject al=220 trail samples out of order,
+#    leaving negative-alpha entries mid-list that crashed pygame's color
+#    check on the next frame.
+_spider_objs = [{"t": T_START, "x": 3, "y": 9, "r": 0}]
+for _gx in range(40):
+    _spider_objs.append({"t": T_BLOCK, "x": _gx, "y": 10, "r": 0})
+for _gx in range(40):
+    _spider_objs.append({"t": T_BLOCK, "x": _gx, "y": 2, "r": 0})
+_spider_objs.append({"t": _TSOrb, "x": 10, "y": 9, "r": 0})
+_sp = Player(_spider_objs)
+_sp_crashed = False
+try:
+    for _f in range(200):
+        _sp.update(_f % 3 == 0, _f == 40)  # press once near the orb
+        _sp.draw(_sp_screen, 0, 0)
+except (ValueError, TypeError) as _e:
+    _sp_crashed = True
+check("Spider-orb activation does not crash subsequent draw()",
+      not _sp_crashed)
+# Trail should never contain a sample with al <= 5 at render time —
+# invariant the new list-rebuild filter enforces.
+check("No decayed (al<=5) trail samples survive the update loop",
+      all(seg[3] > 5 for seg in _sp.trail))
+
+# 2) Rotation r=90 sends the teleport RIGHT to the nearest wall,
+#    skipping the classic against-gravity behaviour.
+_dir_objs = [{"t": T_START, "x": 3, "y": 9, "r": 0}]
+for _gx in range(40):
+    _dir_objs.append({"t": T_BLOCK, "x": _gx, "y": 10, "r": 0})
+# Wall at cell 20 spanning the player's row — teleport must snap to it.
+for _gy in range(4, 10):
+    _dir_objs.append({"t": T_BLOCK, "x": 20, "y": _gy, "r": 0})
+_dir_objs.append({"t": _TSOrb, "x": 10, "y": 9, "r": 90})
+_dp = Player(_dir_objs)
+_before_x, _before_grav = _dp.x, _dp.grav
+# Run until we hit the orb; orb at cell 10 ~ x=500.
+_saw_jump = False
+_pre_tp_x = _dp.x
+for _f in range(120):
+    _pre_tp_x = _dp.x
+    _dp.update(False, True)
+    if _dp.x - _pre_tp_x > 100:  # instant horizontal jump = teleport
+        _saw_jump = True
+        break
+check("Directional spider orb (r=90) teleports player horizontally",
+      _saw_jump)
+check("Horizontal spider teleport keeps gravity unchanged",
+      _dp.grav == _before_grav)
+
+# 3) Default r=0 still flips gravity on vertical teleport (back-compat).
+_vert_objs = [{"t": T_START, "x": 3, "y": 9, "r": 0}]
+for _gx in range(40):
+    _vert_objs.append({"t": T_BLOCK, "x": _gx, "y": 10, "r": 0})
+for _gx in range(40):
+    _vert_objs.append({"t": T_BLOCK, "x": _gx, "y": 2, "r": 0})
+_vert_objs.append({"t": _TSOrb, "x": 10, "y": 9, "r": 0})
+_vp = Player(_vert_objs)
+_vp_grav_before = _vp.grav
+_saw_flip = False
+for _f in range(150):
+    _vp.update(False, True)
+    if _vp.grav != _vp_grav_before:
+        _saw_flip = True
+        break
+check("Default (r=0) spider orb still flips gravity", _saw_flip)
+
+
+# ---------------------------------------------------------------------------
+# Dash orb — persistence + bot uses it correctly
+# ---------------------------------------------------------------------------
+section("Dash orb persistence + autobot integration")
+from src.constants import T_DASH_ORB as _TDO
+from src.levels import normalize_object as _nrm
+
+# 1) Custom dash_speed / dash_dur survive the save normalisation.
+_orb = {"t": _TDO, "x": 11, "y": 9, "r": 0,
+        "dash_speed": 18.0, "dash_dur": 25}
+_n = _nrm(_orb)
+check("dash_speed persists through normalize_object",
+      _n.get("dash_speed") == 18.0)
+check("dash_dur persists through normalize_object",
+      _n.get("dash_dur") == 25)
+
+# 2) Default-valued orbs don't bloat the JSON with redundant fields.
+_n_def = _nrm({"t": _TDO, "x": 11, "y": 9, "r": 0})
+check("default dash orb omits dash_speed / dash_dur fields",
+      "dash_speed" not in _n_def and "dash_dur" not in _n_def)
+
+# 3) Solver wins a level whose only viable solution is the dash orb,
+#    after the orb has been round-tripped through normalize_object.
+#    This regression-tests both the persistence fix AND the in-dash
+#    beam-prune fix together: pre-fix the bot collapsed mid-air dash
+#    options to (F,F), releasing the button and ending the dash a
+#    frame after activation, which left the player short of the gap.
+_dash_lvl = [{"t": T_START, "x": 3, "y": 9, "r": 0}]
+for _gx in list(range(13)) + list(range(18, 30)):
+    _dash_lvl.append({"t": T_BLOCK, "x": _gx, "y": 10, "r": 0})
+_dash_lvl.append({"t": _TDO, "x": 11, "y": 9, "r": 0,
+                  "dash_speed": 18.0, "dash_dur": 20})
+_dash_lvl.append({"t": T_END, "x": 27, "y": 9, "r": 0})
+_dash_lvl_saved = [_nrm(o) for o in _dash_lvl]
+_dash_bot = _HintBot([dict(o) for o in _dash_lvl_saved])
+_, _, _dash_inputs, _dash_won = _dash_bot.solve(
+    screen=None, clock=None, max_frames=3000)
+check("autobot solves dash-orb level after save round-trip",
+      _dash_won is True)
+if _dash_won:
+    # Replay to confirm the dash actually fired (not solved by some
+    # other unintended path).
+    from src.autobot import _SimPlayer as _DashSim
+    _replay = _DashSim([dict(o) for o in _dash_lvl_saved])
+    _saw_dash = False
+    for _h, _pr in _dash_inputs:
+        _replay.update(_h, _pr)
+        if _replay.dash_timer > 0:
+            _saw_dash = True
+        if _replay.won:
+            break
+    check("autobot solution genuinely uses the dash orb",
+          _saw_dash is True)
+
+# 4) Jump probe hint integration — adding a probe to the level should
+#    not break the solver. The probe is purely advisory (bumps score
+#    near the press point) but mustn't introduce errors when present.
+from src.constants import T_JUMP_PREDICTOR as _TJP_dash
+_probe_lvl = [dict(o) for o in spike_level]
+_probe_lvl.append({"t": _TJP_dash, "x": 11, "y": 9, "r": 0,
+                   "mode": "cube", "grav": 1, "mini": False,
+                   "dx": 0, "dy": 0})
+_probe_bot = _HintBot([dict(o) for o in _probe_lvl])
+_, _, _probe_inputs, _probe_won = _probe_bot.solve(
+    screen=None, clock=None, max_frames=3000)
+check("autobot solves spike level with a jump probe present",
+      _probe_won is True)
+check("AutoBot._probe_xs index populated when probes exist",
+      len(_probe_bot._probe_xs) == 1 and _probe_bot._probe_xs[0] == 11)
+
+
+# ---------------------------------------------------------------------------
+# Spider orb direction toggle (per-orb editor field)
+# ---------------------------------------------------------------------------
+section("Spider orb direction toggle")
+from src.constants import T_SPIDER_ORB as _TSpO
+
+# 1) `dir` field round-trips through save when set to a cardinal.
+_dir_orb = {"t": _TSpO, "x": 5, "y": 9, "r": 0, "dir": "right"}
+check("explicit dir survives normalize_object",
+      _nrm(_dir_orb).get("dir") == "right")
+# 2) Default / auto-direction orbs stay lean on disk.
+_def_orb = {"t": _TSpO, "x": 5, "y": 9, "r": 0}
+check("default-direction spider orb omits dir field",
+      "dir" not in _nrm(_def_orb))
+_auto_orb = {"t": _TSpO, "x": 5, "y": 9, "r": 0, "dir": "auto"}
+check("explicit auto direction is also omitted (default)",
+      "dir" not in _nrm(_auto_orb))
+
+# 3) `dir` actually steers the teleport. Build a corridor where:
+#    - the only viable direction is RIGHT (vertical clear, wall to right)
+#    - and verify the orb teleports the player there when dir=right.
+_dir_lvl = [{"t": T_START, "x": 3, "y": 9, "r": 0}]
+for _gx in range(40):
+    _dir_lvl.append({"t": T_BLOCK, "x": _gx, "y": 10, "r": 0})
+# Wall directly in player's row at cell 20 to catch a horizontal teleport.
+for _gy in range(4, 10):
+    _dir_lvl.append({"t": T_BLOCK, "x": 20, "y": _gy, "r": 0})
+_dir_lvl.append({"t": _TSpO, "x": 10, "y": 9, "r": 0, "dir": "right"})
+_dir_lvl.append({"t": T_END, "x": 35, "y": 9, "r": 0})
+_dp_dir = Player(_dir_lvl)
+_pre_x_dir = None
+_post_x_dir = None
+for _f in range(200):
+    _pre_x_dir = _dp_dir.x
+    _dp_dir.update(False, True)
+    if _dp_dir.x - _pre_x_dir > 100:
+        _post_x_dir = _dp_dir.x
+        break
+check("dir=right teleports the player horizontally",
+      _post_x_dir is not None and _post_x_dir > _pre_x_dir + 200)
+
+
+# ---------------------------------------------------------------------------
+# BotController upgrades — hysteresis, hazard lookahead, mirror-aware safety
+# ---------------------------------------------------------------------------
+section("BotController upgrades")
+from src.bot import BotController as _LiveBot
+from src.constants import (
+    T_BLOCK as _TB, T_SPIKE as _TSP,
+    MODE_CUBE as _MC, MODE_WAVE as _MW, MODE_SHIP as _MSH,
+)
+from src.physics import PhysicsParams as _PP
+
+# 1) Hysteresis damps a single-frame opposing request.
+_bc_h = _LiveBot([(0, 0), (1000, 0)])
+_bc_h._hold_state = False
+# One flip request in isolation is swallowed.
+_r1 = _bc_h._hysteretic_hold(True)
+check("hysteresis: single flip request keeps prior state", _r1 is False)
+# Two consecutive flip requests commit the flip.
+_r2 = _bc_h._hysteretic_hold(True)
+check("hysteresis: two consecutive flip requests commit", _r2 is True)
+# Consistent requests reset the counter; a single dissent is swallowed.
+_bc_h._hysteretic_hold(True)
+_r3 = _bc_h._hysteretic_hold(False)
+check("hysteresis: single dissent after settled state is ignored",
+      _r3 is True)
+
+# 2) reset() clears the hysteresis latch.
+_bc_h._hold_state = True
+_bc_h._hold_flip_confirm = 3
+_bc_h.reset()
+check("reset clears hysteresis hold state",
+      _bc_h._hold_state is False and _bc_h._hold_flip_confirm == 0)
+
+# 3) _path_crosses_hazard detects a spike in the short-horizon path.
+_haz_objs = [{"t": _TSP, "x": 10, "y": 5, "r": 0}]
+_bc_p = _LiveBot([(0, 0)], objects=_haz_objs)
+# 10 frames forward at vx=5 puts us at cell 10 where the spike sits.
+_hits = _bc_p._path_crosses_hazard(
+    pcx=50.0, pcy=5 * CELL + CELL // 2,
+    vx=CELL / 1.0, vy=0.0, frames=10,
+)
+check("_path_crosses_hazard flags a spike on the trajectory", _hits is True)
+_clear = _bc_p._path_crosses_hazard(
+    pcx=50.0, pcy=0 * CELL + CELL // 2,
+    vx=CELL / 1.0, vy=0.0, frames=10,
+)
+check("_path_crosses_hazard misses when path sits well above hazard row",
+      _clear is False)
+
+# 4) Wave-mode lookahead flips the PD choice when it sails into a spike.
+#    Build a mock "player" with the exact fields compute_input reads.
+class _FakePlayer:
+    pass
+_fp = _FakePlayer()
+_fp.x = 50.0
+_fp.y = 5 * CELL
+_fp.vy = 0.0
+_fp.mode = _MW
+_fp.grav = 1
+_fp.on_ground = False
+_fp.size = PLAYER_SIZE
+_fp.move_speed = float(CELL)   # exactly 1 cell per frame
+_fp.params = _PP()
+_fp.dash_timer = 0
+_fp.mirror = None
+# Spike 3 cells ahead at y=5; a held-up wave would hover/lift — the
+# "up" choice should stay clear. A held-down wave would dive — make
+# sure the bot detects it would be bad if the PD decision ordered it.
+# To unambiguously force a flip, we place the spike BELOW the start y.
+_below_spike = [{"t": _TSP, "x": 4, "y": 6, "r": 0},  # just below/ahead
+                {"t": _TSP, "x": 5, "y": 6, "r": 0}]
+# Waypoint that asks the wave to go DOWN (target y is below current y,
+# so error_future > 0 with grav=1 -> want_hold = True — hold = going UP).
+# We want the bot to want_hold = False (dive) to fly INTO the spike, so
+# set waypoints BELOW current y to make error_future > 0 -> held=True
+# which with grav=1 gives direction=-1 -> vy=-move_speed (up). Then the
+# "up" trajectory doesn't hit the below spike, lookahead agrees, no flip.
+# The useful shape: waypoint ABOVE to make the PD dive (want_hold=False).
+_wps = [(50.0, 5 * CELL - 200), (300.0, 5 * CELL - 200)]
+_bc_w = _LiveBot(_wps, objects=_below_spike)
+# Nudge hysteresis so whatever the decision comes out to is returned live.
+_bc_w._HOLD_CONFIRM_FRAMES = 0
+held, pressed = _bc_w.compute_input(_fp)
+# PD would dive (want_hold=False since error_future<0 and grav=1), but
+# diving hits the spike at cell (4-5, 6). Lookahead should flip to
+# want_hold=True (up) since cell 6 is blocked and cell 4 above is clear.
+check("wave lookahead flips decision when PD choice sails into a spike",
+      held is True)
+
+# 5) Mirror-aware check: mirror-alive + chosen input would fly mirror into
+#    a hazard the main's trajectory avoids. Expect the bot to prefer the
+#    alternative, even when main's own direction is safe.
+_fp2 = _FakePlayer()
+_fp2.x = 50.0
+_fp2.y = 5 * CELL
+_fp2.vy = 0.0
+_fp2.mode = _MW
+_fp2.grav = 1
+_fp2.on_ground = False
+_fp2.size = PLAYER_SIZE
+_fp2.move_speed = float(CELL)
+_fp2.params = _PP()
+_fp2.dash_timer = 0
+# Mirror sits high in the world with grav=-1 (falls upward). Place a
+# spike ABOVE the mirror so holding (mirror direction=-1 × grav=-1 = +1,
+# goes down, AWAY from the spike) is safe, but releasing (direction=+1 ×
+# grav=-1 = -1, goes up, INTO the spike) kills it.
+_fp2.mirror = {
+    "y": 10 * CELL,
+    "vy": 0.0,
+    "grav": -1,
+    "on_ground": False,
+    "alive": True,
+    "mode": _MW,
+    "size": PLAYER_SIZE,
+    "angle": 0.0,
+}
+# Spike 3 cells ahead at the mirror's y-1 row (above mirror in world =
+# the direction mirror flies when released under grav=-1).
+_mirror_spike = [{"t": _TSP, "x": 4, "y": 9, "r": 0},
+                 {"t": _TSP, "x": 5, "y": 9, "r": 0}]
+# Waypoint BELOW main so PD wants want_hold=False (release, main dives).
+# For main (grav=1), want_hold=False → direction=+1, vy=+speed (down, safe).
+# For mirror (grav=-1), held=False → direction=+1, vy=+speed × -1 = -speed,
+# i.e. mirror goes UP in world coords — INTO the spike above it.
+# Bot should flip to held=True so the mirror stays safe.
+_wps2 = [(50.0, 5 * CELL + 400), (300.0, 5 * CELL + 400)]
+_bc_m = _LiveBot(_wps2, objects=_mirror_spike)
+_bc_m._HOLD_CONFIRM_FRAMES = 0
+held_m, _ = _bc_m.compute_input(_fp2)
+check("mirror-aware lookahead flips when main-safe choice kills mirror",
+      held_m is True)
 
 
 # ---------------------------------------------------------------------------
@@ -1067,9 +1409,11 @@ if _sp.mirror is not None:
     expected_y = snap_mirror["y"]
     expected_grav = snap_mirror["grav"]
     snap = _ab_snap(_sp)
-    # snap layout: (vals, passed, anims, obj_pos, mirror, mirror_passed)
-    check("Snapshot is 6-tuple (mirror + mirror_passed slots present)",
-          isinstance(snap, tuple) and len(snap) == 6)
+    # snap layout: (vals, passed, anims, obj_pos, mirror, mirror_passed,
+    # coins_collected) — coins slot was added when the autobot started
+    # rewarding coin pickups in its heuristic.
+    check("Snapshot is 7-tuple (mirror + mirror_passed + coins slots present)",
+          isinstance(snap, tuple) and len(snap) == 7)
     check("Snapshot mirror is non-None when player has a mirror",
           snap[4] is not None)
     # Now corrupt the live mirror, restore, and confirm we got the snapshot's
@@ -1303,7 +1647,7 @@ check("run_play still fades music on win",
 
 # The editor's Test button should pass level_music through. Bot/playback
 # calls below it should NOT pass level_music — they're intentionally silent.
-_editor_src = inspect.getsource(_editor_mod.run_editor)
+_editor_src = inspect.getsource(_editor_mod._run_editor_impl)
 # The Test-button block looks like: `if do_test:\n   run_play(...editor_test=True, level_music=level_music)`
 # We do a lenient substring check for the keyword arg in the do_test block.
 _test_block_start = _editor_src.find("if do_test:")
@@ -1443,7 +1787,7 @@ check("Ship trail draws without crash", _ship_drew)
 # fine, and the user wants the audio context.
 # ---------------------------------------------------------------------------
 section("Bot replay music wiring")
-_editor_src2 = inspect.getsource(_editor_mod.run_editor)
+_editor_src2 = inspect.getsource(_editor_mod._run_editor_impl)
 _bot_block_start = _editor_src2.find("if do_bot:")
 _bot_block_end = _editor_src2.find("if do_bot_menu:", _bot_block_start)
 check("editor.py has a do_bot block separate from do_bot_menu",
@@ -1498,24 +1842,26 @@ check("run_play also commits the buffer on _stop_music_and_return",
 check("run_play clears the in-place buffer on reset (not reassigned)",
       "current_hitboxes.clear()" in _play_src2)
 
-# Player side: the recorder helper exists and fires per substep.
+# Player side: recorder helper exists and stamps once per logical frame
+# (60 Hz). Per-substep sampling was reverted because dense traces were
+# unreadable; now ``_record_hitbox`` fires from the bottom of update()
+# only, plus from death-frame early-return paths.
 from src.player import Player as _PlayerCls
 _player_src = inspect.getsource(_PlayerCls)
-check("Player has _record_hitbox helper",
+check("Player has _record_hitbox helper recording (x, y, size, angle)",
       "def _record_hitbox" in _player_src
-      and "self.hitbox_trace.append" in _player_src)
-check("Player physics substep loop calls _record_hitbox",
-      _player_src.count("self._record_hitbox()") >= 3)
-check("Player spider-teleport fills the swept volume with hitbox samples",
-      "self.hitbox_trace.append((self.x, y, self.size))" in _player_src
-      and "self.hitbox_trace.append((self.x, hi, self.size))" in _player_src)
+      and "self.hitbox_trace.append(" in _player_src
+      and "self.angle" in _player_src)
+check("Player update() calls _record_hitbox once per frame",
+      "self._record_hitbox()" in _player_src
+      and "self._record_mirror_hitbox()" in _player_src)
 
 # Editor wiring: state, H toggle, run_play hand-off, draw overlay.
 check("editor declares last_run_hitboxes state",
       "last_run_hitboxes = []" in _editor_src2)
-check("editor declares show_hitboxes default False",
+check("editor declares show_hitboxes default OFF",
       "show_hitboxes = False" in _editor_src2)
-check("H key toggles show_hitboxes",
+check("H key toggles show_hitboxes (boolean)",
       "ev.key == pygame.K_h" in _editor_src2
       and "show_hitboxes = not show_hitboxes" in _editor_src2)
 check("editor passes out_hitboxes=last_run_hitboxes to run_play",
@@ -1532,11 +1878,13 @@ check("editor draws the hitbox overlay layer when toggle is on",
 # documented in the docstring is consistent with the source markers.
 _doc = _play_mod.run_play.__doc__ or ""
 check("run_play docstring documents out_hitboxes contract",
-      "out_hitboxes" in _doc and "(x, y, size)" in _doc)
+      "out_hitboxes" in _doc and "(x, y, size" in _doc)
 
-# Behavioural: spider teleport fills the swept column with multiple
-# samples, not just two endpoints. This is what lets the editor's
-# Hitbox view preview where a scale-based teleport hazard has to sit.
+# Behavioural: at 60 Hz sampling, every logical frame appends exactly
+# one hitbox sample. The spider teleport is now visible only as one
+# end-of-frame stamp at the post-warp position (the swept-volume fill
+# was removed because per-substep samples were unreadable in the
+# overlay).
 from src.player import Player as _PCls
 from src.constants import (
     T_BLOCK as _TB, T_END as _TE, MODE_SPIDER as _MSP,
@@ -1554,24 +1902,52 @@ _pre_len = len(_sp.hitbox_trace)
 _pre_y = _sp.y
 _sp.update(True, True)
 _delta = _sp.hitbox_trace[_pre_len:]
-# Same-x samples that span the teleport — at least 3 fill samples
-# across the sweep, proving the column was filled (not just endpoints).
-_cols = {}
-for _x, _y, _s in _delta:
-    _cols.setdefault(round(_x, 2), set()).add(round(_y, 2))
-_widest = max((len(v) for v in _cols.values()), default=0)
-check("spider teleport fills sweep with >=3 intermediate hitbox samples",
-      _widest >= 3)
+# Sample shape: each entry is (x, y, size, angle). Exactly one sample
+# fires per frame; the spider teleport leaves the player at a new y
+# but only one stamp is appended because all sub-step physics
+# happens within a single 60 Hz tick.
+check("60 Hz sample shape is (x, y, size, angle)",
+      _delta and len(_delta[-1]) == 4)
+check("spider teleport produces one end-of-frame hitbox sample",
+      len(_delta) == 1)
 
-# Invisible flag: only persisted for solids, visible is the default,
-# and collision still runs when set (player physics reads by type).
+# Regression: spider must NOT teleport through a slab to reach a full
+# block further up. Floor at y=15, a top-half slab (rot=180) row at
+# y=12 (bottom face at mid-cell), and a full-block ceiling at y=10
+# everywhere except the spawn column (so the player settles on the
+# floor, not on the ceiling). The slab's bottom face is nearer than
+# the ceiling's bottom — the spider must land on the slab. Before the
+# fix, T_SLAB was filtered out of the teleport search, so the spider
+# phased right through the slab to the y=10 ceiling.
+from src.constants import T_SLAB as _TSL
+from src.graphics import slab_rect as _slab_rect, cell_rect as _cell_rect
+_slab_objs = [{'t': _TB, 'x': i, 'y': 15, 'r': 0} for i in range(40)]
+_slab_objs += [{'t': _TB, 'x': i, 'y': 10, 'r': 0} for i in range(40) if i != _PSG]
+_slab_objs += [{'t': _TSL, 'x': i, 'y': 12, 'r': 180} for i in range(40)]
+_slab_objs.append({'t': _TE, 'x': 39, 'y': 0, 'r': 0})
+_spslab = _PCls(_slab_objs)
+_spslab.mode = _MSP
+for _ in range(40):
+    _spslab.update(False, False)
+_spslab.update(True, True)
+# Slabs span the whole row at y=12, so whichever column the spider is
+# in when the teleport fires, slab_bottom is cell_y=12 bottom = 625.
+_slab_bottom = _slab_rect(0, 12, 180, 1.0).bottom
+_block_bottom = _cell_rect(0, 10, 1.0).bottom
+check("spider teleport lands on slab's bottom face (not phasing through)",
+      abs(_spslab.y - _slab_bottom) < 2
+      and abs(_spslab.y - _block_bottom) > 20)
+
+# Invisible flag: persisted on ANY object type (universal invisibility),
+# visible is the default, and behavior still runs when set (player
+# physics reads by type, not by visibility).
 from src.levels import normalize_object as _norm
 _inv_block = _norm({'t': _TB, 'x': 5, 'y': 10, 'r': 0, 'invisible': True})
 check("normalize_object persists invisible=True on solid blocks",
       _inv_block.get('invisible') is True)
 _inv_spike = _norm({'t': 'spike', 'x': 5, 'y': 10, 'r': 0, 'invisible': True})
-check("normalize_object strips invisible on non-solid types",
-      'invisible' not in _inv_spike)
+check("normalize_object persists invisible=True on hazards",
+      _inv_spike.get('invisible') is True)
 _visible = _norm({'t': _TB, 'x': 5, 'y': 10, 'r': 0})
 check("normalize_object omits invisible when not set",
       'invisible' not in _visible)
@@ -1691,12 +2067,12 @@ from src.autobot import _dedup_key as _dk, SnapVals
 _make_snap = lambda mib: (
     SnapVals(  # vals
         0.0, 0.0, 0.0, True, True, False, 0.0, 1, 0, MODE_CUBE,
-        5.0, 0, 0, 0, 0.0, 0, 0, 0, 0, mib, 44,
+        5.0, 0, 0, 0, 0.0, 0, 0, 0, 0, mib, 44, 0.0, 0.0, 120, False,
     ),
     frozenset(),                 # passed
     (),                          # anims
     (),                          # obj_pos
-    (0.0, 0.0, 1, False, 0.0, True, MODE_CUBE, 44),  # mirror
+    (0.0, 0.0, 1, False, 0.0, True, MODE_CUBE, 44, 120, False),  # mirror
     frozenset(),                 # mirror_passed
 )
 _k_buf_0 = _dk(_make_snap(0))
@@ -1704,14 +2080,18 @@ _k_buf_6 = _dk(_make_snap(6))
 check("Dedup key distinguishes different mirror_input_buffer values",
       _k_buf_0 != _k_buf_6)
 
-# CR3 #1: parallel-pool fallback — if _solve_attempt_worker's pool
-# creation fails, the solver must still try wider-beam attempts via the
-# sequential path. We verify the guard logic is intact by reading the
-# source for the updated condition.
+# Single-threaded pipeline: AutoBot.solve must NOT spawn workers /
+# multiprocessing pools. The earlier parallel widening / parallel
+# pathfinder were removed because they caused the CPU-peg / unresponsive
+# ESC bug. We assert the source no longer mentions multiprocessing or
+# the now-removed worker functions.
 from src import autobot as _ab_mod
 _ab_src = inspect.getsource(_ab_mod.AutoBot.solve)
-check("Sequential fallback guards on parallel_launched",
-      "parallel_launched" in _ab_src and "not parallel_launched" in _ab_src)
+check("AutoBot.solve is single-threaded (no multiprocessing imports)",
+      "multiprocessing" not in _ab_src and "Pool(" not in _ab_src)
+_ab_module_src = inspect.getsource(_ab_mod)
+check("AutoBot module no longer pulls in multiprocessing",
+      "import multiprocessing" not in _ab_module_src)
 
 
 # ---------------------------------------------------------------------------

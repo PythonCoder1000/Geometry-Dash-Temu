@@ -17,7 +17,7 @@ import os
 from .constants import (
     LEVELS_DIR,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
-    T_PAD, T_BLUE_PAD, T_ORB, T_DASH_ORB, T_GRAV,
+    T_PAD, T_BLUE_PAD, T_ORB, T_DASH_ORB, T_GRAV_UP, T_GRAV_DOWN,
     T_BLACK_ORB, T_GREEN_ORB,
     T_COIN, T_MODE_MINI, T_MODE_BIG, T_MODE_SHIP, T_MODE_CUBE,
     T_MODE_BALL, T_MODE_WAVE, T_MODE_UFO,
@@ -99,8 +99,8 @@ BUILTIN_SNIPPETS = [
         _o(T_MODE_CUBE, 9, 8),
     ]),
     ("Gravity Flip Pair", [
-        _o(T_GRAV, 0, 9),
-        _o(T_GRAV, 6, 9),
+        _o(T_GRAV_UP, 0, 9),
+        _o(T_GRAV_DOWN, 6, 9),
     ]),
     ("Stair Step Up", [
         _o(T_BLOCK, 0, 10),

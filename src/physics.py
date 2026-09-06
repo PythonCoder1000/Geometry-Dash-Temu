@@ -43,6 +43,8 @@ from .constants import (
     UFO_JUMP_FORCE as _UFO_JUMP_FORCE,
     BASE_MOVE_SPEED as _BASE_MOVE_SPEED,
     SPIDER_TELEPORT_RANGE as _SPIDER_TELEPORT_RANGE,
+    ROBOT_THRUST as _ROBOT_THRUST,
+    ROBOT_FLIGHT_SECONDS as _ROBOT_FLIGHT_SECONDS,
 )
 
 
@@ -66,6 +68,8 @@ class PhysicsParams:
     ufo_jump_force: float = _UFO_JUMP_FORCE
     base_move_speed: float = _BASE_MOVE_SPEED
     spider_teleport_range: int = _SPIDER_TELEPORT_RANGE
+    robot_thrust: float = _ROBOT_THRUST
+    robot_flight_seconds: float = _ROBOT_FLIGHT_SECONDS
 
     @classmethod
     def from_meta(cls, meta):

@@ -51,6 +51,26 @@ def _gen_click():
     return _make_wav(samples)
 
 
+def _gen_bot_click():
+    """Sharper two-tone tick — fires when the autobot presses.
+
+    Distinct from the regular coin "click" so the ear can tell a bot press
+    apart from a pickup, and shorter/higher so rapid press sequences stay
+    readable instead of smearing into one buzz.
+    """
+    dur = 0.035
+    n = int(SAMPLE_RATE * dur)
+    samples = []
+    for i in range(n):
+        t = i / SAMPLE_RATE
+        env = 1.0 - (i / n)
+        env = env * env
+        val = env * (0.55 * math.sin(2 * math.pi * 2600 * t)
+                     + 0.25 * math.sin(2 * math.pi * 3800 * t))
+        samples.append(val)
+    return _make_wav(samples)
+
+
 def _gen_orb():
     """Rising chirp — plays when hitting an orb."""
     dur = 0.08
@@ -155,6 +175,7 @@ def init():
     _enabled = not bool(prefs.get("sfx_muted", False))
     generators = {
         "click": _gen_click,
+        "bot_click": _gen_bot_click,
         "orb": _gen_orb,
         "death": _gen_death,
         "practice_checkpoint": _gen_checkpoint,

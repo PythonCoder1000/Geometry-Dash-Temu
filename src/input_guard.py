@@ -46,12 +46,22 @@ class ClickGuard:
                 self._waiting_for_release = False
 
     def consume_click(self, ev=None):
-        """Return True if this click should be processed, False if stale.
+        """Return True if this click should be processed.
 
-        The ``ev`` argument is accepted for symmetry but ignored — the
-        guard works on entry-state, not on individual event metadata.
+        Previously returned False during the arm window (button still
+        held from the entry click) so play's event loop could drop the
+        stale click. But that window ALSO swallowed legitimate clicks
+        the user issued before their finger finished lifting — the
+        "requires 2-3 clicks" bug: a button press that arrived on the
+        same frame as ``reset()`` would be filtered and the UI control
+        never saw it. A fresh MOUSEBUTTONDOWN is always a deliberate
+        user action (it marks the *start* of a new press, not the
+        residual hold from the previous screen), so unconditionally
+        accept them here. The hold-leak protection still works via
+        ``mouse_held()``, which stays muted for polled-state consumers
+        (play's ``jump_held``) until the user has released at least once.
         """
-        return not self._waiting_for_release
+        return True
 
     def mouse_held(self):
         """True only when the button is held AND not stale from entry."""

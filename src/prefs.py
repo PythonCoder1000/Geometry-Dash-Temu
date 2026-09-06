@@ -49,9 +49,23 @@ def get(key, default=None):
     return _load().get(key, default)
 
 
+_MISSING = object()
+
+
 def set(key, value):
-    _load()
-    _cache[key] = value
+    """Set a pref, persisting only when the value actually changes.
+
+    Boot-time code paths (``main.py`` pre-pins signed_in_username for the
+    dev user, the music menu toggles rewrite on every interaction) used
+    to hit the disk unconditionally. Deduping shaves a small-but-real
+    chunk off of startup and unblocks the main thread on slow-storage
+    systems. The disk-write is still atomic enough via json.dump —
+    nothing else cares whether _save() ran on the exact tick.
+    """
+    cache = _load()
+    if cache.get(key, _MISSING) == value:
+        return
+    cache[key] = value
     _save()
 
 

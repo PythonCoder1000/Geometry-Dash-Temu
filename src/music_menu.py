@@ -25,6 +25,7 @@ from .graphics import (
 from .input_guard import ClickGuard
 from . import music
 from . import settings
+from . import prefs
 # Track-list scroll state survives between visits so re-opening the menu
 # leaves you where you were.
 _scroll = 0
@@ -72,12 +73,13 @@ def run_music_menu(screen, clock):
     list_rows = 7
     list_h = list_rows * row_h
     volume_h = 44
+    sfx_row_h = 44
     controls_h = 54
     add_h = 44
     footer_h = 28
     padding = 20
-    panel_h = (header_h + list_h + volume_h + controls_h + add_h
-               + footer_h + padding)
+    panel_h = (header_h + list_h + volume_h + sfx_row_h + controls_h
+               + add_h + footer_h + padding)
     panel = pygame.Rect((WIDTH - panel_w) // 2,
                         (HEIGHT - panel_h) // 2,
                         panel_w, panel_h)
@@ -225,8 +227,26 @@ def run_music_menu(screen, clock):
         txt(screen, f"{int(round(new_vol * 100))}%",
             list_x + 420, vol_y + 4, 13, C_GRAY)
 
+        # ---- Bot click SFX toggle ---------------------------------------
+        # Plays a short tick (and draws a ring around the player) every
+        # time the autobot presses during a bot run. Default-on, off per
+        # user request — persisted in prefs so the choice survives restarts.
+        bot_sfx_y = vol_y + 44
+        txt(screen, "Bot click SFX",
+            list_x, bot_sfx_y + 4, 15, C_WHITE)
+        bot_click_on = bool(prefs.get("bot_click_sfx_enabled", True))
+        b_bot_click = btn(
+            screen,
+            "Bot click SFX: ON" if bot_click_on else "Bot click SFX: OFF",
+            list_x + 130, bot_sfx_y - 4, 200, 36,
+            C_SUCCESS if bot_click_on else C_DANGER,
+            mpos, font_size=13,
+        )
+        if click_pos and b_bot_click.collidepoint(click_pos):
+            prefs.toggle("bot_click_sfx_enabled", True)
+
         # ---- Mute / Stop / Next / Prev / Back ---------------------------
-        ctrl_y = vol_y + 42
+        ctrl_y = bot_sfx_y + 44
         b_mute = btn(screen,
                      "Music: OFF" if music.is_muted() else "Music: ON",
                      list_x + 70, ctrl_y, 160, 36,

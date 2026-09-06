@@ -1,19 +1,21 @@
-"""Bot menu — replaces the old L/K hotkeys with a proper UI.
+"""Bot menu — UI in front of AutoBot's single-threaded solve.
 
-Opened from the editor (B key) and from a play session (B key). Lets the
-user run the autobot solver, watch its progress, view the result, tweak a
-couple of search-quality knobs, and (for the editor) replay the solved
-inputs against the live player.
-
-The menu is intentionally non-modal in spirit — it only blocks while the
-solver is actually crunching. When idle it just sits there waiting for a
-button click.
+Opened from the editor (B/L/Y key) and from a play session (B key).
+Lets the user run the autobot solver, watch its progress, view the
+result, tweak a couple of search-quality knobs, save / load runs, and
+(for the editor) replay the solved inputs against the live player.
 
 Returns either ``None`` (cancelled, no path produced) or ``(waypoints,
 status)`` where ``status`` is one of ``"ok"`` / ``"partial"`` / ``"failed"``
 and ``waypoints`` is a list of ``(x, y)`` world-pixel coordinates that
 visualise the route. The caller (play / editor) uses the path as a hint
 overlay and ``status`` to colour the badge.
+
+The earlier Parallel / Workers / Attempts knobs were removed when
+AutoBot moved to single-threaded — they were UI for a feature that
+caused the CPU-peg / unresponsive-ESC bug. The replacement knob is a
+``Time budget`` cap that bounds the whole pipeline's wall-clock so a
+hard level can't run forever in the background.
 """
 
 import sys
@@ -33,33 +35,37 @@ from .graphics import (
 from .input_guard import ClickGuard
 from . import bot_saves
 from . import settings
+
+
 # ---------------------------------------------------------------------------
 # Persistent (within-session) bot tuning knobs
 # ---------------------------------------------------------------------------
-# Stored at module level so the values survive between menu invocations
-# without having to round-trip through prefs (the user is unlikely to want
-# bot-tuning persisted across sessions; each level wants different values).
-_bot_beam_widths = [32, 48, 96, 192]
-_bot_beam_idx = 1            # default = 48 (matches AutoBot.BEAM_WIDTH)
+# A* frontier cap — bounds the open-set size. Default 384 matches
+# AutoBot.FRONTIER_CAP. Higher = wider search (more likely to crack
+# tight corridors) at linear time + memory cost.
+_bot_frontier_caps = [64, 128, 256, 384, 512, 1024, 2048]
+_bot_frontier_idx = 3
 _bot_max_frames_opts = [5000, 10000, 20000, 40000]
-_bot_max_frames_idx = 1      # default = 10000
-_bot_use_parallel = True
-_bot_n_attempts_opts = [1, 2, 3, 4, 5, 6, 8]
-_bot_n_attempts_idx = 3      # default = 4
-_bot_n_workers_opts = [1, 2, 3, 4, 6, 8]
-_bot_n_workers_idx = 2       # default = 3
-# Fix-only: when True, Find Path only verifies the current seed and, if it
-# doesn't still win, runs ONE short beam search to patch the break. No
-# wider retries, no multi-attempt ramp, no gap-fill / brute-force. Meant
-# for "I just added a decoration, just re-verify".
+_bot_max_frames_idx = 1
+# Reverse-DFS depth — when A* gets stuck, the brute-force fallback
+# walks back through the partial trail this many actions, trying
+# alternatives at each step. 0 disables the brute-force fallback.
+_bot_backtrack_depths = [0, 20, 40, 80, 160, 320]
+_bot_backtrack_idx = 4         # default = 160 (matches AutoBot.BACKTRACK_DEPTH)
+# Wall-clock cap for the whole pipeline. Replaces the old Attempts /
+# Parallel knobs — the search is single-threaded now, so the only
+# thing the user can usefully bound is total wall-clock.
+_bot_time_budget_opts = [10, 20, 30, 60, 120, 300]
+_bot_time_budget_idx = 3       # default = 60 s
+# Fix-only: when True, Find Path only verifies the current seed and,
+# if it doesn't still win, runs ONE short A* repair to patch the break.
 _bot_fix_only = False
 
-# Last solve result (kept for "Replay last" so re-opening the menu doesn't
-# force a re-solve on the same level).
+# Last solve result.
 _last_waypoints = None
 _last_mirror_waypoints = None
 _last_inputs = None
-_last_status = ""            # "" | "ok" | "partial" | "failed"
+_last_status = ""
 
 
 def get_last_inputs():
@@ -68,8 +74,7 @@ def get_last_inputs():
 
 
 def get_last_mirror_waypoints():
-    """Editor / play overlay reads this to draw the dual mirror's path in
-    blue alongside the main yellow path. Empty list when no dual segment."""
+    """Editor / play overlay reads this to draw the dual mirror's path."""
     return list(_last_mirror_waypoints) if _last_mirror_waypoints else []
 
 
@@ -83,8 +88,8 @@ def clear_last_solve():
 
 
 def _strip_internal(objects):
-    """Drop the live-player bookkeeping fields (``_orig_x`` etc.) so the
-    solver sees clean object dicts."""
+    """Drop the live-player bookkeeping fields so the solver sees clean
+    object dicts."""
     out = []
     for o in objects:
         co = {k: v for k, v in o.items()
@@ -94,47 +99,28 @@ def _strip_internal(objects):
 
 
 def _run_solver(screen, clock, objects, params=None):
-    """Invoke the autobot with the current beam-width / max-frames knobs.
-
-    Returns ``(waypoints, mirror_waypoints, inputs, status, error)``.
-    ``mirror_waypoints`` is the parallel path of the dual mirror (empty
-    list if the level never enters dual mode). ``error`` is a short string
-    describing why the solver returned no path (or empty when it succeeded
-    / partially succeeded). Wraps the solver in a try/except so a malformed
-    level can't crash the menu — but the exception class is surfaced via
-    ``error`` so the user has *something* to act on instead of a silent
-    "failed".
-
-    Passes the previously-solved input sequence to the solver as ``seed_inputs``
-    so unchanged regions of the level don't have to be re-explored. The solver
-    verifies the cached path against the current level first; if it still wins
-    (e.g. the user only added decoration), the solve returns instantly.
-    """
+    """Invoke the autobot with the current frontier / backtrack / budget
+    knobs. Returns
+    ``(waypoints, mirror_waypoints, inputs, status, error)``.
+    ``error`` is "" on success/partial, non-empty on hard failure."""
     try:
         from .autobot import AutoBot
         clean = _strip_internal(objects)
         solver = AutoBot(clean, params=params)
-        solver.BEAM_WIDTH = _bot_beam_widths[_bot_beam_idx]
+        solver.FRONTIER_CAP = _bot_frontier_caps[_bot_frontier_idx]
+        solver.BEAM_WIDTH = solver.FRONTIER_CAP
+        solver.BACKTRACK_DEPTH = _bot_backtrack_depths[_bot_backtrack_idx]
         max_frames = _bot_max_frames_opts[_bot_max_frames_idx]
         seed = list(_last_inputs) if _last_inputs else None
-        n_attempts = _bot_n_attempts_opts[_bot_n_attempts_idx]
-        n_workers = _bot_n_workers_opts[_bot_n_workers_idx] if _bot_use_parallel else 1
-        # Fix-only: refuse at this layer if there's no seed to repair —
-        # the solver itself does the same check, but surfacing it as an
-        # error string gives the user something actionable instead of a
-        # bare "failed".
+        time_budget = _bot_time_budget_opts[_bot_time_budget_idx]
         if _bot_fix_only and not seed:
             return None, [], [], "failed", (
                 "fix-only needs a saved run to repair — "
                 "solve once or load a saved run first")
         wp, mwp, inputs, won = solver.solve(
             screen, clock, max_frames=max_frames, seed_inputs=seed,
-            n_attempts=n_attempts, use_parallel=_bot_use_parallel,
-            n_workers=n_workers, fix_only=_bot_fix_only)
+            fix_only=_bot_fix_only, time_budget=time_budget)
         if not wp:
-            # Solver ran but couldn't even produce a partial path. This
-            # usually means every beam candidate died on frame 1 (e.g.
-            # spike at spawn) — tell the user, don't just silently fail.
             return None, [], [], "failed", "no path found (level may be unsolvable)"
         return list(wp), list(mwp), list(inputs), ("ok" if won else "partial"), ""
     except Exception as exc:
@@ -143,13 +129,7 @@ def _run_solver(screen, clock, objects, params=None):
 
 
 def _pick_saved_run(screen, clock, level_key):
-    """Modal picker listing saved bot runs for this level.
-
-    Returns the loaded-and-hydrated payload (see ``bot_saves.load_run``)
-    or ``None`` if the user cancels / deletes the only entry / there are
-    no saves yet. Supports delete via a small "×" button on each row so
-    the user can prune old saves without leaving the menu.
-    """
+    """Modal picker listing saved bot runs for this level."""
     guard = ClickGuard()
     stars = make_stars()
     panel_w = 520
@@ -208,7 +188,6 @@ def _pick_saved_run(screen, clock, level_key):
                              border_radius=8)
             pygame.draw.rect(screen, bg, row_rect, border_radius=8)
             pygame.draw.rect(screen, C_BLOCK_H, row_rect, 1, border_radius=8)
-            # Name + status badge
             status_col = {
                 "ok": C_SUCCESS,
                 "partial": (250, 200, 80),
@@ -222,7 +201,6 @@ def _pick_saved_run(screen, clock, level_key):
             txt(screen, f"{age}  ·  {entry['input_frames']} frames  ·  "
                 f"{entry['status'] or '—'}",
                 row_rect.x + 14, row_rect.y + 30, 12, status_col)
-            # Delete button on the right edge.
             del_rect = pygame.Rect(row_rect.right - 40, row_rect.y + 10,
                                    28, row_rect.h - 20)
             del_hov = del_rect.collidepoint(mpos)
@@ -235,7 +213,7 @@ def _pick_saved_run(screen, clock, level_key):
                     bot_saves.delete_run(level_key, entry["name"])
                     info_msg = f"Deleted \"{entry['name']}\"."
                     info_color = C_GRAY
-                    click_pos = None  # consumed
+                    click_pos = None
                 elif row_rect.collidepoint(click_pos):
                     data = bot_saves.load_run(level_key, entry["name"])
                     if data is not None:
@@ -257,6 +235,23 @@ def _pick_saved_run(screen, clock, level_key):
         clock.tick(settings.get_fps_cap())
 
 
+def _stepper(screen, label, value_label, x_label, x_val_center, y, w, h,
+             color, mpos, click_pos, on_left, on_right, font_size=15):
+    """Draw a label + a centered <value> stepper button. Splits clicks
+    into left-half / right-half so the user can advance the cycle in
+    either direction. Returns whether the click landed on the button."""
+    txt(screen, label, x_label, y, 16, C_WHITE)
+    rect = btn(screen, f"< {value_label} >", x_val_center, y + 12, w, h,
+               color, mpos, font_size=font_size)
+    if click_pos and rect.collidepoint(click_pos):
+        if click_pos[0] < rect.centerx:
+            on_left()
+        else:
+            on_right()
+        return True
+    return False
+
+
 def run_bot_menu(screen, clock, objects, precomputed_path=None,
                  allow_replay=False, replay_callback=None,
                  level_filename=None, meta=None):
@@ -265,47 +260,29 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
     Parameters
     ----------
     screen, clock : pygame Surface and Clock
-    objects : list of object dicts
-        The level the bot will solve. The solver gets a deep-copied,
-        sanitised version so it can't perturb the caller's state.
-    precomputed_path : list of (x, y) or ``None``
-        If the caller already has a path (e.g. play.py's hint cache),
-        passing it in shows the "View overlay" choice immediately without
-        forcing a re-solve.
+    objects : list of object dicts — the level the bot will solve.
+    precomputed_path : optional list of (x, y) tuples
+        If the caller already has a path, passing it in shows the "Use
+        as Hint Overlay" choice immediately without forcing a re-solve.
     allow_replay : bool
-        If True (editor), shows a "Replay (K)" button that calls
-        ``replay_callback`` after closing the menu. The replay is run by
-        the caller because only the caller has the full editor context.
+        If True (editor), shows a "Replay" button that calls
+        ``replay_callback`` after closing the menu.
     replay_callback : callable or None
-        Invoked with the solved input list when the user clicks Replay.
     level_filename : str or None
-        Identifies the level for Save / Load-run. When None, a content
-        hash of ``objects`` is used so unsaved editor work still gets a
-        stable (if less friendly) key.
-
-    Returns
-    -------
-    Either ``None`` (no path to hand back to caller) or
-    ``(waypoints, status)`` — caller installs as the hint overlay.
+        Identifies the level for Save / Load-run.
+    meta : level meta dict (for PhysicsParams override)
     """
-    global _bot_beam_idx, _bot_max_frames_idx
-    global _bot_use_parallel, _bot_n_attempts_idx, _bot_n_workers_idx
-    global _bot_fix_only
+    global _bot_frontier_idx, _bot_max_frames_idx
+    global _bot_backtrack_idx, _bot_time_budget_idx, _bot_fix_only
     global _last_waypoints, _last_mirror_waypoints, _last_inputs, _last_status
 
     if precomputed_path is not None and not _last_waypoints:
-        # Adopt the caller's path so "View overlay" works immediately.
         _last_waypoints = list(precomputed_path)
         _last_status = "ok"
 
-    # B5: per-level physics override — fetch once so Find Path and the
-    # Enter-to-solve shortcut both see the level's feel, not vanilla.
     from .physics import PhysicsParams
     params = PhysicsParams.from_meta(meta)
 
-    # Prefer filename-based keys (human-debuggable, stable across edits
-    # that don't change the save file) and fall back to a content hash for
-    # unsaved editor work.
     level_key = (bot_saves.level_key_from_filename(level_filename)
                  or bot_saves.level_key_from_objects(_strip_internal(objects)))
 
@@ -314,15 +291,12 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
     guard = ClickGuard()
 
     panel_w = 560
-    # Panel clamped to HEIGHT so nothing clips off the screen. Rows below
-    # are tightened (48 → 40-44 per step) to keep everything visible
-    # without the old 720-tall panel that went off-screen.
-    panel_h = min(660, HEIGHT - 20)
+    # Five knob rows + summary + actions all fit in 600px.
+    panel_h = min(640, HEIGHT - 20)
     panel = pygame.Rect((WIDTH - panel_w) // 2,
                         (HEIGHT - panel_h) // 2,
                         panel_w, panel_h)
 
-    # Result for the caller — set by the relevant button.
     return_value = None
     info_msg = ""
     info_color = C_GRAY
@@ -339,7 +313,6 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                 if ev.key == pygame.K_ESCAPE:
                     return return_value
                 if ev.key == pygame.K_RETURN:
-                    # Quick-action: re-solve.
                     wp, mwp, inputs, status, err = _run_solver(
                         screen, clock, objects, params=params)
                     if wp:
@@ -365,7 +338,7 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                     continue
                 click_pos = ev.pos
 
-        # ---- background --------------------------------------------------
+        # ---- background ----------------------------------------------------
         draw_bg(screen, 0, stars, mountains)
         ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
         ov.fill((0, 0, 0, 180))
@@ -377,91 +350,83 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
 
         txt(screen, "AUTO-BOT", panel.centerx, panel.y + 22, 30, C_WHITE,
             True, shadow=True)
-        txt(screen, "Beam-search solver", panel.centerx, panel.y + 56, 14,
-            C_GRAY, True)
+        txt(screen, "A* + reverse-DFS + pathfinder (single-threaded)",
+            panel.centerx, panel.y + 56, 13, C_GRAY, True)
 
         col_x = panel.x + 32
         val_x = panel.x + panel.w - 220
-        row_y = panel.y + 90
-        # Tighter row pitch than before so the six toggle rows + summary +
-        # action buttons all fit inside a panel that doesn't clip the
-        # screen (old 720 panel ran off the bottom).
-        _STEP = 44
+        row_y = panel.y + 86
+        _STEP = 40
 
-        # ---- Beam width ---------------------------------------------------
-        txt(screen, "Beam width", col_x, row_y, 16, C_WHITE)
-        bw_label = f"{_bot_beam_widths[_bot_beam_idx]}"
-        b_bw = btn(screen, f"< {bw_label} >", val_x + 80, row_y + 12, 200, 32,
-                   (60, 90, 160), mpos, font_size=15)
-        if click_pos and b_bw.collidepoint(click_pos):
-            # Cycle: left half decreases, right half increases.
-            if click_pos[0] < b_bw.centerx:
-                _bot_beam_idx = (_bot_beam_idx - 1) % len(_bot_beam_widths)
-            else:
-                _bot_beam_idx = (_bot_beam_idx + 1) % len(_bot_beam_widths)
+        def _cycle(arr, idx_setter, idx_getter, delta):
+            new_idx = (idx_getter() + delta) % len(arr)
+            idx_setter(new_idx)
+
+        # ---- Frontier cap -------------------------------------------------
+        def _set_fc(i):
+            global _bot_frontier_idx
+            _bot_frontier_idx = i
+
+        _stepper(screen, "Frontier cap", f"{_bot_frontier_caps[_bot_frontier_idx]}",
+                 col_x, val_x + 80, row_y, 200, 30,
+                 (60, 90, 160), mpos, click_pos,
+                 lambda: _set_fc((_bot_frontier_idx - 1) % len(_bot_frontier_caps)),
+                 lambda: _set_fc((_bot_frontier_idx + 1) % len(_bot_frontier_caps)))
         row_y += _STEP
 
         # ---- Max frames ---------------------------------------------------
-        txt(screen, "Max frames", col_x, row_y, 16, C_WHITE)
-        mf_label = f"{_bot_max_frames_opts[_bot_max_frames_idx]:,}"
-        b_mf = btn(screen, f"< {mf_label} >", val_x + 80, row_y + 12, 200, 32,
-                   (60, 90, 160), mpos, font_size=15)
-        if click_pos and b_mf.collidepoint(click_pos):
-            if click_pos[0] < b_mf.centerx:
-                _bot_max_frames_idx = (_bot_max_frames_idx - 1) % len(_bot_max_frames_opts)
-            else:
-                _bot_max_frames_idx = (_bot_max_frames_idx + 1) % len(_bot_max_frames_opts)
+        def _set_mf(i):
+            global _bot_max_frames_idx
+            _bot_max_frames_idx = i
+
+        _stepper(screen, "Max frames",
+                 f"{_bot_max_frames_opts[_bot_max_frames_idx]:,}",
+                 col_x, val_x + 80, row_y, 200, 30,
+                 (60, 90, 160), mpos, click_pos,
+                 lambda: _set_mf((_bot_max_frames_idx - 1) % len(_bot_max_frames_opts)),
+                 lambda: _set_mf((_bot_max_frames_idx + 1) % len(_bot_max_frames_opts)))
         row_y += _STEP
 
-        # ---- Attempts -----------------------------------------------------
-        txt(screen, "Attempts", col_x, row_y, 16, C_WHITE)
-        na_label = f"{_bot_n_attempts_opts[_bot_n_attempts_idx]}"
-        b_na = btn(screen, f"< {na_label} >", val_x + 80, row_y + 12, 200, 32,
-                   (60, 90, 160), mpos, font_size=15)
-        if click_pos and b_na.collidepoint(click_pos):
-            if click_pos[0] < b_na.centerx:
-                _bot_n_attempts_idx = (_bot_n_attempts_idx - 1) % len(_bot_n_attempts_opts)
-            else:
-                _bot_n_attempts_idx = (_bot_n_attempts_idx + 1) % len(_bot_n_attempts_opts)
+        # ---- Time budget --------------------------------------------------
+        def _set_tb(i):
+            global _bot_time_budget_idx
+            _bot_time_budget_idx = i
+
+        tb_val = _bot_time_budget_opts[_bot_time_budget_idx]
+        tb_label = f"{tb_val}s"
+        _stepper(screen, "Time budget", tb_label,
+                 col_x, val_x + 80, row_y, 200, 30,
+                 (60, 130, 90), mpos, click_pos,
+                 lambda: _set_tb((_bot_time_budget_idx - 1) % len(_bot_time_budget_opts)),
+                 lambda: _set_tb((_bot_time_budget_idx + 1) % len(_bot_time_budget_opts)))
         row_y += _STEP
 
-        # ---- Parallel toggle ----------------------------------------------
-        par_label = "ON" if _bot_use_parallel else "OFF"
-        par_col = (60, 130, 60) if _bot_use_parallel else (130, 60, 60)
-        txt(screen, "Parallel", col_x, row_y, 16, C_WHITE)
-        b_par = btn(screen, par_label, val_x + 80, row_y + 12, 200, 32,
-                    par_col, mpos, font_size=15)
-        if click_pos and b_par.collidepoint(click_pos):
-            _bot_use_parallel = not _bot_use_parallel
+        # ---- Backtrack depth ---------------------------------------------
+        def _set_bt(i):
+            global _bot_backtrack_idx
+            _bot_backtrack_idx = i
+
+        bt_val = _bot_backtrack_depths[_bot_backtrack_idx]
+        bt_label = "OFF" if bt_val == 0 else f"{bt_val}"
+        bt_col = (140, 90, 60) if bt_val > 0 else (70, 70, 80)
+        _stepper(screen, "Backtrack depth", bt_label,
+                 col_x, val_x + 80, row_y, 200, 30,
+                 bt_col, mpos, click_pos,
+                 lambda: _set_bt((_bot_backtrack_idx - 1) % len(_bot_backtrack_depths)),
+                 lambda: _set_bt((_bot_backtrack_idx + 1) % len(_bot_backtrack_depths)))
         row_y += _STEP
 
-        # ---- Workers (only meaningful when parallel is on) ----------------
-        if _bot_use_parallel:
-            txt(screen, "Workers", col_x, row_y, 16, C_WHITE)
-            nw_label = f"{_bot_n_workers_opts[_bot_n_workers_idx]}"
-            b_nw = btn(screen, f"< {nw_label} >", val_x + 80, row_y + 12, 200, 32,
-                       (60, 90, 160), mpos, font_size=15)
-            if click_pos and b_nw.collidepoint(click_pos):
-                if click_pos[0] < b_nw.centerx:
-                    _bot_n_workers_idx = (_bot_n_workers_idx - 1) % len(_bot_n_workers_opts)
-                else:
-                    _bot_n_workers_idx = (_bot_n_workers_idx + 1) % len(_bot_n_workers_opts)
-        row_y += _STEP
-
-        # ---- Fix-only toggle ----------------------------------------------
-        # "Fix only" means: keep the current seed, run a minimal repair
-        # beam from the last-alive prefix and stop. Much faster than a
-        # full solve when the level has only been tweaked slightly.
+        # ---- Fix-only toggle ---------------------------------------------
         fo_label = "ON" if _bot_fix_only else "OFF"
         fo_col = (130, 90, 60) if _bot_fix_only else (70, 70, 80)
         txt(screen, "Fix only", col_x, row_y, 16, C_WHITE)
-        b_fo = btn(screen, fo_label, val_x + 80, row_y + 12, 200, 32,
+        b_fo = btn(screen, fo_label, val_x + 80, row_y + 12, 200, 30,
                    fo_col, mpos, font_size=15)
         if click_pos and b_fo.collidepoint(click_pos):
             _bot_fix_only = not _bot_fix_only
         row_y += _STEP
 
-        # ---- Last solve summary -------------------------------------------
+        # ---- Last solve summary ------------------------------------------
         if _last_status:
             status_color = {
                 "ok": C_SUCCESS,
@@ -502,23 +467,13 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                               else (250, 200, 80) if status == "partial"
                               else C_DANGER)
             else:
-                # Show the actual reason instead of a generic "try wider".
-                # Crashes (KeyError, etc.) need the user to know there's a
-                # bug to report, not to keep retrying with bigger beams.
                 info_msg = (f"Solver failed — {err}"
-                            if err else "Solver failed. Try a wider beam.")
+                            if err else "Solver failed. Try a wider frontier.")
                 info_color = C_DANGER
             guard.reset()
         row_y += 46
 
-        # Buttons that depend on having a solve cached: render them with the
-        # `disabled` flag when there's nothing to act on so the user can SEE
-        # they're inactive. Clicks on the disabled rect surface a one-line
-        # hint instead of silently no-op-ing — that "silent no-op" is what
-        # made these feel "completely broken".
         view_disabled = not _last_waypoints
-        # Match the Find-Path green tone so Use-as-Hint doesn't read as
-        # "disabled" when it isn't (UI_AUDIT §13).
         b_view = btn(screen, "Use as Hint Overlay",
                      panel.centerx, row_y + 14, 320, 34,
                      (70, 140, 80), mpos, font_size=15,
@@ -541,17 +496,12 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                            disabled=replay_disabled)
             if click_pos and b_replay.collidepoint(click_pos):
                 if replay_disabled:
-                    # Drawn-only waypoints (Bot tool) don't carry inputs —
-                    # the user has to run Find Path to get a replayable
-                    # input sequence. Spell that out.
                     info_msg = "Run Find Path first to get replayable inputs."
                     info_color = (250, 200, 80)
                 elif replay_callback is not None:
                     try:
                         replay_callback(list(_last_inputs))
                     except Exception as exc:
-                        # Don't swallow silently — show the user what
-                        # crashed so they can report it.
                         info_msg = (
                             f"Replay crashed: {type(exc).__name__}")
                         info_color = C_DANGER
@@ -560,10 +510,6 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
             row_y += 40
 
         # ---- Save / Load saved runs --------------------------------------
-        # Save is disabled when there's no solved run to persist (the bot
-        # tool's drawn waypoints have no `_last_inputs`, so there's
-        # nothing meaningful to save). Load is always enabled — even if
-        # no runs exist yet, the picker shows a friendly "no runs" state.
         save_disabled = not _last_inputs
         b_save = btn(screen, "Save run...",
                      panel.centerx - 82, row_y + 14, 156, 34,
@@ -589,8 +535,8 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                         waypoints=_last_waypoints,
                         mirror_waypoints=_last_mirror_waypoints,
                         status=_last_status or "ok",
-                        beam_width=_bot_beam_widths[_bot_beam_idx],
-                        attempts=_bot_n_attempts_opts[_bot_n_attempts_idx])
+                        beam_width=_bot_frontier_caps[_bot_frontier_idx],
+                        attempts=1)
                     if ok:
                         info_msg = f"Saved run \"{name}\"."
                         info_color = C_SUCCESS
@@ -612,13 +558,8 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                 info_msg = (f"Loaded \"{picked['name']}\" "
                             f"({len(_last_inputs)} frames).")
                 info_color = C_SUCCESS
-            else:
-                info_msg = info_msg or ""
 
         # ---- Status line / Back ------------------------------------------
-        # Info + BACK sit in a reserved footer zone near panel bottom; the
-        # "Clear cached path" button was removed (save/load pickers cover
-        # the same need without an overflow-prone extra row).
         if info_msg:
             txt(screen, info_msg, panel.centerx, panel.bottom - 55, 13,
                 info_color, True)
@@ -628,7 +569,5 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
         if click_pos and b_back.collidepoint(click_pos):
             return return_value
 
-        # (Keyboard hint line removed — Enter/Esc bindings still work
-        # but the footer hint cluttered the panel bottom.)
         pygame.display.flip()
         clock.tick(settings.get_fps_cap())

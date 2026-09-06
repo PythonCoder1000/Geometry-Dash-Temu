@@ -34,13 +34,15 @@ from .constants import (
     LEVELS_DIR, LEVEL_FORMAT_VERSION, DIFFICULTIES, LEGACY_DEMON_TARGET,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,
-    T_PAD, T_BLUE_PAD, T_GRAV, T_END, T_START, T_COIN,
+    T_SPIDER_ORB,
+    T_PAD, T_BLUE_PAD, T_GRAV_UP, T_GRAV_DOWN, T_END, T_START, T_COIN,
     T_MODE_SHIP, T_MODE_BALL, T_MODE_CUBE, T_MODE_WAVE, T_MODE_UFO, T_MODE_SPIDER,
-    T_MODE_DUAL,
+    T_MODE_DUAL, MODE_PORTAL_TYPES,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
-    T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
+    T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER,
+    T_TIME_WARP, T_JUMP_PREDICTOR,
     SOLID_TYPES,
 )
 
@@ -109,10 +111,23 @@ def _safe_filename(name):
 # ---------------------------------------------------------------------------
 
 def _normalize_rotation(r):
+    """Wrap any rotation value into ``[0, 360)``.
+
+    Free rotation: any number of degrees is accepted (the collision
+    helpers in graphics.py snap to 90° themselves when they need a
+    cardinal-only rect, but the visual layer reads the raw value so
+    sprites can sit at any angle). Whole-degree values stay ints so
+    the on-disk JSON looks clean for the common case; fractions are
+    preserved as floats. Bad input falls back to 0.
+    """
     try:
-        return int(round(float(r) / 90.0) * 90) % 360
+        v = float(r) % 360.0
     except (TypeError, ValueError):
         return 0
+    iv = int(round(v))
+    if abs(v - iv) < 1e-6:
+        return iv % 360
+    return v
 
 
 def get_group_id(o):
@@ -147,16 +162,32 @@ def normalize_object(o):
         "r": _normalize_rotation(o.get("r", 0)),
     }
     # Scale is an optional visual+hitbox multiplier (1.0 = native cell
-    # size). Clamped to a reasonable range so a typo can't silently
-    # create absurd-sized collision rects.
-    if "scale" in o and o["scale"] is not None:
+    # size). Two forms accepted:
+    #   * legacy ``scale`` (uniform, single number)
+    #   * new ``sx`` / ``sy`` (per-axis, can differ for non-uniform)
+    # Per-axis values take precedence when present. Clamped to a
+    # reasonable range so a typo can't silently create absurd-sized
+    # collision rects. On output we collapse to ``scale`` when the
+    # axes are equal (compact JSON for the common uniform case) and
+    # write both ``sx`` / ``sy`` only when they differ.
+    def _clamp_scale(v):
         try:
-            sc = float(o["scale"])
+            f = float(v)
         except (TypeError, ValueError):
-            sc = 1.0
-        sc = max(0.25, min(8.0, sc))
-        if abs(sc - 1.0) > 1e-6:
-            out["scale"] = sc
+            return 1.0
+        return max(0.25, min(8.0, f))
+
+    legacy = _clamp_scale(o["scale"]) if "scale" in o and o["scale"] is not None else None
+    sx_in = _clamp_scale(o["sx"]) if "sx" in o and o["sx"] is not None else legacy
+    sy_in = _clamp_scale(o["sy"]) if "sy" in o and o["sy"] is not None else legacy
+    sx = sx_in if sx_in is not None else 1.0
+    sy = sy_in if sy_in is not None else 1.0
+    if abs(sx - sy) < 1e-6:
+        if abs(sx - 1.0) > 1e-6:
+            out["scale"] = sx
+    else:
+        out["sx"] = sx
+        out["sy"] = sy
     if o["t"] == T_TELEPORT_ORB:
         out["group_id"] = get_group_id(o)
         if o.get("dest"):
@@ -169,6 +200,8 @@ def normalize_object(o):
         # screen center inside Player._enter_dual.
         if "spawn_y" in o and o["spawn_y"] is not None:
             out["spawn_y"] = int(o["spawn_y"])
+    if o["t"] in MODE_PORTAL_TYPES and o.get("free_mode"):
+        out["free_mode"] = True
     if o["t"] == T_BG_TRIGGER:
         out["bg"] = int(o.get("bg", 0))
     if o["t"] == T_COLOR_TRIGGER:
@@ -197,15 +230,80 @@ def normalize_object(o):
         # Degrees per second; positive = clockwise.
         out["spin"] = float(o.get("spin", 90.0))
         out["duration"] = max(0.1, min(60.0, float(o.get("duration", 4.0))))
+    if o["t"] == T_FOLLOW_TRIGGER:
+        # Persist source/target oids and the always_on flag. Default
+        # 0 = unset (the level loads but the link won't activate
+        # until the author wires it up via N).
+        out["source_oid"] = int(o.get("source_oid", 0) or 0)
+        out["target_oid"] = int(o.get("target_oid", 0) or 0)
+        if o.get("always_on"):
+            out["always_on"] = True
+        # follow_player: source-tracks-player mode. offset_cx/cy
+        # only persisted when follow_player is on (otherwise the
+        # offset is captured at activation from source/target).
+        if o.get("follow_player"):
+            out["follow_player"] = True
+            out["offset_cx"] = int(o.get("offset_cx", 0) or 0)
+            out["offset_cy"] = int(o.get("offset_cy", 0) or 0)
+    if o["t"] == T_TIME_WARP:
+        # Time warp factor: 1.0 = real time, 0.5 = half speed,
+        # 2.0 = double speed, 10.0 = ten-times fast-forward.
+        # Clamped to [0.0, 10.0] — 0.0 freezes the game (useful for
+        # cinematic stops), upper bound is set so the per-frame
+        # collision substeps still fit. Editors that worked under
+        # the old [0.1, 5.0] cap remain valid (subset).
+        try:
+            tf = float(o.get("factor", 1.0))
+        except (TypeError, ValueError):
+            tf = 1.0
+        out["factor"] = max(0.0, min(10.0, round(tf, 3)))
     if o.get("oid"):
         out["oid"] = int(o["oid"])
     if o.get("group"):
         out["group"] = int(o["group"])
-    # Invisible flag: solid blocks/slabs can be hidden while keeping
-    # collision. Only persisted when True so default-visible objects
-    # don't carry dead fields around.
-    if o["t"] in SOLID_TYPES and o.get("invisible"):
+    # Invisible flag: ANY object can be hidden while keeping its
+    # behavior (collision for solids, hazard for spikes/saws, activation
+    # for orbs/portals/triggers). Only persisted when True so
+    # default-visible objects don't carry dead fields around.
+    if o.get("invisible"):
         out["invisible"] = True
+    if o["t"] == T_SPIDER_ORB:
+        # Spider orb: explicit per-orb teleport direction set via the
+        # editor toggle. Only persisted when non-default so an author's
+        # unedited orbs stay small on disk.
+        d = str(o.get("dir", "")).lower()
+        if d in ("up", "down", "left", "right"):
+            out["dir"] = d
+    if o["t"] == T_DASH_ORB:
+        # Dash orb: per-orb speed + duration set in the editor. Import
+        # the defaults at call time so tests / headless tooling that
+        # don't import constants eagerly still round-trip correctly.
+        # Only persist when different from the default — keeps vanilla
+        # orbs' JSON representation small.
+        from .constants import DASH_SPEED as _DS, DASH_TIME as _DT
+        try:
+            ds = float(o.get("dash_speed", _DS))
+        except (TypeError, ValueError):
+            ds = _DS
+        if abs(ds - _DS) > 1e-6:
+            out["dash_speed"] = max(1.0, min(60.0, round(ds, 2)))
+        try:
+            dd = int(o.get("dash_dur", _DT))
+        except (TypeError, ValueError):
+            dd = _DT
+        if dd != _DT:
+            out["dash_dur"] = max(1, min(240, dd))
+    if o["t"] == T_JUMP_PREDICTOR:
+        # Editor probe: persist the simulated input's mode, gravity, mini
+        # flag, and sub-cell pixel nudge (dx, dy) so reopening a level
+        # restores the author's last configured probe.
+        out["mode"] = str(o.get("mode", "cube"))
+        out["grav"] = 1 if int(o.get("grav", 1)) >= 0 else -1
+        out["mini"] = bool(o.get("mini", False))
+        out["dx"] = int(o.get("dx", 0))
+        out["dy"] = int(o.get("dy", 0))
+        if o.get("show_hitbox"):
+            out["show_hitbox"] = True
     return out
 
 

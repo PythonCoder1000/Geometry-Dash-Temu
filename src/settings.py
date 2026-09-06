@@ -15,9 +15,18 @@ from .constants import FPS as DEFAULT_FPS
 # ---------------------------------------------------------------------------
 # Defaults — also serve as the "Reset to defaults" target.
 # ---------------------------------------------------------------------------
+# Single locked rate that drives both render FPS and simulation TPS. Was
+# previously two independent knobs (a 30 Hz monitor could run physics at
+# 240 Hz, etc.) but the cycle UI was too easy to leave in a misaligned
+# state. The locked value is exposed through both ``get_fps_cap`` and
+# ``get_tps`` so existing callsites keep working — they always see the
+# same number, so the render loop emits exactly one physics tick per
+# rendered frame.
+GAME_RATE = 120
+
 DEFAULTS = {
-    "fps_cap": DEFAULT_FPS,   # 0 means "uncapped" (passes 0 to clock.tick)
-    "tps": 60,                # ticks/second — simulation rate, independent of FPS
+    "fps_cap": GAME_RATE,
+    "tps": GAME_RATE,
     "fullscreen": False,
     "music_vol": 0.5,         # 0.0..1.0
     "sfx_vol": 0.5,           # 0.0..1.0
@@ -27,12 +36,12 @@ DEFAULTS = {
     "player_icon_index": 0,   # index into constants.PLAYER_ICONS
 }
 
-# Whitelist of FPS caps the UI cycles through. 0 means "no cap".
-FPS_CAP_OPTIONS = [30, 60, 75, 120, 144, 240, 0]
-# TPS options — the simulation tick rate. Decoupled from the render FPS
-# cap so a low-refresh monitor (30 Hz) still runs physics at 60/120 Hz
-# and vice versa.
-TPS_OPTIONS = [30, 60, 90, 120, 180, 240]
+# Both options lists collapse to the single locked value — the cycle
+# helpers below stay no-ops, so the menu's "FPS cap" button still
+# clicks but the value never changes. Tests that probe the option
+# list still see a non-empty whitelist.
+FPS_CAP_OPTIONS = [GAME_RATE]
+TPS_OPTIONS = [GAME_RATE]
 
 
 # ---------------------------------------------------------------------------
@@ -68,74 +77,51 @@ def _coerce_bool(v, default):
 
 
 def get_fps_cap():
-    """Return the cap to pass to `clock.tick()`. 0 means uncapped."""
-    raw = prefs.get("fps_cap", DEFAULTS["fps_cap"])
-    val = _coerce_int(raw, DEFAULTS["fps_cap"])
-    if val < 0:
-        return DEFAULTS["fps_cap"]
-    if val == 0:
-        return 0
-    # Clamp to a sane range so a corrupted pref can't freeze the game.
-    return max(15, min(1000, val))
+    """Return the locked render-rate cap to pass to ``clock.tick()``.
+
+    Was a free knob; now hard-locked to ``GAME_RATE`` so render FPS and
+    simulation TPS always stay in lockstep — a 30 Hz render loop driving
+    a 240 Hz physics tick was a footgun nobody actually wanted.
+    """
+    return GAME_RATE
 
 
 def set_fps_cap(value):
-    """Persist the FPS cap (0 = uncapped). Coerces invalid input to default."""
-    val = _coerce_int(value, DEFAULTS["fps_cap"])
-    if val < 0:
-        val = DEFAULTS["fps_cap"]
-    prefs.set("fps_cap", val)
+    """No-op kept for backward compat — the render rate is locked. Old
+    callsites that flip the FPS cap simply do nothing now."""
+    return
 
 
 def cycle_fps_cap():
-    """Advance to the next option in `FPS_CAP_OPTIONS`. Returns the new cap."""
-    cur = get_fps_cap()
-    try:
-        idx = FPS_CAP_OPTIONS.index(cur)
-    except ValueError:
-        idx = -1
-    new = FPS_CAP_OPTIONS[(idx + 1) % len(FPS_CAP_OPTIONS)]
-    set_fps_cap(new)
-    return new
+    """No-op cycle — the render rate is locked at ``GAME_RATE``. Returns
+    the locked value so the UI still gets something to display."""
+    return GAME_RATE
 
 
 def fps_cap_label(cap=None):
-    """Human-friendly label for an FPS cap value."""
-    if cap is None:
-        cap = get_fps_cap()
-    return "Unlimited" if cap == 0 else f"{cap}"
+    """Human-friendly label for the locked render rate."""
+    return f"{GAME_RATE} (locked)"
 
 
 def get_tps():
-    """Return the simulation ticks-per-second rate, clamped to a sane
-    range so a corrupted pref can't stall the sim loop."""
-    raw = prefs.get("tps", DEFAULTS["tps"])
-    val = _coerce_int(raw, DEFAULTS["tps"])
-    return max(15, min(480, val))
+    """Return the locked simulation tick rate. Always equals the render
+    rate so the sim accumulator emits exactly one tick per rendered
+    frame and there is no mismatch between visible motion and physics.
+    """
+    return GAME_RATE
 
 
 def set_tps(value):
-    val = _coerce_int(value, DEFAULTS["tps"])
-    if val < 15 or val > 480:
-        val = DEFAULTS["tps"]
-    prefs.set("tps", val)
+    """No-op — the tick rate is locked to ``GAME_RATE``."""
+    return
 
 
 def cycle_tps():
-    cur = get_tps()
-    try:
-        idx = TPS_OPTIONS.index(cur)
-    except ValueError:
-        idx = -1
-    new = TPS_OPTIONS[(idx + 1) % len(TPS_OPTIONS)]
-    set_tps(new)
-    return new
+    return GAME_RATE
 
 
 def tps_label(tps=None):
-    if tps is None:
-        tps = get_tps()
-    return f"{tps}"
+    return f"{GAME_RATE} (locked)"
 
 
 def get_fullscreen():

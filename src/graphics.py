@@ -21,18 +21,23 @@ from .constants import (
     ASSETS_DIR, CELL, WIDTH, HEIGHT, GROUND_Y, _USER_DATA,
     C_BG_TOP, C_BG_BOT, C_GROUND, C_GROUND_L, C_GROUND_DARK, C_WHITE, C_GRAY,
     C_BLOCK, C_BLOCK_H, C_BLOCK_D, C_SPIKE, C_ORB, C_DASH_ORB, C_TELEPORT_ORB,
-    C_PAD, C_BLUE_PAD, C_GPORTAL, C_END, C_PLAYER, C_BTN, C_DARK,
+    C_PAD, C_BLUE_PAD, C_GPORTAL_UP, C_GPORTAL_DOWN, C_END, C_PLAYER, C_BTN, C_DARK,
     C_DECO_CRYSTAL, C_DECO_PILLAR, C_DECO_GLOW, C_COIN, C_CHECKPOINT,
-    C_GREEN_ORB, C_SLAB, C_SAW, C_DANGER,
+    C_GREEN_ORB, C_SPIDER_ORB, C_RED_ORB, C_PINK_ORB,
+    C_SLAB, C_SAW, C_DANGER,
     TYPE_COLS, SPEED_VALUES, MODE_FROM_TYPE,
-    T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW, T_ORB, T_DASH_ORB,
-    T_TELEPORT_ORB, T_BLACK_ORB, T_BLUE_ORB, T_GREEN_ORB, T_PAD, T_BLUE_PAD,
-    T_GRAV, T_END, T_START, T_COIN, T_CHECKPOINT,
+    T_BLOCK, T_SLAB, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW, T_ORB, T_DASH_ORB,
+    T_TELEPORT_ORB, T_BLACK_ORB, T_BLUE_ORB, T_GREEN_ORB, T_SPIDER_ORB,
+    T_RED_ORB, T_PINK_ORB,
+    T_PAD, T_BLUE_PAD,
+    T_GRAV_UP, T_GRAV_DOWN, T_END, T_START, T_COIN, T_CHECKPOINT,
     T_MODE_CUBE, T_MODE_SHIP, T_MODE_BALL, T_MODE_WAVE, T_MODE_UFO, T_MODE_SPIDER,
-    T_MODE_MINI, T_MODE_BIG, T_MODE_DUAL, T_MODE_SOLO,
+    T_MODE_SWING, T_MODE_ROBOT, T_MODE_MINI, T_MODE_BIG, T_MODE_DUAL, T_MODE_SOLO,
     T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
-    T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
+    T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER,
+    T_TIME_WARP, T_JUMP_PREDICTOR,
+    T_BOT_CHECKPOINT,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
 )
 
@@ -361,27 +366,85 @@ def normalize_rotation(r):
         return 0
 
 
-def _scale_rect_around_cell_center(rect, gx, gy, scale):
-    """Return ``rect`` scaled uniformly around the cell's center point.
+def obj_scale(o):
+    """Return the ``(sx, sy)`` tuple for an object dict.
 
-    Used by every collision helper so a scaled object's visual footprint
-    and its hitbox stay in lock-step regardless of where within the cell
-    the base rect was anchored.
+    Pulls per-axis values from ``sx`` / ``sy`` when present, otherwise
+    falls back to the legacy uniform ``scale``, otherwise ``(1.0, 1.0)``.
+    Single source of truth so collision/draw callsites don't each
+    re-derive the back-compat dance.
     """
-    if scale == 1.0:
+    legacy = o.get("scale", 1.0)
+    try:
+        legacy = float(legacy)
+    except (TypeError, ValueError):
+        legacy = 1.0
+    sx = o.get("sx", legacy)
+    sy = o.get("sy", legacy)
+    try:
+        sx = float(sx)
+    except (TypeError, ValueError):
+        sx = 1.0
+    try:
+        sy = float(sy)
+    except (TypeError, ValueError):
+        sy = 1.0
+    return sx, sy
+
+
+def _resolve_scale(scale, scale_y=None):
+    """Normalize the various scale-arg shapes into ``(sx, sy)``.
+
+    Accepts:
+      * a single number (uniform scale, legacy callsites)
+      * a ``(sx, sy)`` tuple/list (new per-axis form)
+      * an explicit ``scale_y`` paired with a numeric ``scale`` (= sx)
+
+    Returns ``(sx, sy)`` as floats. ``None`` / unparseable inputs map to
+    the identity ``(1.0, 1.0)`` rather than raising — a malformed save
+    file shouldn't crash the renderer, just look unscaled.
+    """
+    if isinstance(scale, (tuple, list)) and len(scale) >= 2:
+        try:
+            return float(scale[0]), float(scale[1])
+        except (TypeError, ValueError):
+            return 1.0, 1.0
+    try:
+        sx = float(scale)
+    except (TypeError, ValueError):
+        sx = 1.0
+    if scale_y is None:
+        return sx, sx
+    try:
+        return sx, float(scale_y)
+    except (TypeError, ValueError):
+        return sx, sx
+
+
+def _scale_rect_around_cell_center(rect, gx, gy, scale, scale_y=None):
+    """Return ``rect`` scaled around the cell's center point.
+
+    Accepts a uniform scalar (legacy) or a ``(sx, sy)`` tuple — when
+    the two axes differ the rect is stretched independently along x
+    and y. Used by every collision helper so a scaled object's visual
+    footprint and its hitbox stay in lock-step regardless of where
+    within the cell the base rect was anchored.
+    """
+    sx, sy = _resolve_scale(scale, scale_y)
+    if sx == 1.0 and sy == 1.0:
         return rect
     cx = gx * CELL + CELL / 2.0
     cy = gy * CELL + CELL / 2.0
-    nw = rect.w * scale
-    nh = rect.h * scale
-    nx = cx + (rect.x - cx) * scale
-    ny = cy + (rect.y - cy) * scale
+    nw = rect.w * sx
+    nh = rect.h * sy
+    nx = cx + (rect.x - cx) * sx
+    ny = cy + (rect.y - cy) * sy
     return pygame.Rect(round(nx), round(ny), max(1, round(nw)), max(1, round(nh)))
 
 
-def cell_rect(gx, gy, scale=1.0):
+def cell_rect(gx, gy, scale=1.0, scale_y=None):
     base = pygame.Rect(gx * CELL, gy * CELL, CELL, CELL)
-    return _scale_rect_around_cell_center(base, gx, gy, scale)
+    return _scale_rect_around_cell_center(base, gx, gy, scale, scale_y)
 
 
 # Slab local offsets (pre-rotation) in cell-local coords. Precomputed so
@@ -395,11 +458,11 @@ _SLAB_LOCAL = {
 }
 
 
-def slab_rect(gx, gy, rotation=0, scale=1.0):
+def slab_rect(gx, gy, rotation=0, scale=1.0, scale_y=None):
     """Slab is half-height; rotation determines which edge it sits on."""
     lx, ly, lw, lh = _SLAB_LOCAL[normalize_rotation(rotation)]
     base = pygame.Rect(gx * CELL + lx, gy * CELL + ly, lw, lh)
-    return _scale_rect_around_cell_center(base, gx, gy, scale)
+    return _scale_rect_around_cell_center(base, gx, gy, scale, scale_y)
 
 
 def rotate_local_rect(local_rect, rotation, size=CELL):
@@ -439,21 +502,29 @@ def rotate_local_rect(local_rect, rotation, size=CELL):
 # produces fresh Rects), so the cached Rects can't be mutated externally.
 @functools.lru_cache(maxsize=16)
 def _spike_base_rotated(rotation, half):
+    # GD-style internal rectangular danger zone, narrower and taller than
+    # the visible triangle so corner approaches stay forgiving. Clone
+    # ratios from the recreation report:
+    #   full spike: 0.30 × 0.65 of the tile
+    #   half spike: 0.30 × 0.35 of the tile
+    # Both are centered horizontally with a 1 px gap above the floor so
+    # the lower corners remain non-lethal.
     if half:
-        base = (pygame.Rect(14, 34, 22, 8), pygame.Rect(18, 28, 14, 6))
+        base = (pygame.Rect(17, 32, 15, 17),)
     else:
-        base = (pygame.Rect(14, 34, 22, 8), pygame.Rect(18, 24, 14, 10))
+        base = (pygame.Rect(17, 17, 15, 32),)
     return tuple(rotate_local_rect(r, rotation) for r in base)
 
 
-def spike_hitboxes(gx, gy, rotation=0, half=False, scale=1.0):
+def spike_hitboxes(gx, gy, rotation=0, half=False, scale=1.0, scale_y=None):
     x = gx * CELL
     y = gy * CELL
     rects = [r.move(x, y) for r in
              _spike_base_rotated(normalize_rotation(rotation), bool(half))]
-    if scale == 1.0:
+    sx, sy = _resolve_scale(scale, scale_y)
+    if sx == 1.0 and sy == 1.0:
         return rects
-    return [_scale_rect_around_cell_center(r, gx, gy, scale) for r in rects]
+    return [_scale_rect_around_cell_center(r, gx, gy, (sx, sy)) for r in rects]
 
 
 @functools.lru_cache(maxsize=8)
@@ -467,10 +538,53 @@ def pad_trigger_rect(gx, gy, rotation=0):
         gx * CELL, gy * CELL)
 
 
-def saw_hitbox(gx, gy, scale=1.0):
-    """Circular saw hitbox — smaller than the grid cell for fairness."""
-    base = cell_rect(gx, gy).inflate(-10, -10)
-    return _scale_rect_around_cell_center(base, gx, gy, scale)
+def slope_polygon(gx, gy, rotation=0, scale=1.0, scale_y=None):
+    """Return the slope's solid triangle as a list of world-pixel points.
+
+    Mirrors the orientation table used by ``Player._slope_orientation``
+    (in player.py) — keep the two in sync. The triangle is the SOLID
+    half of the cell, so the hitbox view paints the side the player
+    can't enter; the hypotenuse opposite is the ride surface.
+
+    ``scale`` matches the cube-rect helpers — the triangle is scaled
+    around the cell's center so a half-scale slope occupies the inner
+    half of the cell, not a quadrant of it. Accepts a uniform scalar
+    or a ``(sx, sy)`` pair for non-uniform stretching.
+    """
+    cl = gx * CELL
+    cr = cl + CELL
+    ct = gy * CELL
+    cb = ct + CELL
+    try:
+        r = int(round(float(rotation) / 90.0)) % 4
+    except (TypeError, ValueError):
+        r = 0
+    if r == 0:    # / floor — solid lower-right
+        pts = [(cl, cb), (cr, cb), (cr, ct)]
+    elif r == 1:  # \ floor — solid lower-left
+        pts = [(cl, cb), (cr, cb), (cl, ct)]
+    elif r == 2:  # / ceiling — solid upper-left
+        pts = [(cl, ct), (cr, ct), (cl, cb)]
+    else:         # \ ceiling — solid upper-right
+        pts = [(cl, ct), (cr, ct), (cr, cb)]
+    sx, sy = _resolve_scale(scale, scale_y)
+    if sx == 1.0 and sy == 1.0:
+        return pts
+    cx = cl + CELL / 2.0
+    cy = ct + CELL / 2.0
+    return [(cx + (px - cx) * sx, cy + (py - cy) * sy) for px, py in pts]
+
+
+def saw_hitbox(gx, gy, scale=1.0, scale_y=None):
+    """Circular saw hitbox — smaller than the grid cell for fairness.
+
+    GD-style: the visible teeth spin but the danger region stays static
+    and is roughly 70% of the visible saw radius. With CELL=50 that's
+    a 34×34 inner box (cell inflated by -16 each side); using an even
+    delta keeps the hitbox center exactly aligned with the cell center.
+    """
+    base = cell_rect(gx, gy).inflate(-16, -16)
+    return _scale_rect_around_cell_center(base, gx, gy, scale, scale_y)
 
 
 # ---------------------------------------------------------------------------
@@ -620,9 +734,10 @@ _check_sprite_cache_version()
 # Static types get a single image. Animated types get SPRITE_FRAMES.
 _ANIMATED_TYPES = {
     T_SAW, T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLACK_ORB, T_BLUE_ORB,
-    T_GREEN_ORB, T_COIN, T_DECO_GLOW, T_GRAV, T_END,
+    T_GREEN_ORB, T_SPIDER_ORB, T_RED_ORB, T_PINK_ORB,
+    T_COIN, T_DECO_GLOW, T_GRAV_UP, T_GRAV_DOWN, T_END,
     T_MODE_CUBE, T_MODE_SHIP, T_MODE_BALL, T_MODE_WAVE, T_MODE_UFO, T_MODE_SPIDER,
-    T_MODE_MINI, T_MODE_BIG, T_MODE_DUAL, T_MODE_SOLO,
+    T_MODE_SWING, T_MODE_ROBOT, T_MODE_MINI, T_MODE_BIG, T_MODE_DUAL, T_MODE_SOLO,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
 }
 
@@ -803,6 +918,36 @@ def _render_slab(surf, s, frame_t):
     _specular_highlight(surf, rect.inflate(-4, -4), alpha=70, height_frac=0.45)
 
 
+def _render_slope(surf, s, frame_t):
+    """Right-triangle ramp filling the lower-right of the cell — base
+    orientation, before any per-instance rotation. Hypotenuse runs from
+    (0, s) up to (s, 0) so the cube can ride right-and-up. Other
+    rotations (90/180/270) re-use this sprite via pygame's image
+    rotation in ``draw_obj``; the collision code in player.py mirrors
+    each orientation explicitly so the diagonal hitbox follows what the
+    sprite actually shows.
+    """
+    pts = [(0, s), (s, s), (s, 0)]
+    base = pygame.Surface((s, s), pygame.SRCALPHA)
+    # Body fill: vertical gradient mirrors the regular block so a slope
+    # placed next to a flat block reads as the same material.
+    grad = pygame.Surface((s, s), pygame.SRCALPHA)
+    _vgradient(grad, pygame.Rect(0, 0, s, s),
+               lighter(C_BLOCK_H, 30), darker(C_BLOCK_D, 20),
+               border_radius=0)
+    # Mask the gradient with the triangle.
+    mask = pygame.Surface((s, s), pygame.SRCALPHA)
+    pygame.draw.polygon(mask, (255, 255, 255, 255), pts)
+    grad.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+    base.blit(grad, (0, 0))
+    # Hypotenuse highlight — bright bevel along the ride surface.
+    pygame.draw.line(base, lighter(C_BLOCK_H, 80),
+                     (0, s - 1), (s - 1, 0), max(2, s // 24))
+    # Outer outline for definition against the background.
+    pygame.draw.polygon(base, darker(C_BLOCK_D, 50), pts, max(2, s // 28))
+    surf.blit(base, (0, 0))
+
+
 def _render_spike(surf, s, frame_t, half=False):
     if half:
         tip_y = s // 2 + 2
@@ -927,6 +1072,73 @@ def _render_green_orb(surf, s, frame_t):
                    inner_icon=_icon)
 
 
+def _render_red_orb(surf, s, frame_t):
+    # Tall double-up arrow signals 2× jump strength.
+    def _icon(surf, cx, cy, r):
+        pygame.draw.polygon(surf, C_WHITE,
+                            [(cx, cy - 9), (cx - 5, cy - 3), (cx + 5, cy - 3)])
+        pygame.draw.polygon(surf, C_WHITE,
+                            [(cx, cy - 1), (cx - 5, cy + 5), (cx + 5, cy + 5)])
+    _render_orb_hq(surf, C_RED_ORB, s, frame_t, inner_icon=_icon)
+
+
+def _render_pink_orb(surf, s, frame_t):
+    # Short single up-arrow signals a half-strength hop.
+    def _icon(surf, cx, cy, r):
+        pygame.draw.polygon(surf, C_WHITE,
+                            [(cx, cy - 4), (cx - 4, cy + 2), (cx + 4, cy + 2)])
+    _render_orb_hq(surf, C_PINK_ORB, s, frame_t, inner_icon=_icon)
+
+
+def _render_spider_orb(surf, s, frame_t, variant=None):
+    """Purple teleport orb with a directional arrow icon.
+
+    ``variant`` controls the arrow pair so authors can tell at a glance
+    which way the orb will fling them:
+      ``None`` / ``"auto"`` — up + down (default against-gravity hint)
+      ``"up"``    — two up arrows
+      ``"down"``  — two down arrows
+      ``"left"``  — two left arrows
+      ``"right"`` — two right arrows
+    """
+    def _icon(surf, cx, cy, r):
+        col = C_SPIDER_ORB
+
+        def _up(ay):
+            pygame.draw.polygon(
+                surf, col,
+                [(cx, ay - 4), (cx - 5, ay + 3), (cx + 5, ay + 3)])
+
+        def _down(ay):
+            pygame.draw.polygon(
+                surf, col,
+                [(cx, ay + 4), (cx - 5, ay - 3), (cx + 5, ay - 3)])
+
+        def _left(ax):
+            pygame.draw.polygon(
+                surf, col,
+                [(ax - 4, cy), (ax + 3, cy - 5), (ax + 3, cy + 5)])
+
+        def _right(ax):
+            pygame.draw.polygon(
+                surf, col,
+                [(ax + 4, cy), (ax - 3, cy - 5), (ax - 3, cy + 5)])
+
+        if variant == "up":
+            _up(cy - 5); _up(cy + 6)
+        elif variant == "down":
+            _down(cy - 6); _down(cy + 5)
+        elif variant == "left":
+            _left(cx - 5); _left(cx + 6)
+        elif variant == "right":
+            _right(cx - 6); _right(cx + 5)
+        else:
+            _up(cy - 4); _down(cy + 4)
+
+    _render_orb_hq(surf, C_SPIDER_ORB, s, frame_t, outline_only=True,
+                   inner_icon=_icon)
+
+
 def _render_pad(surf, s, frame_t, blue=False):
     col = C_BLUE_PAD if blue else C_PAD
     # Shadow bar
@@ -950,15 +1162,30 @@ def _render_pad(surf, s, frame_t, blue=False):
                             [(cx - 5, s - 11), (cx + 5, s - 11), (cx, s - 3)], 1)
 
 
-def _render_grav(surf, s, frame_t):
-    rr = _render_portal_hq(surf, s, C_GPORTAL, frame_t, inner_scale=0.62)
-    # Dual arrow (up-down)
-    arrow = [(rr.centerx, rr.y + 6),
-             (rr.centerx - 7, rr.y + 18), (rr.centerx - 2, rr.y + 18),
-             (rr.centerx - 2, rr.bottom - 18), (rr.centerx - 7, rr.bottom - 18),
-             (rr.centerx, rr.bottom - 6),
-             (rr.centerx + 7, rr.bottom - 18), (rr.centerx + 2, rr.bottom - 18),
-             (rr.centerx + 2, rr.y + 18), (rr.centerx + 7, rr.y + 18)]
+def _render_grav(surf, s, frame_t, direction):
+    """Gravity-set portal. ``direction`` is "up" (blue, sets grav=-1) or
+    "down" (yellow, sets grav=+1). A single-headed arrow indicates the
+    forced gravity direction (no flip)."""
+    col = C_GPORTAL_UP if direction == "up" else C_GPORTAL_DOWN
+    rr = _render_portal_hq(surf, s, col, frame_t, inner_scale=0.62)
+    cx = rr.centerx
+    # Single arrow pointing in the SET direction.
+    if direction == "up":
+        tip_y = rr.y + 6
+        base_y = rr.bottom - 6
+        head_y = rr.y + 18
+        arrow = [(cx, tip_y),
+                 (cx - 7, head_y), (cx - 2, head_y),
+                 (cx - 2, base_y), (cx + 2, base_y),
+                 (cx + 2, head_y), (cx + 7, head_y)]
+    else:
+        tip_y = rr.bottom - 6
+        base_y = rr.y + 6
+        head_y = rr.bottom - 18
+        arrow = [(cx, tip_y),
+                 (cx + 7, head_y), (cx + 2, head_y),
+                 (cx + 2, base_y), (cx - 2, base_y),
+                 (cx - 2, head_y), (cx - 7, head_y)]
     pygame.draw.polygon(surf, C_WHITE, arrow)
     pygame.draw.polygon(surf, darker(C_WHITE, 30), arrow, 1)
 
@@ -1067,6 +1294,25 @@ def _render_mode_portal(surf, s, frame_t, t):
         for ox in (-9, 9):
             for oy in (-6, 6):
                 pygame.draw.line(surf, C_WHITE, (cx, cy), (cx + ox, cy + oy), 2)
+    elif t == T_MODE_SWING:
+        # Vertical lozenge with up- and down-pointing arrowheads to
+        # signal the bidirectional grav-flip mechanic.
+        pts = [(cx, cy - 11), (cx + 6, cy), (cx, cy + 11), (cx - 6, cy)]
+        pygame.draw.polygon(surf, C_WHITE, pts)
+        pygame.draw.polygon(surf, darker(col, 40), pts, 1)
+        pygame.draw.polygon(surf, darker(col, 20),
+                            [(cx, cy - 5), (cx + 3, cy), (cx, cy + 5), (cx - 3, cy)])
+    elif t == T_MODE_ROBOT:
+        # Boxy head + visor band + flame at the base, signalling the
+        # held-thrust booster mechanic.
+        body = pygame.Rect(cx - 8, cy - 9, 16, 14)
+        pygame.draw.rect(surf, C_WHITE, body, border_radius=2)
+        pygame.draw.rect(surf, darker(col, 40), body, 1, border_radius=2)
+        visor = pygame.Rect(cx - 6, cy - 6, 12, 4)
+        pygame.draw.rect(surf, darker(col, 30), visor, border_radius=1)
+        # Booster flame underneath
+        pygame.draw.polygon(surf, (255, 180, 80),
+                            [(cx - 5, cy + 5), (cx + 5, cy + 5), (cx, cy + 11)])
 
 
 def _render_speed_portal(surf, s, frame_t, t):
@@ -1186,6 +1432,64 @@ def _render_deco_glow(surf, s, frame_t):
     pygame.draw.circle(surf, C_WHITE, (cx, cy), max(1, r - 2))
 
 
+def _render_jump_predictor(surf, s, frame_t):
+    """Editor probe icon: dashed crosshair + small arc, on a faint panel
+    so the probe stays legible against any background. Intentionally a
+    schematic — the user should not confuse it with a gameplay object."""
+    col = TYPE_COLS.get(T_JUMP_PREDICTOR, (255, 235, 120))
+    rect = pygame.Rect(6, 6, s - 12, s - 12)
+    panel = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+    panel.fill((0, 0, 0, 110))
+    surf.blit(panel, rect.topleft)
+    pygame.draw.rect(surf, col, rect, 2, border_radius=6)
+    cx, cy = s // 2, s // 2
+    r = int(s * 0.22)
+    pygame.draw.circle(surf, col, (cx, cy), r, 2)
+    # Crosshair ticks.
+    pygame.draw.line(surf, col, (cx - r - 6, cy), (cx - r - 2, cy), 2)
+    pygame.draw.line(surf, col, (cx + r + 2, cy), (cx + r + 6, cy), 2)
+    pygame.draw.line(surf, col, (cx, cy - r - 6), (cx, cy - r - 2), 2)
+    pygame.draw.line(surf, col, (cx, cy + r + 2), (cx, cy + r + 6), 2)
+    # Small preview arc from the circle up-and-right, suggesting a jump.
+    arc_rect = pygame.Rect(cx - 2, cy - int(s * 0.38),
+                           int(s * 0.55), int(s * 0.55))
+    try:
+        pygame.draw.arc(surf, lighter(col, 40), arc_rect,
+                        math.radians(200), math.radians(340), 2)
+    except (pygame.error, ValueError):
+        pass
+
+
+def _render_bot_checkpoint(surf, s, frame_t):
+    """Bot checkpoint icon: a target reticle with a small flag glyph.
+    Distinct enough from the jump probe (yellow square) and from coins
+    (round) that authors don't confuse them at a glance."""
+    col = TYPE_COLS.get(T_BOT_CHECKPOINT, (120, 230, 255))
+    cx, cy = s // 2, s // 2
+    # Faint backing panel — keeps the checkpoint legible against any
+    # background without dominating it.
+    rect = pygame.Rect(6, 6, s - 12, s - 12)
+    panel = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+    panel.fill((0, 0, 0, 100))
+    surf.blit(panel, rect.topleft)
+    # Concentric rings (target reticle).
+    r_outer = int(s * 0.34)
+    r_mid = int(s * 0.22)
+    r_inner = max(2, int(s * 0.10))
+    pygame.draw.circle(surf, col, (cx, cy), r_outer, 2)
+    pygame.draw.circle(surf, lighter(col, 30), (cx, cy), r_mid, 2)
+    pygame.draw.circle(surf, C_WHITE, (cx, cy), r_inner)
+    # Crosshair ticks at cardinals.
+    pygame.draw.line(surf, col, (cx - r_outer - 4, cy),
+                     (cx - r_outer - 1, cy), 2)
+    pygame.draw.line(surf, col, (cx + r_outer + 1, cy),
+                     (cx + r_outer + 4, cy), 2)
+    pygame.draw.line(surf, col, (cx, cy - r_outer - 4),
+                     (cx, cy - r_outer - 1), 2)
+    pygame.draw.line(surf, col, (cx, cy + r_outer + 1),
+                     (cx, cy + r_outer + 4), 2)
+
+
 def _render_trigger(surf, s, t):
     col = TYPE_COLS.get(t, C_GRAY)
     rect = pygame.Rect(5, 5, s - 10, s - 10)
@@ -1196,10 +1500,26 @@ def _render_trigger(surf, s, t):
         cx, cy = s // 2, s // 2
         pygame.draw.rect(surf, C_WHITE, (cx - 9, cy - 6, 14, 10), 2)
         pygame.draw.rect(surf, C_WHITE, (cx + 3, cy - 3, 5, 4))
+    elif t == T_TIME_WARP:
+        # Stopwatch glyph: a circle (the dial) + two hands. The dial
+        # outline reads as the "T" of time warp; the offset hands give
+        # it a clock vibe so authors don't confuse it with the rotate
+        # trigger (which is also circular).
+        cx, cy = s // 2, s // 2
+        r = max(4, s // 3)
+        pygame.draw.circle(surf, C_WHITE, (cx, cy), r, 2)
+        # Tick at the 12-o'clock position.
+        pygame.draw.line(surf, C_WHITE, (cx, cy - r),
+                         (cx, cy - r + 3), 2)
+        # Hour hand toward 11; minute hand toward 3.
+        pygame.draw.line(surf, C_WHITE, (cx, cy),
+                         (cx - r // 2, cy - r // 2), 2)
+        pygame.draw.line(surf, C_WHITE, (cx, cy),
+                         (cx + int(r * 0.7), cy), 2)
     else:
         label = {T_BG_TRIGGER: "BG", T_MOVE_TRIGGER: "MV",
                  T_COLOR_TRIGGER: "CL", T_PULSE_TRIGGER: "PL",
-                 T_ROTATE_TRIGGER: "RT"}.get(t, "?")
+                 T_ROTATE_TRIGGER: "RT", T_FOLLOW_TRIGGER: "FL"}.get(t, "?")
         txt(surf, label, s // 2, s // 2, max(10, s // 4), C_WHITE, True, shadow=True)
 
 
@@ -1213,6 +1533,7 @@ def _render_trigger(surf, s, t):
 _DIRECT_RENDERERS = {
     T_BLOCK:       lambda s, b, f, v: _render_block(s, b, f),
     T_SLAB:        lambda s, b, f, v: _render_slab(s, b, f),
+    T_SLOPE:       lambda s, b, f, v: _render_slope(s, b, f),
     T_SPIKE:       lambda s, b, f, v: _render_spike(s, b, f, half=False),
     T_HALF_SPIKE:  lambda s, b, f, v: _render_spike(s, b, f, half=True),
     T_SAW:         lambda s, b, f, v: _render_saw(s, b, f),
@@ -1222,9 +1543,13 @@ _DIRECT_RENDERERS = {
     T_BLACK_ORB:   lambda s, b, f, v: _render_black_orb(s, b, f),
     T_BLUE_ORB:    lambda s, b, f, v: _render_blue_orb(s, b, f),
     T_GREEN_ORB:   lambda s, b, f, v: _render_green_orb(s, b, f),
+    T_RED_ORB:     lambda s, b, f, v: _render_red_orb(s, b, f),
+    T_PINK_ORB:    lambda s, b, f, v: _render_pink_orb(s, b, f),
+    T_SPIDER_ORB:  lambda s, b, f, v: _render_spider_orb(s, b, f, v),
     T_PAD:         lambda s, b, f, v: _render_pad(s, b, f, blue=False),
     T_BLUE_PAD:    lambda s, b, f, v: _render_pad(s, b, f, blue=True),
-    T_GRAV:        lambda s, b, f, v: _render_grav(s, b, f),
+    T_GRAV_UP:     lambda s, b, f, v: _render_grav(s, b, f, "up"),
+    T_GRAV_DOWN:   lambda s, b, f, v: _render_grav(s, b, f, "down"),
     T_END:         lambda s, b, f, v: _render_end(s, b, f),
     T_START:       lambda s, b, f, v: _render_start(s, b, f),
     T_COIN:        lambda s, b, f, v: _render_coin(s, b, f),
@@ -1232,11 +1557,13 @@ _DIRECT_RENDERERS = {
     T_DECO_CRYSTAL: lambda s, b, f, v: _render_deco_crystal(s, b, f),
     T_DECO_PILLAR:  lambda s, b, f, v: _render_deco_pillar(s, b, f),
     T_DECO_GLOW:    lambda s, b, f, v: _render_deco_glow(s, b, f),
+    T_JUMP_PREDICTOR: lambda s, b, f, v: _render_jump_predictor(s, b, f),
+    T_BOT_CHECKPOINT: lambda s, b, f, v: _render_bot_checkpoint(s, b, f),
 }
 
 _TRIGGER_TYPES_SET = {
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
-    T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
+    T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_TIME_WARP, T_FOLLOW_TRIGGER,
 }
 
 _SIZE_PORTAL_TYPES = {T_MODE_MINI, T_MODE_BIG}
@@ -1311,13 +1638,31 @@ def _load_or_render(t, s, frame, variant=None):
     return img
 
 
-def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None, scale=1.0):
+def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
+             scale=1.0, scale_y=None):
     """Blit the pre-rendered sprite image for this object type.
 
-    ``scale`` enlarges (or shrinks) the sprite uniformly around the cell
-    center so scaled objects still occupy the same grid anchor.
+    ``scale`` enlarges (or shrinks) the sprite around the cell center
+    so scaled objects still occupy the same grid anchor. Accepts:
+      * a uniform scalar (legacy)
+      * a ``(sx, sy)`` tuple
+      * a ``scale_y`` paired with a numeric ``scale`` (= sx)
+
+    When ``sx != sy`` the sprite is stretched non-uniformly via
+    ``pygame.transform.scale``; the cached square sprite stays the
+    canonical render so other zoom levels still hit the cache.
     """
-    rot = normalize_rotation(rot)
+    # Visual rotation accepts any angle now (free rotation feature) —
+    # only the collision helpers (slab_rect, spike_hitboxes,
+    # pad_trigger_rect) round to the nearest 90°. For a clean blit at
+    # cardinal angles, snap exact-90° values to int via normalize.
+    try:
+        rot_visual = float(rot) % 360.0
+    except (TypeError, ValueError):
+        rot_visual = 0.0
+    if abs(rot_visual - round(rot_visual / 90.0) * 90.0) < 1e-3:
+        rot_visual = normalize_rotation(rot_visual)
+    rot = rot_visual
     variant = None
     if t == T_TELEPORT_ORB and meta is not None:
         # Pick a sprite variant per group_id so visually-distinct orb pairs
@@ -1331,13 +1676,35 @@ def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None, scale=1.0):
                 variant = int(gid)
             except (TypeError, ValueError):
                 variant = None
-    if scale != 1.0:
-        obj_s = max(1, int(round(s * scale)))
-        x = x + (s - obj_s) / 2.0
-        y = y + (s - obj_s) / 2.0
-        s = obj_s
+    elif t == T_SPIDER_ORB and meta is not None:
+        # Direction-aware spider sprite — "up" / "down" / "left" / "right"
+        # render distinct arrow pairs so the editor preview matches what
+        # the orb will actually do at play time.
+        d = str(meta.get("dir", "")).lower()
+        if d in ("up", "down", "left", "right"):
+            variant = d
+    sx, sy = _resolve_scale(scale, scale_y)
     frames = _frame_count(t)
     frame = int(pulse / (60 / frames)) % frames if frames > 1 else 0
+    if sx != 1.0 or sy != 1.0:
+        # Non-uniform path: render the sprite at the larger axis (so
+        # the smaller axis can shrink without rounding artefacts), then
+        # stretch to (sw, sh). One transform.scale per blit — caches
+        # don't help here because every sx/sy combination is unique.
+        img = _load_or_render(t, s, frame, variant)
+        sw = max(1, int(round(s * sx)))
+        sh = max(1, int(round(s * sy)))
+        if (sw, sh) != img.get_size():
+            img = pygame.transform.scale(img, (sw, sh))
+        x = x + (s - sw) / 2.0
+        y = y + (s - sh) / 2.0
+        if rot:
+            rotated = pygame.transform.rotate(img, -rot)
+            rr = rotated.get_rect(center=(x + sw / 2, y + sh / 2))
+            surf.blit(rotated, rr)
+        else:
+            surf.blit(img, (x, y))
+        return
     img = _load_or_render(t, s, frame, variant)
     if rot:
         rotated = pygame.transform.rotate(img, -rot)

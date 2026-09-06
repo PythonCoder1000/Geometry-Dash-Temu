@@ -12,7 +12,9 @@ import os
 from .constants import (
     CELL, PLAYER_SIZE,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
+    MODE_SWING,
     HAZARD_TYPES, SOLID_TYPES,
+    T_DASH_ORB,
 )
 
 
@@ -25,6 +27,7 @@ _LOOKAHEAD_BY_MODE = {
     MODE_BALL:   5,
     MODE_WAVE:   3,
     MODE_SPIDER: 4,
+    MODE_SWING:  4,
 }
 
 # Dead-zone thresholds (pixels) per mode — how far off the path we tolerate
@@ -36,6 +39,7 @@ _THRESHOLD_BY_MODE = {
     MODE_BALL:   10,
     MODE_WAVE:   0,
     MODE_SPIDER: 14,
+    MODE_SWING:  4,
 }
 
 
@@ -49,6 +53,13 @@ class BotController:
     objects : optional, the level's object list. If passed, the bot builds
         a hazard grid and will jump early over spikes/saws on the path.
     """
+
+    # Number of consecutive frames a flipped hold-decision must persist
+    # before the BotController actually toggles the held output. Tuned by
+    # eye: 1 = no hysteresis (per-frame flap), 3+ = visibly laggy. 2 is the
+    # sweet spot — kills PD-style jitter on near-zero error while still
+    # reacting in under ~33ms.
+    _HOLD_CONFIRM_FRAMES = 2
 
     def __init__(self, waypoints, objects=None):
         # Sort and de-duplicate consecutive points so get_target_y is O(log n)-ish.
@@ -67,8 +78,17 @@ class BotController:
         # Hazard/solid awareness built from the level geometry.
         self._hazard_cells = set()   # {(gx, gy)}
         self._solid_cells = set()
+        self._dash_orb_cells = set()
         if objects:
             self.bind_objects(objects)
+
+        # Hysteresis state for hold-dominant modes (wave / ship). Wave's
+        # PD controller flips held as soon as the blended error crosses
+        # zero, which in practice happens every 1-2 frames and causes
+        # the sprite to flap and stalls forward progress. Gate the flip
+        # behind `_HOLD_CONFIRM_FRAMES` identical requests.
+        self._hold_state = False
+        self._hold_flip_confirm = 0
 
     # ------------------------------------------------------------------
     # Level geometry
@@ -81,6 +101,15 @@ class BotController:
         }
         self._solid_cells = {
             (o["x"], o["y"]) for o in objects if o["t"] in SOLID_TYPES
+        }
+        # Dash-orb index: the path-following bot doesn't know to press
+        # for orbs (its press logic is mode/error driven), so it would
+        # otherwise sail straight through a dash orb without firing it.
+        # When the player straddles or is about to enter a dash-orb
+        # cell, the bot stamps a press so the orb activates and the
+        # subsequent dash_timer>0 branch holds for the full dash window.
+        self._dash_orb_cells = {
+            (o["x"], o["y"]) for o in objects if o["t"] == T_DASH_ORB
         }
 
     def _hazard_ahead(self, gx_from, gx_to, gy_center, y_tol=1,
@@ -107,6 +136,127 @@ class BotController:
 
     def _solid_at(self, gx, gy):
         return (gx, gy) in self._solid_cells
+
+    # ------------------------------------------------------------------
+    # Short-horizon safety lookahead
+    # ------------------------------------------------------------------
+
+    def _path_crosses_hazard(self, pcx, pcy, vx, vy, frames, y_tol=1):
+        """True if straight-line motion (``vx``, ``vy``) from ``(pcx, pcy)``
+        crosses a hazard cell within the next ``frames`` physics ticks.
+
+        Used by wave/ship decisions to verify that the PD controller's
+        chosen hold direction won't sail the player into a spike or saw
+        inside the control horizon. ``y_tol`` expands the column sample
+        by ±1 cell so a hazard that sits just off the exact pixel line
+        still trips the check — matches how hazards are read in
+        ``_hazard_ahead``.
+        """
+        if not self._hazard_cells or frames <= 0:
+            return False
+        for k in range(1, frames + 1):
+            fx = pcx + vx * k
+            fy = pcy + vy * k
+            gx = int(fx // CELL)
+            gy = int(fy // CELL)
+            for dy in range(-y_tol, y_tol + 1):
+                if (gx, gy + dy) in self._hazard_cells:
+                    return True
+        return False
+
+    def _mirror_path_crosses_hazard(self, player, held, pressed, frames):
+        """True if a live dual-mode mirror would fly through a hazard
+        under the chosen input over ``frames`` physics ticks.
+
+        Intentionally a first-order approximation: we compute a single
+        vy the mirror would take on THIS frame under the chosen input
+        (per its own mode) and extrapolate linearly. That's enough to
+        catch the common "ship thrusts up, mirror wave ploughs down
+        into a spike" class of cases without duplicating the full
+        physics loop. Uses move_speed and the player's own
+        PhysicsParams so per-level overrides stay honoured.
+        """
+        m = getattr(player, "mirror", None)
+        if m is None or not m.get("alive", False):
+            return False
+        if not self._hazard_cells or frames <= 0:
+            return False
+        mmode = m.get("mode", MODE_CUBE)
+        mgrav = m["grav"]
+        msize = int(m.get("size", PLAYER_SIZE))
+        speed = max(1.0, player.move_speed)
+        params = player.params
+        # Per-mode vy after one frame of physics under the chosen input.
+        # Matches _step_mirror's dispatch so lookahead drift stays small.
+        mvy = m["vy"]
+        if mmode == MODE_SHIP:
+            mvy = mvy + params.ship_gravity * mgrav
+            if held:
+                mvy -= params.ship_thrust * mgrav
+        elif mmode == MODE_WAVE:
+            direction = -1 if held else 1
+            mvy = speed * direction * mgrav
+        elif mmode == MODE_UFO:
+            mvy = mvy + params.gravity * mgrav
+            # UFO now uses cube physics on the ground (hold-to-jump)
+            # plus a mid-air flap on press. Mirror the same dispatch
+            # so lookahead trajectories stay accurate.
+            if held and m.get("on_ground", False):
+                mvy = params.jump_force * mgrav
+            elif pressed and not m.get("on_ground", False):
+                mvy = params.ufo_jump_force * mgrav
+        elif mmode == MODE_SWING:
+            # Press flips grav but preserves vy (the swing keeps its
+            # momentum across the flip — gravity then decelerates and
+            # reverses the existing velocity).
+            mvy = mvy + params.gravity * mgrav
+            if pressed:
+                mgrav = -mgrav
+        elif mmode == MODE_BALL:
+            mvy = mvy + params.gravity * mgrav
+            # A flip fires on pressed + on_ground; treat it as an
+            # instant vy = flip_force * (-grav) for the lookahead.
+            if pressed and m.get("on_ground", False):
+                mvy = params.ball_flip_force * (-mgrav)
+        elif mmode == MODE_SPIDER:
+            # Spider-teleport resolves instantly; a press cancels the
+            # fall so lookahead under "pressed" is meaningless. Skip
+            # the check rather than returning a false positive.
+            if pressed and m.get("on_ground", False):
+                return False
+            mvy = mvy + params.gravity * mgrav
+        else:  # cube
+            mvy = mvy + params.gravity * mgrav
+            if held and m.get("on_ground", False):
+                mvy = params.jump_force * mgrav
+        mcx = player.x + msize / 2
+        mcy = m["y"] + msize / 2
+        return self._path_crosses_hazard(mcx, mcy, speed, mvy, frames)
+
+    # ------------------------------------------------------------------
+    # Hold-state hysteresis
+    # ------------------------------------------------------------------
+
+    def _hysteretic_hold(self, want_hold):
+        """Return the current held state, advancing the confirm counter.
+
+        Calling this with a different ``want_hold`` than the latched
+        state increments the confirm counter. Only after
+        ``_HOLD_CONFIRM_FRAMES`` consecutive opposing requests does the
+        latched state flip. Calling with the same state resets the
+        counter to 0 (single-frame dissent is ignored). This mirrors
+        PDF 3.2 — the two-frame confirm is the cheapest way to kill PD
+        flap on error-crossings and matches how the physics loop reads
+        hold state (once per tick).
+        """
+        if want_hold == self._hold_state:
+            self._hold_flip_confirm = 0
+        else:
+            self._hold_flip_confirm += 1
+            if self._hold_flip_confirm >= self._HOLD_CONFIRM_FRAMES:
+                self._hold_state = want_hold
+                self._hold_flip_confirm = 0
+        return self._hold_state
 
     # ------------------------------------------------------------------
     # Path interpolation
@@ -145,9 +295,33 @@ class BotController:
 
     def compute_input(self, player):
         """Decide (held, pressed) for the current physics frame."""
+        # Dash orb in-flight: the directional dash ends immediately if
+        # the button is released (see Player.update's dash branch), so
+        # keep the input held for the full duration. No press edge —
+        # orbs only activate on the press that starts the dash, and a
+        # re-press mid-dash would just waste the input buffer.
+        if getattr(player, "dash_timer", 0) > 0:
+            self._record(True, False)
+            return True, False
         size = getattr(player, "size", PLAYER_SIZE)
         pcx = player.x + size / 2
         pcy = player.y + size / 2
+        # Dash-orb activation. Mode-specific PD never has a reason to
+        # press for a dash orb — it presses to clear hazards or to flip
+        # gravity, not to consume an orb on the ground line. Detect a
+        # dash orb the player overlaps right now (or in the next ~2
+        # cells of forward travel, which fits the input_buffer window)
+        # and stamp a press. Direction-agnostic: works for dash orbs
+        # facing any rotation since the orb's own ``r`` field drives
+        # the dash vector inside player.activate_dash_orb.
+        if self._dash_orb_cells:
+            gx_now = int(pcx // CELL)
+            gy_now = int(pcy // CELL)
+            for dgx in range(0, 3):
+                for dgy in (-1, 0, 1):
+                    if (gx_now + dgx, gy_now + dgy) in self._dash_orb_cells:
+                        self._record(True, True)
+                        return True, True
         mode = player.mode
         grav = player.grav
         speed = max(1.0, player.move_speed)
@@ -179,9 +353,44 @@ class BotController:
             # based on average displacement above/below the line.
             blended = 0.35 * error_now + 0.65 * error_future
             if grav == 1:
-                held = blended > 0
+                want_hold = blended > 0
             else:
-                held = blended < 0
+                want_hold = blended < 0
+
+            # Hazard lookahead (PDF 4.2). Wave's vy is locked to
+            # ±move_speed, so the PD decision — if followed blindly —
+            # can drive the dart straight into a spike when the drawn
+            # path skims a hazard column. Simulate the chosen direction
+            # forward `look` frames and flip it if the trajectory walks
+            # through a hazard cell. In dual, ALSO validate the mirror
+            # — the two bodies share one input, so the bot has to pick
+            # a direction that keeps both alive or the mirror dies
+            # "under independent control" (user-visible dual bug).
+            direction = -1 if want_hold else 1
+            future_vy = speed * direction * grav
+            main_bad = self._path_crosses_hazard(
+                pcx, pcy, speed, future_vy, look)
+            mirror_bad = self._mirror_path_crosses_hazard(
+                player, want_hold, False, look)
+            if main_bad or mirror_bad:
+                alt_hold = not want_hold
+                alt_vy = -future_vy
+                alt_main_bad = self._path_crosses_hazard(
+                    pcx, pcy, speed, alt_vy, look)
+                alt_mirror_bad = self._mirror_path_crosses_hazard(
+                    player, alt_hold, False, look)
+                # Only flip when the alternative is strictly safer —
+                # otherwise we'd flap back and forth between two dying
+                # choices. "Safer" = fewer bodies about to hit a hazard.
+                cost_now = int(main_bad) + int(mirror_bad)
+                cost_alt = int(alt_main_bad) + int(alt_mirror_bad)
+                if cost_alt < cost_now:
+                    want_hold = alt_hold
+
+            # Hysteresis (PDF 3.2): wave's error-cross flipping is the
+            # single biggest cause of input flap. Two-frame confirm
+            # damps it without adding perceptible lag.
+            held = self._hysteretic_hold(want_hold)
 
         elif mode == MODE_SHIP:
             # Predict where gravity drifts us without thrust.
@@ -191,20 +400,71 @@ class BotController:
             y_drift = pcy + (player.vy + v_drift) * 0.5 * look
             drift_err = y_drift - target_future
             if grav == 1:
-                held = drift_err > threshold
+                want_hold = drift_err > threshold
             else:
-                held = drift_err < -threshold
+                want_hold = drift_err < -threshold
+
+            # Hazard lookahead: approximate ship trajectory under the
+            # chosen thrust. If held, we add thrust (accelerate against
+            # gravity); otherwise we just drift. Verify neither hits a
+            # hazard in the short horizon. Trajectory approximated as a
+            # parabola sampled at `look` frames — precise enough for
+            # cell-granularity hazard checks. Dual validation mirrors
+            # the wave case — same tie-break rule keeps flap in check.
+            accel = player.params.ship_gravity * grav
+            if want_hold:
+                accel -= player.params.ship_thrust * grav
+            mean_vy = player.vy + accel * look * 0.5
+            main_bad = self._path_crosses_hazard(
+                pcx, pcy, speed, mean_vy, look)
+            mirror_bad = self._mirror_path_crosses_hazard(
+                player, want_hold, False, look)
+            if main_bad or mirror_bad:
+                alt_hold = not want_hold
+                alt_accel = player.params.ship_gravity * grav
+                if alt_hold:
+                    alt_accel -= player.params.ship_thrust * grav
+                alt_mean_vy = player.vy + alt_accel * look * 0.5
+                alt_main_bad = self._path_crosses_hazard(
+                    pcx, pcy, speed, alt_mean_vy, look)
+                alt_mirror_bad = self._mirror_path_crosses_hazard(
+                    player, alt_hold, False, look)
+                cost_now = int(main_bad) + int(mirror_bad)
+                cost_alt = int(alt_main_bad) + int(alt_mirror_bad)
+                if cost_alt < cost_now:
+                    want_hold = alt_hold
+
+            held = self._hysteretic_hold(want_hold)
 
         elif mode == MODE_UFO:
-            # UFO jumps on 'pressed'. Only press if we're below and not already
-            # moving up fast.  Hold piggybacks 'pressed' so orb buffering works.
+            # UFO now jumps cube-style on 'held + on_ground' and flaps
+            # on 'pressed' mid-air. Pick the right control depending
+            # on whether the player is currently grounded.
             need_up = (grav == 1 and error_future > threshold and
                        player.vy * grav > -4)
             need_down = (grav == -1 and error_future < -threshold and
                          player.vy * grav > -4)
             if need_up or need_down:
-                pressed = True
+                if player.on_ground:
+                    held = True
+                    pressed = True
+                else:
+                    pressed = True
+                    held = True
+
+        elif mode == MODE_SWING:
+            # Press flips gravity. Treat the path the same way as ball:
+            # if the path is far above (grav=1) or below (grav=-1) we
+            # need to flip. Press+hold so the buffer carries through to
+            # any orb on the same frame.
+            want_flip = False
+            if grav == 1 and error_future > threshold:
+                want_flip = True
+            elif grav == -1 and error_future < -threshold:
+                want_flip = True
+            if want_flip:
                 held = True
+                pressed = True
 
         elif mode == MODE_CUBE:
             # Gap jump: use future error. Reinforce with hazard-scan ahead.
@@ -272,6 +532,11 @@ class BotController:
         """Reset recording for a new attempt."""
         self.inputs = []
         self.frame = 0
+        # Clear hysteresis latch — a stale held state from the prior
+        # attempt would otherwise bleed into the first few frames of
+        # the next run and inject a phantom hold.
+        self._hold_state = False
+        self._hold_flip_confirm = 0
 
     def save_inputs(self, filepath="level_bot_inputs.txt"):
         """Save recorded inputs to a file for later playback."""

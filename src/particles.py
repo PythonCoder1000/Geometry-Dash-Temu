@@ -45,6 +45,39 @@ class Particles:
             col,
         ])
 
+    def dash_trail(self, x, y, vx, vy, col):
+        """Exhaust puff for a player riding a directional dash orb.
+
+        Particles stream OPPOSITE to the dash direction so the trail
+        reads as motion exhaust, not an explosion. Spawn radius and
+        particle size are larger than Particles.trail() so the effect
+        stays visible at dash speeds (the player is moving ~20 px/frame,
+        so short-lived particles would barely register).
+        """
+        mag = (vx * vx + vy * vy) ** 0.5
+        if mag < 0.1:
+            return
+        back_x = -vx / mag
+        back_y = -vy / mag
+        spd = max(2.5, mag * 0.35)
+        for _ in range(3):
+            spread = random.uniform(-0.7, 0.7)
+            # Rotate the back-vector by `spread` radians for a fan.
+            cs = math.cos(spread)
+            sn = math.sin(spread)
+            dx = back_x * cs - back_y * sn
+            dy = back_x * sn + back_y * cs
+            jitter = random.uniform(0.6, 1.1)
+            self.ps.append([
+                x + random.uniform(-3, 3),
+                y + random.uniform(-3, 3),
+                dx * spd * jitter,
+                dy * spd * jitter,
+                random.randint(16, 26),
+                random.randint(4, 7),
+                col,
+            ])
+
     def update(self):
         alive = []
         for p in self.ps:

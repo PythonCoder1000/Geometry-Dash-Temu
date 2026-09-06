@@ -7,18 +7,34 @@ from .constants import (
     C_GRID, C_WHITE, C_GRAY, C_PLAYER, C_BTN, C_DANGER, C_DARK,
     C_PUBLISH, C_SUCCESS,
     PALETTE_CATEGORIES, TYPE_NAMES, TYPE_TIPS, ALL_TYPES, BG_PRESETS,
-    T_BLOCK, T_SLAB, T_START, T_TELEPORT_ORB, T_CAMERA_TRIGGER,
-    T_BG_TRIGGER,
+    T_BLOCK, T_SLAB, T_SLOPE, T_START, T_TELEPORT_ORB, T_CAMERA_TRIGGER,
+    T_BG_TRIGGER, T_DASH_ORB, T_SPIDER_ORB,
     T_MOVE_TRIGGER, T_SAW, T_COLOR_TRIGGER, T_COIN, T_END, T_MODE_DUAL,
+    T_FOLLOW_TRIGGER,
+    T_TIME_WARP, T_JUMP_PREDICTOR, MODE_PORTAL_TYPES,
     DEFAULT_MOVE_CURVE, MOVE_CURVE_SPEED_MAX,
+    DASH_SPEED, DASH_TIME,
     SOLID_TYPES,
 )
 from .graphics import (
     draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
     lighter, darker, normalize_rotation,
     speaker_icon, icon_button, draw_end_wall,
-    spike_hitboxes, saw_hitbox, cell_rect, slab_rect,
+    spike_hitboxes, saw_hitbox, cell_rect, slab_rect, slope_polygon,
+    obj_scale,
 )
+
+
+def _obj_sx(o):
+    """Editor-side helper: returns ``sx`` from the object dict, falling
+    back to legacy ``scale`` when only the uniform field is set."""
+    return obj_scale(o)[0]
+
+
+def _obj_sy(o):
+    """Editor-side helper: returns ``sy`` from the object dict, falling
+    back to legacy ``scale`` when only the uniform field is set."""
+    return obj_scale(o)[1]
 from .levels import (
     save_level, load_level, load_level_full, update_meta,
     next_group_id, next_object_id, next_coin_id, get_group_id,
@@ -28,6 +44,96 @@ from .menus import (
     text_input_dialog, load_level_dialog, difficulty_picker, confirm_dialog,
     snippet_picker,
 )
+import pygame as _pg
+import sys as _sys
+import time as _time
+import traceback as _traceback
+
+
+def _confirm_exit(screen, clock, *, unsaved):
+    """Exit-confirm modal that survives accidental ESC mashing.
+
+    Unlike the generic ``confirm_dialog`` (which treats ESC as
+    "cancel" and immediately returns False), this dialog REQUIRES
+    a deliberate click on Leave or Stay. Mashing ESC just keeps
+    re-rendering the modal — a tap on the Mac close button or a
+    stray ESC key won't accidentally exit and lose the editor's
+    in-memory state (camera, selection, drag, ...).
+
+    ``unsaved`` toggles the subtitle so the warning is more
+    pointed when there's actual unsaved work.
+    """
+    from .graphics import txt as _txt
+    from .constants import WIDTH as _W, HEIGHT as _H, C_DARK as _CD
+    from .constants import C_DANGER as _CDG, C_SUCCESS as _CS
+    from .constants import C_WHITE as _CW, C_GRAY as _CG
+    box_w, box_h = 560, 220
+    box = _pg.Rect((_W - box_w) // 2, (_H - box_h) // 2,
+                   box_w, box_h)
+    r_leave = _pg.Rect(_W // 2 - 150, box.bottom - 60, 130, 40)
+    r_stay = _pg.Rect(_W // 2 + 20, box.bottom - 60, 130, 40)
+    guard = ClickGuard()
+    # Track ESC presses while the dialog is open. Three or more
+    # within ~1 second nudges the user with a louder "still here"
+    # hint so they realise they're mashing the wrong key.
+    esc_times = []
+    msg = ""
+    while True:
+        guard.tick()
+        mpos = _pg.mouse.get_pos()
+        for ev in _pg.event.get():
+            if ev.type == _pg.QUIT:
+                # Don't propagate — the user might be mashing
+                # close button by accident too. Treat as another
+                # ESC; the dialog stays up until they click.
+                continue
+            if ev.type == _pg.KEYDOWN and ev.key == _pg.K_ESCAPE:
+                now = _time.monotonic()
+                esc_times.append(now)
+                esc_times[:] = [t for t in esc_times if now - t < 1.5]
+                if len(esc_times) >= 3:
+                    msg = ("Hint: ESC won't exit — click "
+                           "Stay or Leave.")
+                continue
+            if ev.type == _pg.KEYDOWN and ev.key in (
+                    _pg.K_RETURN, _pg.K_KP_ENTER):
+                # Enter = Stay (the safer default).
+                return False
+            if (ev.type == _pg.MOUSEBUTTONDOWN and ev.button == 1
+                    and guard.consume_click(ev)):
+                if r_leave.collidepoint(ev.pos):
+                    return True
+                if r_stay.collidepoint(ev.pos):
+                    return False
+        # Render
+        ov = _pg.Surface((_W, _H), _pg.SRCALPHA)
+        ov.fill((0, 0, 0, 180))
+        screen.blit(ov, (0, 0))
+        _pg.draw.rect(screen, _CD, box, border_radius=10)
+        _pg.draw.rect(screen, (90, 110, 140), box, 2, border_radius=10)
+        _txt(screen, "Leave the editor?", box.centerx,
+             box.y + 30, 26, _CW, True, shadow=True)
+        sub = ("You have unsaved changes." if unsaved
+               else "Camera, selection, and drag state will reset.")
+        _txt(screen, sub, box.centerx, box.y + 70,
+             14, _CG, True)
+        _txt(screen, "Autosave is on disk for recovery.",
+             box.centerx, box.y + 92, 13, (170, 200, 220), True)
+        if msg:
+            _txt(screen, msg, box.centerx, box.y + 122, 13,
+                 (255, 200, 100), True, shadow=True)
+        for r, lab, col in (
+                (r_leave, "Leave", _CDG),
+                (r_stay, "Stay", _CS)):
+            base = col
+            c = base if not r.collidepoint(mpos) else (
+                min(255, base[0] + 30), min(255, base[1] + 30),
+                min(255, base[2] + 30))
+            _pg.draw.rect(screen, c, r, border_radius=6)
+            _txt(screen, lab, r.centerx, r.centery,
+                 16, _CW, True)
+        _pg.display.flip()
+        clock.tick(60)
 from .snippets import save_user_snippet, normalize_to_origin
 from . import music
 from . import sfx
@@ -77,11 +183,11 @@ def _export_level_png(objects, level_name, cell_px=10):
         sy = (o["y"] - min_y + pad) * cell_px
         meta_arg = (o if o["t"] in
                     (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER,
-                     T_MOVE_TRIGGER, T_COLOR_TRIGGER) else None)
+                     T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_SPIDER_ORB) else None)
         try:
             draw_obj(surf, o["t"], sx, sy, cell_px, 0,
                      o.get("r", 0), meta_arg,
-                     scale=float(o.get("scale", 1.0)))
+                     scale=obj_scale(o))
         except Exception:
             continue
     out_dir = _os_exp.path.join(_USER_DATA, "exports")
@@ -276,10 +382,40 @@ def _place_object(objects, gx, gy, selected_type, rotation, group_id_counter):
         objects[:] = [o for o in objects if o["t"] != T_START]
         objects.append({"t": T_START, "x": gx, "y": gy, "r": rotation})
         return
-    for o in objects:
-        if (o["x"] == gx and o["y"] == gy and o["t"] == selected_type
-                and o.get("r", 0) == rotation):
+    if selected_type == T_JUMP_PREDICTOR:
+        # Probe is single-instance and has no rotation semantics — dropping a
+        # second one just moves the existing probe to the new cell so the
+        # author can re-aim without a separate delete step. Mode/mini are
+        # re-derived from mode + size portals to the left of the new cell
+        # so the probe's defaults match what the real player would be
+        # running as in that section (speed is always derived at predict
+        # time, so no need to cache it on the object).
+        from .jump_predictor import detect_mode, detect_mini
+        existing = next((o for o in objects if o["t"] == T_JUMP_PREDICTOR), None)
+        if existing is not None:
+            existing["x"] = gx
+            existing["y"] = gy
+            existing["dx"] = 0
+            existing["dy"] = 0
+            existing["mode"] = detect_mode(objects, gx)
+            existing["mini"] = detect_mini(objects, gx)
             return
+        objects.append({
+            "t": T_JUMP_PREDICTOR, "x": gx, "y": gy, "r": 0,
+            "mode": detect_mode(objects, gx), "grav": 1,
+            "mini": detect_mini(objects, gx), "dx": 0, "dy": 0,
+        })
+        return
+    # Same-type stacking is now allowed: dropping a second spike,
+    # orb, or trigger on top of an identical one creates two
+    # co-located objects that interact independently. Orbs activate
+    # in the same click (the orb-activation loop already lets every
+    # orb at a single cell fire from one buffered press); triggers
+    # all fire when the player passes through; hazards just overlap
+    # visually. The previous identity-dedup check (skip placement
+    # if x/y/type/rotation match) blocked author intent like "stack
+    # two move triggers so one object jumps both ways" or "drop two
+    # red orbs in one cell so the bot's stack-click test fires".
     obj = {"t": selected_type, "x": gx, "y": gy, "r": rotation}
     if selected_type == T_TELEPORT_ORB:
         obj["group_id"] = group_id_counter
@@ -297,11 +433,30 @@ def _place_object(objects, gx, gy, selected_type, rotation, group_id_counter):
         obj["ty"] = gy
         obj["duration"] = 30
         obj["curve"] = [list(p) for p in DEFAULT_MOVE_CURVE]
+    elif selected_type == T_FOLLOW_TRIGGER:
+        # Author wires source_oid + target_oid in the edit panel
+        # (default 0 = unset until they pick objects). always_on
+        # defaults False so a freshly-placed trigger behaves like
+        # the rest — armed only when the player passes through.
+        # follow_player switches the link semantics: when ON, the
+        # source object tracks the player's position with the
+        # configured (offset_cx, offset_cy) cell offset.
+        obj["source_oid"] = 0
+        obj["target_oid"] = 0
+        obj["always_on"] = False
+        obj["follow_player"] = False
+        obj["offset_cx"] = 0
+        obj["offset_cy"] = 0
     elif selected_type == T_MODE_DUAL:
         # Default the mirror's spawn row to the portal's own row so the
         # editor immediately shows it as an editable parameter (use < / >
         # in the edit panel to move it up or down).
         obj["spawn_y"] = gy
+    elif selected_type == T_TIME_WARP:
+        # Authors can tweak this in the edit panel; default 1.0 means
+        # "no warp" so a freshly-placed trigger is a visual placeholder
+        # until the author sets a meaningful factor.
+        obj["factor"] = 1.0
     objects.append(obj)
 
 
@@ -435,7 +590,7 @@ def _link_click(objects, gx, gy, pending_link):
     clicked = object_at_cell(objects, gx, gy, prefer_non_start=True)
     if pending_link is None:
         if not clicked:
-            return None, "Click a teleport orb or move trigger"
+            return None, "Click a teleport orb, move trigger, or follow trigger"
         if clicked["t"] == T_TELEPORT_ORB:
             return ({"kind": "teleport", "first": clicked},
                     f"Select partner orb (group={get_group_id(clicked)})")
@@ -443,7 +598,15 @@ def _link_click(objects, gx, gy, pending_link):
             return ({"kind": "move", "trigger": clicked, "targets": [],
                      "phase": "select"},
                     "Click objects to move (Enter/Space when done)")
-        return None, "Click a teleport orb or move trigger"
+        if clicked["t"] == T_FOLLOW_TRIGGER:
+            if clicked.get("follow_player"):
+                return ({"kind": "follow", "trigger": clicked,
+                         "source": None},
+                        "Click the object that follows the player")
+            return ({"kind": "follow", "trigger": clicked,
+                     "source": None},
+                    "Click the SOURCE object (the one being followed)")
+        return None, "Click a teleport orb, move trigger, or follow trigger"
     kind = pending_link.get("kind")
     if kind == "teleport":
         first = pending_link["first"]
@@ -489,6 +652,34 @@ def _link_click(objects, gx, gy, pending_link):
             trig["tx"] = gx
             trig["ty"] = gy
             return None, f"Move trigger → ({gx},{gy}) for {len(oids)} object(s)"
+    if kind == "follow":
+        trig = pending_link["trigger"]
+        if not clicked or clicked is trig:
+            return pending_link, "Click an object (or click empty to cancel)"
+        # follow_player mode: only a source is needed (the runtime
+        # ignores target_oid in this mode — the source tracks the
+        # live player + (offset_cx, offset_cy)).
+        if trig.get("follow_player"):
+            src_oid = clicked.get("oid") or next_object_id(objects)
+            clicked["oid"] = src_oid
+            trig["source_oid"] = src_oid
+            return None, f"Follow player: oid {src_oid} tracks player"
+        if pending_link.get("source") is None:
+            # First object: source.
+            src_oid = clicked.get("oid") or next_object_id(objects)
+            clicked["oid"] = src_oid
+            pending_link["source"] = clicked
+            return (pending_link,
+                    "Now click the TARGET object (the one that follows)")
+        # Second object: target.
+        if clicked is pending_link["source"]:
+            return pending_link, "Source and target must differ"
+        tgt_oid = clicked.get("oid") or next_object_id(objects)
+        clicked["oid"] = tgt_oid
+        src_oid = pending_link["source"].get("oid", 0)
+        trig["source_oid"] = src_oid
+        trig["target_oid"] = tgt_oid
+        return None, f"Follow link: oid {src_oid} → {tgt_oid}"
     return None, "Group cleared"
 
 
@@ -566,31 +757,106 @@ def _panel_button_rects(obj, stack_len=1, multi_count=1, shared_type=None):
         rects["stack_up"] = pygame.Rect(PANEL_X + 20, y, 28, 26)
         rects["stack_down"] = pygame.Rect(PANEL_X + PANEL_W - 48, y, 28, 26)
         y += 34
-    rects["rot_prev"] = pygame.Rect(PANEL_X + 70, y + 6, 30, 30)
-    rects["rot_next"] = pygame.Rect(PANEL_X + 170, y + 6, 30, 30)
+    # Click-to-type value fields replace the old < value > arrow rows.
+    # The value rect spans the central area; clicking it pops a text
+    # dialog pre-filled with the current value. _set_param_from_text
+    # parses & clamps before writing back.
+    _val_x = PANEL_X + 60
+    _val_w = PANEL_W - 120
+    rects["rot_value"] = pygame.Rect(_val_x, y + 6, _val_w, 30)
     y += 44
-    rects["scale_prev"] = pygame.Rect(PANEL_X + 70, y + 6, 30, 30)
-    rects["scale_next"] = pygame.Rect(PANEL_X + 170, y + 6, 30, 30)
+    rects["scale_value"] = pygame.Rect(_val_x, y + 6, _val_w, 30)
     y += 44
     t = shared_type if is_multi else obj["t"]
     if t in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER,
-             T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_MODE_DUAL):
-        rects["param_prev"] = pygame.Rect(PANEL_X + 70, y + 6, 30, 30)
-        rects["param_next"] = pygame.Rect(PANEL_X + 170, y + 6, 30, 30)
+             T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_MODE_DUAL,
+             T_JUMP_PREDICTOR, T_DASH_ORB, T_SPIDER_ORB,
+             T_TIME_WARP):
+        rects["param_value"] = pygame.Rect(_val_x, y + 6, _val_w, 30)
         y += 44
+    if t == T_DASH_ORB:
+        # Second param row: dash duration. Speed uses the shared param
+        # value field above; duration gets its own click-to-type box so
+        # both are typeable without modifier keys.
+        rects["dash_dur_value"] = pygame.Rect(_val_x, y + 6, _val_w, 30)
+        y += 44
+    if not is_multi and t == T_JUMP_PREDICTOR:
+        # Per-probe toggles + two-row nudge. The fine row (±1 px) lets
+        # the author test pixel-exact frame windows; the coarse row
+        # (~1 frame of player motion at base speed) is for fast aim.
+        # Reset clears the accumulated offset back to the probe's cell.
+        rects["pred_grav_toggle"] = pygame.Rect(
+            PANEL_X + 20, y + 4, PANEL_W - 40, 28)
+        y += 34
+        rects["pred_mini_toggle"] = pygame.Rect(
+            PANEL_X + 20, y + 4, PANEL_W - 40, 28)
+        y += 34
+        # Per-probe "Show Hitbox" toggle. When ON, the probe overlay
+        # also draws the simulated player's per-substep hitbox samples
+        # so the author can see where the predicted arc actually
+        # collision-checks (denser at higher COLLISION_SUBSTEP_PX).
+        rects["pred_hitbox_toggle"] = pygame.Rect(
+            PANEL_X + 20, y + 4, PANEL_W - 40, 28)
+        y += 34
+        # Fine nudge: 5 buttons in a row — L,D,U,R,reset.
+        bw = 32
+        bh = 24
+        total_w = 5 * bw + 4 * 4
+        row_x = PANEL_X + (PANEL_W - total_w) // 2
+        for i, key in enumerate(("pred_fine_left", "pred_fine_down",
+                                 "pred_fine_up", "pred_fine_right",
+                                 "pred_nudge_reset")):
+            rects[key] = pygame.Rect(row_x + i * (bw + 4), y, bw, bh)
+        y += bh + 4
+        for i, key in enumerate(("pred_coarse_left", "pred_coarse_down",
+                                 "pred_coarse_up", "pred_coarse_right")):
+            rects[key] = pygame.Rect(row_x + i * (bw + 4), y, bw, bh)
+        y += bh + 10
     if not is_multi and t == T_TELEPORT_ORB:
         rects["dest_toggle"] = pygame.Rect(PANEL_X + 20, y + 4, PANEL_W - 40, 30)
         y += 38
-    # Invisible toggle for solid blocks/slabs: kept in play (collision
-    # still runs) but skipped by the renderer. Available in multi-select
-    # too so the author can bulk-hide a whole surface.
-    if t in SOLID_TYPES:
-        rects["invisible_toggle"] = pygame.Rect(
+    # Free-camera toggle for gamemode portals: when ON, play.py drives
+    # the camera vertically off the player while this mode is active
+    # instead of holding at the last camera-trigger row. Available in
+    # multi-select so an author can flip a whole batch of portals.
+    if t in MODE_PORTAL_TYPES:
+        rects["free_mode_toggle"] = pygame.Rect(
             PANEL_X + 20, y + 4, PANEL_W - 40, 30)
         y += 38
+    # Invisible toggle for any object type: behavior still runs (the
+    # type-keyed handlers in player.py read by ``t``, not visibility)
+    # but the sprite is skipped at render. Available in multi-select
+    # too so the author can bulk-hide a whole surface.
+    rects["invisible_toggle"] = pygame.Rect(
+        PANEL_X + 20, y + 4, PANEL_W - 40, 30)
+    y += 38
     if not is_multi and t == T_MOVE_TRIGGER:
         rects["curve"] = pygame.Rect(PANEL_X + 15, y + 14, PANEL_W - 30, CURVE_H)
         y += CURVE_H + 34
+    # Follow trigger: always_on toggle. ON = link arms at level
+    # start, OFF = link arms when the player passes through. Multi-
+    # select supported so the author can flip a batch in one click.
+    if t == T_FOLLOW_TRIGGER:
+        rects["always_on_toggle"] = pygame.Rect(
+            PANEL_X + 20, y + 4, PANEL_W - 40, 30)
+        y += 38
+        # Source-follows-player toggle. ON: the source object's
+        # position tracks the live player + (offset_cx, offset_cy)
+        # cells. target_oid is ignored in this mode.
+        rects["follow_player_toggle"] = pygame.Rect(
+            PANEL_X + 20, y + 4, PANEL_W - 40, 30)
+        y += 38
+        # Offset stepper: ±1 cell on each axis, with the current
+        # (cx, cy) shown between the buttons.
+        bw = (PANEL_W - 60) // 4
+        rects["off_x_minus"] = pygame.Rect(PANEL_X + 20, y, bw, 26)
+        rects["off_x_plus"] = pygame.Rect(
+            PANEL_X + 20 + bw, y, bw, 26)
+        rects["off_y_minus"] = pygame.Rect(
+            PANEL_X + 20 + bw * 2 + 20, y, bw, 26)
+        rects["off_y_plus"] = pygame.Rect(
+            PANEL_X + 20 + bw * 3 + 20, y, bw, 26)
+        y += 32
     rects["delete"] = pygame.Rect(PANEL_X + 20, y + 4, PANEL_W - 40, 34)
     y += 42
     rects["close"] = pygame.Rect(PANEL_X + 20, y, PANEL_W - 40, 30)
@@ -625,8 +891,25 @@ def _param_info(obj):
         return "Color Index", str(obj.get("col_idx", 0))
     if t == T_MOVE_TRIGGER:
         return "Duration", f"{obj.get('duration', 30)}f"
+    if t == T_FOLLOW_TRIGGER:
+        s = obj.get("source_oid") or 0
+        if obj.get("follow_player"):
+            return "Link", (f"{s} → player" if s else "Use N to set")
+        tgt = obj.get("target_oid") or 0
+        return "Link", (f"{s} → {tgt}" if s and tgt else "Use N to set")
     if t == T_MODE_DUAL:
         return "Spawn Row", str(obj.get("spawn_y", obj["y"]))
+    if t == T_TIME_WARP:
+        return "Factor", f"{float(obj.get('factor', 1.0)):.2f}x"
+    if t == T_JUMP_PREDICTOR:
+        return "Sim Mode", str(obj.get("mode", "cube")).title()
+    if t == T_DASH_ORB:
+        return "Dash Speed", f"{float(obj.get('dash_speed', DASH_SPEED)):.1f}"
+    if t == T_SPIDER_ORB:
+        # Direction picker: auto (against-gravity, the GD-default) or
+        # an explicit cardinal. Shown in the panel so the author can
+        # set "up" / "down" without rotating the orb.
+        return "Direction", str(obj.get("dir", "auto")).title()
     return None, None
 
 
@@ -646,6 +929,189 @@ def _adjust_param(obj, delta):
         obj["duration"] = max(1, min(600, obj.get("duration", 30) + delta * 5))
     elif t == T_MODE_DUAL:
         obj["spawn_y"] = obj.get("spawn_y", obj["y"]) + delta
+    elif t == T_TIME_WARP:
+        # 0.1× steps — small enough that the author can dial in
+        # subtle slow-mo / fast-fwd, big enough that cycling from 0
+        # to 10 takes ~100 clicks (which is fine since the click-and-
+        # type box covers that case for big jumps). 0.0 = freeze
+        # (game halts), 10.0 = 10x fast-forward.
+        cur = float(obj.get("factor", 1.0))
+        obj["factor"] = max(0.0, min(10.0, round(cur + delta * 0.1, 3)))
+    elif t == T_JUMP_PREDICTOR:
+        from .jump_predictor import next_mode
+        obj["mode"] = next_mode(obj.get("mode", "cube"), delta)
+    elif t == T_DASH_ORB:
+        cur = float(obj.get("dash_speed", DASH_SPEED))
+        obj["dash_speed"] = max(1.0, min(60.0, round(cur + delta, 2)))
+
+
+def _strip_units(s):
+    """Drop trailing unit characters (°, x, f, %, blanks) so the user can
+    type "90°" or "1.5x" or "30f" naturally and it parses cleanly."""
+    out = (s or "").strip().lower()
+    for suf in ("°", "deg", "degrees", "x", "f", "frames", "%", " "):
+        while out.endswith(suf):
+            out = out[: -len(suf)].rstrip()
+    return out
+
+
+def _set_param_from_text(obj, raw_text):
+    """Apply a free-form user-typed value to the object's primary param.
+
+    Replaces the old < > arrow nudge for type-specific params. Tolerates
+    common formatting (units, mode names, signed ints) and clamps to
+    each type's editor-side bounds before writing back. Silent on
+    unparseable input — the caller keeps the prior value.
+    """
+    t = obj["t"]
+    s = _strip_units(raw_text)
+    if not s:
+        return
+    try:
+        if t == T_TELEPORT_ORB:
+            obj["group_id"] = max(1, int(s))
+            obj.pop("link", None)
+        elif t == T_CAMERA_TRIGGER:
+            obj["cy"] = int(s)
+        elif t == T_BG_TRIGGER:
+            obj["bg"] = max(0, int(s)) % len(BG_PRESETS)
+        elif t == T_COLOR_TRIGGER:
+            obj["col_idx"] = max(0, int(s))
+        elif t == T_MOVE_TRIGGER:
+            obj["duration"] = max(1, min(600, int(s)))
+        elif t == T_MODE_DUAL:
+            obj["spawn_y"] = int(s)
+        elif t == T_TIME_WARP:
+            obj["factor"] = max(0.0, min(10.0, round(float(s), 3)))
+        elif t == T_JUMP_PREDICTOR:
+            # Match by case-insensitive prefix so "ship", "Ship", "SHIP"
+            # all work. Stays a string field — the predictor consumes it.
+            valid = ("cube", "ship", "ball", "wave", "ufo", "spider")
+            for v in valid:
+                if s.startswith(v):
+                    obj["mode"] = v
+                    break
+        elif t == T_DASH_ORB:
+            obj["dash_speed"] = max(1.0, min(60.0, round(float(s), 2)))
+        elif t == T_SPIDER_ORB:
+            # Accept either a cardinal (up/down/left/right) or auto.
+            # First-letter match keeps "Up" / "DOWN" etc. typing-tolerant.
+            valid = ("auto", "up", "down", "left", "right")
+            for v in valid:
+                if s.startswith(v):
+                    obj["dir"] = v
+                    break
+    except (TypeError, ValueError):
+        pass
+
+
+def _set_rotation_from_text(obj, raw_text):
+    """Set object rotation to any number of degrees.
+
+    Accepts free-form floats; the collision helpers snap to 90° when
+    they need a cardinal-only rect, but the visual layer renders at
+    the exact angle. Negatives wrap into [0, 360).
+    """
+    s = _strip_units(raw_text)
+    if not s:
+        return
+    try:
+        v = float(s)
+    except (TypeError, ValueError):
+        return
+    v = v % 360.0
+    iv = int(round(v))
+    obj["r"] = iv % 360 if abs(v - iv) < 1e-6 else v
+
+
+def _set_scale_from_text(obj, raw_text):
+    """Apply a typed scale. Accepts:
+
+      * a single number (uniform): ``1.5``, ``0.5x``, ``200%``
+      * separate axes: ``1.5,0.75`` or ``1.5x0.75``
+        — first number = sx, second = sy
+
+    Clamped to the renderable range [0.25, 4.0] per axis. When sx == sy
+    we collapse to the legacy ``scale`` field (compact); otherwise both
+    ``sx`` and ``sy`` get written and ``scale`` is dropped to keep the
+    object dict's source of truth unambiguous.
+    """
+    s = (raw_text or "").strip().lower()
+    if not s:
+        return
+    # Split on common separators so the user can type "1.5,0.75",
+    # "1.5x0.75", "1.5 0.75", etc. Anything past the first two parts is
+    # ignored — mirrors how the rotation typer handles trailing junk.
+    parts = (s.replace("x", " ").replace(",", " ")
+             .replace("/", " ").split())
+    parts = [p for p in parts if p]
+    if not parts:
+        return
+
+    def _parse(token):
+        pct = token.endswith("%")
+        token = _strip_units(token)
+        try:
+            v = float(token)
+        except (TypeError, ValueError):
+            return None
+        if pct:
+            v /= 100.0
+        return max(0.25, min(4.0, round(v, 3)))
+
+    sx = _parse(parts[0])
+    sy = _parse(parts[1]) if len(parts) >= 2 else sx
+    if sx is None or sy is None:
+        return
+    if abs(sx - sy) < 1e-6:
+        obj["scale"] = sx
+        obj.pop("sx", None)
+        obj.pop("sy", None)
+    else:
+        obj["sx"] = sx
+        obj["sy"] = sy
+        obj.pop("scale", None)
+
+
+def _set_dash_dur_from_text(obj, raw_text):
+    """Dash duration (frames) — typed value clamped to [1, 240] so the
+    editor can't author an instant or game-stalling dash."""
+    s = _strip_units(raw_text)
+    if not s:
+        return
+    try:
+        v = int(round(float(s)))
+    except (TypeError, ValueError):
+        return
+    obj["dash_dur"] = max(1, min(240, v))
+
+
+def _current_param_text(obj):
+    """The string the click-to-type dialog should pre-fill for ``obj``'s
+    primary param. Mirrors _param_info but returns the bare value (no
+    units / "Mixed" suffix) so re-typing stays natural."""
+    t = obj["t"]
+    if t == T_TELEPORT_ORB:
+        return str(get_group_id(obj))
+    if t == T_CAMERA_TRIGGER:
+        return str(obj.get("cy", obj["y"]))
+    if t == T_BG_TRIGGER:
+        return str(obj.get("bg", 0))
+    if t == T_COLOR_TRIGGER:
+        return str(obj.get("col_idx", 0))
+    if t == T_MOVE_TRIGGER:
+        return str(obj.get("duration", 30))
+    if t == T_MODE_DUAL:
+        return str(obj.get("spawn_y", obj["y"]))
+    if t == T_TIME_WARP:
+        return f"{float(obj.get('factor', 1.0)):.2f}"
+    if t == T_JUMP_PREDICTOR:
+        return str(obj.get("mode", "cube"))
+    if t == T_DASH_ORB:
+        return f"{float(obj.get('dash_speed', DASH_SPEED)):.1f}"
+    if t == T_SPIDER_ORB:
+        return str(obj.get("dir", "auto"))
+    return ""
 
 
 def _draw_edit_panel(screen, target, mpos, pulse, stack_info=(0, 1)):
@@ -682,10 +1148,10 @@ def _draw_edit_panel(screen, target, mpos, pulse, stack_info=(0, 1)):
     else:
         preview_obj = obj if shared_t in (
             T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER,
-            T_MOVE_TRIGGER, T_COLOR_TRIGGER) else None
+            T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_SPIDER_ORB) else None
         draw_obj(screen, shared_t, pv.x + 8, pv.y + 8, 48, pulse,
                  obj.get("r", 0), preview_obj,
-                 scale=float(obj.get("scale", 1.0)))
+                 scale=obj_scale(obj))
     if is_multi:
         type_name = (TYPE_NAMES.get(shared_t, shared_t)
                      if shared_t else "Mixed types")
@@ -715,46 +1181,56 @@ def _draw_edit_panel(screen, target, mpos, pulse, stack_info=(0, 1)):
             c = lighter(C_BTN, 30) if r.collidepoint(mpos) else C_BTN
             pygame.draw.rect(screen, c, r, border_radius=4)
             txt(screen, label, r.centerx, r.centery, 14, C_WHITE, True)
-    rp = rects["rot_prev"]
-    txt(screen, "Rotation", PANEL_X + 20, rp.y - 16, 14, C_GRAY)
-    for key, label in [("rot_prev", "<"), ("rot_next", ">")]:
-        r = rects[key]
-        c = lighter(C_BTN, 30) if r.collidepoint(mpos) else C_BTN
-        pygame.draw.rect(screen, c, r, border_radius=4)
-        txt(screen, label, r.centerx, r.centery, 18, C_WHITE, True)
-    rot_vals = {int(o.get("r", 0)) for o in objs}
-    rot_disp = "Mixed" if len(rot_vals) > 1 else f"{next(iter(rot_vals))}°"
-    txt(screen, rot_disp, PANEL_X + PANEL_W // 2, rp.centery,
-        16, C_WHITE, True)
-    sp = rects["scale_prev"]
-    txt(screen, "Scale", PANEL_X + 20, sp.y - 16, 14, C_GRAY)
-    for key, label in [("scale_prev", "<"), ("scale_next", ">")]:
-        r = rects[key]
-        c = lighter(C_BTN, 30) if r.collidepoint(mpos) else C_BTN
-        pygame.draw.rect(screen, c, r, border_radius=4)
-        txt(screen, label, r.centerx, r.centery, 18, C_WHITE, True)
-    scale_vals = {round(float(o.get("scale", 1.0)), 4) for o in objs}
-    scale_disp = ("Mixed" if len(scale_vals) > 1
-                  else f"{next(iter(scale_vals)):.2f}x")
-    txt(screen, scale_disp, PANEL_X + PANEL_W // 2, sp.centery,
-        16, C_WHITE, True)
-    if "param_prev" in rects:
+    def _draw_value_box(rect, label, value_str):
+        """Click-to-type value field. Replaces the old < value > arrow
+        rows — clicking the box pops a text dialog pre-filled with the
+        current value, parsed and clamped via _set_param_from_text on
+        submit."""
+        txt(screen, label, PANEL_X + 20, rect.y - 16, 14, C_GRAY)
+        c = lighter(C_BTN, 30) if rect.collidepoint(mpos) else C_BTN
+        pygame.draw.rect(screen, c, rect, border_radius=4)
+        pygame.draw.rect(screen, lighter(c, 40), rect, 1, border_radius=4)
+        txt(screen, value_str, rect.centerx, rect.centery, 16,
+            C_WHITE, True)
+
+    rv = rects["rot_value"]
+    # Rotation is now free-form (any degrees). Display ints as bare
+    # numbers and floats with one decimal so the panel reads cleanly
+    # whether the author rotated by 90° steps or typed a free angle.
+    rot_vals = {round(float(o.get("r", 0)), 4) for o in objs}
+    if len(rot_vals) > 1:
+        rot_disp = "Mixed"
+    else:
+        v = next(iter(rot_vals))
+        rot_disp = f"{int(v)}°" if abs(v - round(v)) < 1e-3 else f"{v:.1f}°"
+    _draw_value_box(rv, "Rotation", rot_disp)
+    sv = rects["scale_value"]
+    # Per-axis (sx, sy) tuples deduped — two objects sharing both axes
+    # collapse to a single entry, so the "Mixed" badge only fires when
+    # selections genuinely differ along either axis.
+    scale_vals = {(round(_obj_sx(o), 4), round(_obj_sy(o), 4)) for o in objs}
+    if len(scale_vals) > 1:
+        scale_disp = "Mixed"
+    else:
+        sx_v, sy_v = next(iter(scale_vals))
+        if abs(sx_v - sy_v) < 1e-6:
+            scale_disp = f"{sx_v:.2f}x"
+        else:
+            scale_disp = f"{sx_v:.2f}×{sy_v:.2f}"
+    _draw_value_box(sv, "Scale", scale_disp)
+    if "param_value" in rects:
         param_label, param_value = _param_info(obj)
         if is_multi:
-            # Show "Mixed" when the per-object value differs.
             vals = {_param_info(o)[1] for o in objs}
             if len(vals) > 1:
                 param_value = "Mixed"
         if param_label is not None:
-            pp = rects["param_prev"]
-            txt(screen, param_label, PANEL_X + 20, pp.y - 16, 14, C_GRAY)
-            for key, label in [("param_prev", "<"), ("param_next", ">")]:
-                r = rects[key]
-                c = lighter(C_BTN, 30) if r.collidepoint(mpos) else C_BTN
-                pygame.draw.rect(screen, c, r, border_radius=4)
-                txt(screen, label, r.centerx, r.centery, 18, C_WHITE, True)
-            txt(screen, param_value,
-                PANEL_X + PANEL_W // 2, pp.centery, 16, C_WHITE, True)
+            _draw_value_box(rects["param_value"], param_label, param_value)
+    if "dash_dur_value" in rects:
+        dur_vals = {int(o.get("dash_dur", DASH_TIME)) for o in objs}
+        dur_disp = ("Mixed" if len(dur_vals) > 1
+                    else f"{next(iter(dur_vals))}f")
+        _draw_value_box(rects["dash_dur_value"], "Dash Duration", dur_disp)
     if "dest_toggle" in rects:
         dr = rects["dest_toggle"]
         is_dest = bool(obj.get("dest"))
@@ -780,6 +1256,134 @@ def _draw_edit_panel(screen, target, mpos, pulse, stack_info=(0, 1)):
         else:
             label = "Invisible: ON" if is_inv else "Invisible: OFF"
         txt(screen, label, ir.centerx, ir.centery, 13, C_WHITE, True)
+    if "free_mode_toggle" in rects:
+        fr = rects["free_mode_toggle"]
+        fm_vals = {bool(o.get("free_mode")) for o in objs}
+        if len(fm_vals) > 1:
+            fm_mixed = True
+            is_fm = False
+        else:
+            fm_mixed = False
+            is_fm = next(iter(fm_vals))
+        base = (60, 130, 170) if is_fm else (50, 50, 70)
+        c = lighter(base, 30) if fr.collidepoint(mpos) else base
+        pygame.draw.rect(screen, c, fr, border_radius=5)
+        if fm_mixed:
+            label = "Free Cam: Mixed"
+        else:
+            label = "Free Cam: ON" if is_fm else "Free Cam: OFF"
+        txt(screen, label, fr.centerx, fr.centery, 13, C_WHITE, True)
+    if "always_on_toggle" in rects:
+        ar = rects["always_on_toggle"]
+        ao_vals = {bool(o.get("always_on")) for o in objs}
+        if len(ao_vals) > 1:
+            ao_mixed = True
+            is_ao = False
+        else:
+            ao_mixed = False
+            is_ao = next(iter(ao_vals))
+        base = (60, 160, 130) if is_ao else (50, 50, 70)
+        c = lighter(base, 30) if ar.collidepoint(mpos) else base
+        pygame.draw.rect(screen, c, ar, border_radius=5)
+        if ao_mixed:
+            label = "Always On: Mixed"
+        else:
+            label = "Always On: ON" if is_ao else "Always On: OFF"
+        txt(screen, label, ar.centerx, ar.centery, 13, C_WHITE, True)
+    if "follow_player_toggle" in rects:
+        fpr = rects["follow_player_toggle"]
+        fp_vals = {bool(o.get("follow_player")) for o in objs}
+        if len(fp_vals) > 1:
+            fp_mixed = True
+            is_fp = False
+        else:
+            fp_mixed = False
+            is_fp = next(iter(fp_vals))
+        base = (170, 110, 60) if is_fp else (50, 50, 70)
+        c = lighter(base, 30) if fpr.collidepoint(mpos) else base
+        pygame.draw.rect(screen, c, fpr, border_radius=5)
+        if fp_mixed:
+            label = "Follow Player: Mixed"
+        else:
+            label = "Follow Player: ON" if is_fp else "Follow Player: OFF"
+        txt(screen, label, fpr.centerx, fpr.centery, 13, C_WHITE, True)
+    if "off_x_minus" in rects:
+        # Offset stepper for follow_player mode. Layout:
+        # [ X − ][ X + ]  cx   [ Y − ][ Y + ]  cy
+        cx_vals = {int(o.get("offset_cx", 0)) for o in objs}
+        cy_vals = {int(o.get("offset_cy", 0)) for o in objs}
+        cx_label = (str(next(iter(cx_vals))) if len(cx_vals) == 1
+                    else "·")
+        cy_label = (str(next(iter(cy_vals))) if len(cy_vals) == 1
+                    else "·")
+        for key, lab in (("off_x_minus", "X−"), ("off_x_plus", "X+"),
+                         ("off_y_minus", "Y−"), ("off_y_plus", "Y+")):
+            r = rects[key]
+            base = (60, 80, 110)
+            c = lighter(base, 30) if r.collidepoint(mpos) else base
+            pygame.draw.rect(screen, c, r, border_radius=4)
+            txt(screen, lab, r.centerx, r.centery, 12, C_WHITE, True)
+        txt(screen, f"cx={cx_label}",
+            rects["off_x_plus"].right + 6, rects["off_x_plus"].centery,
+            11, (200, 220, 240))
+        txt(screen, f"cy={cy_label}",
+            rects["off_y_plus"].right + 6, rects["off_y_plus"].centery,
+            11, (200, 220, 240))
+    if "pred_grav_toggle" in rects:
+        gr = rects["pred_grav_toggle"]
+        grav_down = int(obj.get("grav", 1)) >= 0
+        base = (60, 120, 180) if grav_down else (180, 90, 140)
+        c = lighter(base, 30) if gr.collidepoint(mpos) else base
+        pygame.draw.rect(screen, c, gr, border_radius=5)
+        lbl = "Gravity: DOWN" if grav_down else "Gravity: UP"
+        txt(screen, lbl, gr.centerx, gr.centery, 13, C_WHITE, True)
+    if "pred_mini_toggle" in rects:
+        mr = rects["pred_mini_toggle"]
+        is_mini = bool(obj.get("mini"))
+        base = (120, 80, 170) if is_mini else (50, 50, 70)
+        c = lighter(base, 30) if mr.collidepoint(mpos) else base
+        pygame.draw.rect(screen, c, mr, border_radius=5)
+        lbl = "Size: MINI" if is_mini else "Size: NORMAL"
+        txt(screen, lbl, mr.centerx, mr.centery, 13, C_WHITE, True)
+    if "pred_hitbox_toggle" in rects:
+        hr = rects["pred_hitbox_toggle"]
+        show_hb = bool(obj.get("show_hitbox"))
+        base = (60, 130, 170) if show_hb else (50, 50, 70)
+        c = lighter(base, 30) if hr.collidepoint(mpos) else base
+        pygame.draw.rect(screen, c, hr, border_radius=5)
+        lbl = "Show Hitbox: ON" if show_hb else "Show Hitbox: OFF"
+        txt(screen, lbl, hr.centerx, hr.centery, 13, C_WHITE, True)
+    if "pred_nudge_reset" in rects:
+        # Two-row nudge. Top row: ±1 px (fine, for frame-perfect probing)
+        # + reset. Bottom row: ±1 frame (coarse) for fast re-aim. dx/dy
+        # read above so each click gives immediate quantitative feedback.
+        dx_px = int(obj.get("dx", 0))
+        dy_px = int(obj.get("dy", 0))
+        fine_top = rects["pred_fine_left"]
+        txt(screen, f"Nudge ({dx_px:+d},{dy_px:+d})  px",
+            PANEL_X + 20, fine_top.y - 14, 12, C_GRAY)
+        fine_specs = [
+            ("pred_fine_left", "←1"), ("pred_fine_down", "↓1"),
+            ("pred_fine_up", "↑1"), ("pred_fine_right", "→1"),
+            ("pred_nudge_reset", "⌀"),
+        ]
+        coarse_specs = [
+            ("pred_coarse_left", "←5"), ("pred_coarse_down", "↓5"),
+            ("pred_coarse_up", "↑5"), ("pred_coarse_right", "→5"),
+        ]
+        for key, label in fine_specs + coarse_specs:
+            r = rects[key]
+            is_reset = (key == "pred_nudge_reset")
+            is_coarse = key.startswith("pred_coarse")
+            if is_reset:
+                base = (80, 60, 40)
+            elif is_coarse:
+                base = darker(C_BTN, 30)
+            else:
+                base = C_BTN
+            c = lighter(base, 40) if r.collidepoint(mpos) else base
+            pygame.draw.rect(screen, c, r, border_radius=4)
+            txt(screen, label, r.centerx, r.centery, 12, C_WHITE, True)
     if obj["t"] == T_MOVE_TRIGGER and "curve" in rects:
         cr = rects["curve"]
         txt(screen, "Speed curve (click=add, drag=move, R-click=del)",
@@ -894,6 +1498,95 @@ def _draw_palette(screen, mpos, active_cat, selected_type, tool, pulse,
 
 
 def run_editor(screen, clock, preload_filename=None):
+    """Editor entry point. Wraps the real implementation in a global
+    try/except so a crash inside the editor doesn't kill the
+    process — the autosave timer has been writing to disk every
+    few seconds, so the user's work is on disk; we just need to
+    notify them and return cleanly so they can recover next time.
+    Without this wrapper, an uncaught exception propagated all the
+    way to ``main()`` and the OS terminated the app instantly,
+    losing the unsaved seconds-since-last-autosave."""
+    try:
+        return _run_editor_impl(screen, clock, preload_filename)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        _traceback.print_exc()
+        _show_error_modal(screen, clock, exc, where="editor")
+        # Always return to menu cleanly — the caller (main()) treats
+        # editor exit as normal flow and won't re-enter without a
+        # fresh user click.
+        try:
+            music.stop()
+        except Exception:
+            pass
+        return
+
+
+def _show_error_modal(screen, clock, exc, *, where="editor"):
+    """Emergency error-recovery dialog. Caller has already printed
+    the traceback to stdout; this is the visual heads-up so the user
+    knows something went wrong AND that their autosave is on disk.
+
+    Modal is dismissable with Enter or a click — ESC and the Mac
+    close button don't dismiss it (they're how the user got here on
+    accident in the first place; we want a deliberate
+    acknowledgement)."""
+    from .graphics import txt as _txt
+    from .constants import (WIDTH as _W, HEIGHT as _H,
+                            C_DARK as _CD, C_WHITE as _CW,
+                            C_GRAY as _CG, C_BTN as _CB)
+    box_w, box_h = 640, 280
+    box = _pg.Rect((_W - box_w) // 2, (_H - box_h) // 2,
+                   box_w, box_h)
+    r_ok = _pg.Rect(_W // 2 - 80, box.bottom - 60, 160, 40)
+    guard = ClickGuard()
+    err_type = type(exc).__name__
+    err_msg = str(exc)
+    if len(err_msg) > 70:
+        err_msg = err_msg[:67] + "..."
+    while True:
+        guard.tick()
+        mpos = _pg.mouse.get_pos()
+        for ev in _pg.event.get():
+            if ev.type == _pg.QUIT:
+                continue
+            if ev.type == _pg.KEYDOWN and ev.key in (
+                    _pg.K_RETURN, _pg.K_KP_ENTER, _pg.K_SPACE):
+                return
+            if (ev.type == _pg.MOUSEBUTTONDOWN and ev.button == 1
+                    and guard.consume_click(ev)
+                    and r_ok.collidepoint(ev.pos)):
+                return
+        ov = _pg.Surface((_W, _H), _pg.SRCALPHA)
+        ov.fill((0, 0, 0, 200))
+        screen.blit(ov, (0, 0))
+        _pg.draw.rect(screen, _CD, box, border_radius=10)
+        _pg.draw.rect(screen, (240, 90, 90), box, 2,
+                      border_radius=10)
+        _txt(screen, "An error occurred", box.centerx,
+             box.y + 32, 26, (255, 200, 100), True, shadow=True)
+        _txt(screen, f"{err_type}: {err_msg}", box.centerx,
+             box.y + 78, 14, _CW, True)
+        _txt(screen, "Full traceback printed to the console.",
+             box.centerx, box.y + 110, 13, _CG, True)
+        _txt(screen,
+             f"The {where}'s autosave is on disk — your work "
+             "is recoverable.",
+             box.centerx, box.y + 134, 13, (170, 220, 200), True)
+        _txt(screen, "Re-open the editor to load the autosave.",
+             box.centerx, box.y + 156, 12, (140, 180, 220), True)
+        base = _CB
+        c = (min(255, base[0] + 30), min(255, base[1] + 30),
+             min(255, base[2] + 30)) if r_ok.collidepoint(mpos) else base
+        _pg.draw.rect(screen, c, r_ok, border_radius=6)
+        _txt(screen, "OK (Return to menu)", r_ok.centerx,
+             r_ok.centery, 15, _CW, True)
+        _pg.display.flip()
+        clock.tick(60)
+
+
+def _run_editor_impl(screen, clock, preload_filename=None):
     # The editor is a "quiet" screen — menu music doesn't belong here and
     # playtest / bot replay restart music on their own. Stop on entry so
     # the menu track doesn't keep looping under the editor UI.
@@ -988,6 +1681,13 @@ def run_editor(screen, clock, preload_filename=None):
     current_group_id = 1
     selected_objs = []
     last_edit_cell = None
+    # Last cell the brush stamped on this mouse-hold. Cleared the
+    # frame the left button releases so a fresh click can place on
+    # the same cell again. Without this, holding the mouse over one
+    # cell stacks ~60 identical objects per second now that same-
+    # type stacking is allowed — one click should equal one stamp,
+    # but a drag should still flow across cells.
+    last_brush_cell = None
     curve_drag_idx = None
     drag_mode = None
     drag_anchor_cell = (0, 0)
@@ -1051,6 +1751,13 @@ def run_editor(screen, clock, preload_filename=None):
     autosave_timer = 0
     autosave_toast_frames = 0
     last_autosave_secs = None  # wall-clock time of last autosave
+    # Separate flag from `dirty`: `dirty` clears on every autosave so the
+    # autosave loop knows when to write. `unsaved_changes` only clears on
+    # an explicit Save (or initial load), so the Esc-exit warning fires
+    # whenever the user has work that isn't on disk under the level's
+    # actual filename — autosave doesn't count, since the user thinks of
+    # "Saved" as the button they clicked.
+    unsaved_changes = bool(recovered)
 
     def push_undo():
         """Push current state to undo stack and mark the level as dirty.
@@ -1059,9 +1766,10 @@ def run_editor(screen, clock, preload_filename=None):
         also flips the dirty flag for the autosave subsystem. (Drag operations
         that don't push undo set dirty inline below.)
         """
-        nonlocal dirty
+        nonlocal dirty, unsaved_changes
         _push_undo(undo_stack, redo_stack, objects)
         dirty = True
+        unsaved_changes = True
 
     def autosave_now():
         """Write the current editor state to the autosave slot (best-effort)."""
@@ -1094,10 +1802,16 @@ def run_editor(screen, clock, preload_filename=None):
     snippet_stamp_name = ""   # for the HUD hint
 
     # Hitbox playback: every Test / Bot / Replay run fills `last_run_hitboxes`
-    # with the player's per-frame (x, y, size). When `show_hitboxes` is True
-    # the editor overlays each recorded rect on the canvas — useful for
-    # debugging tight saw / spike sequences after a death. Toggled with H.
+    # with the player's per-frame (x, y, size, angle). Sampled once per
+    # logical frame (60 Hz) — substep-density traces were unreadable on
+    # fast falls. H toggles the overlay on/off; both outer (full rect,
+    # rotated) and inner (50% centred, rotated) draw together so the
+    # author sees exactly what kills on hazards vs blocks.
     last_run_hitboxes = []
+    # Parallel buffer for the dual-mode mirror's hitbox trace — drawn
+    # in the same overlay but in cyan/orange so the two bodies are
+    # distinguishable when they diverge.
+    last_run_mirror_hitboxes = []
     show_hitboxes = False
 
     # Keyboard cheat-sheet overlay — press `?` or F1 in the editor to see
@@ -1126,11 +1840,25 @@ def run_editor(screen, clock, preload_filename=None):
         # start_x to run_play so the playtest spawns at the cursor.
         do_test_from_cursor = False
         do_bot_menu = False
+        do_y_bot = False
         tab_rects, item_rects, tool_rects = _palette_rects(active_cat)
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
-                pygame.quit()
-                raise SystemExit
+                # Mac close button (red dot) and OS close requests
+                # land here. Route through the same exit-confirm flow
+                # as ESC so an accidental click on the close button
+                # doesn't bin in-progress work — the previous
+                # ``raise SystemExit`` killed the whole process,
+                # bypassing autosave entirely.
+                leave = _confirm_exit(
+                    screen, clock, unsaved=unsaved_changes)
+                guard.reset()
+                if not leave:
+                    continue
+                if dirty:
+                    autosave_now()
+                music.stop()
+                return
             if ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
                     # If a snippet stamp is active, Esc cancels the stamp
@@ -1140,6 +1868,19 @@ def run_editor(screen, clock, preload_filename=None):
                         snippet_stamp = None
                         snippet_stamp_name = ""
                         msg, msg_timer = "Snippet cancelled", 60
+                        continue
+                    # Always confirm before leaving the editor — even
+                    # when there are no unsaved changes — because a
+                    # stray ESC press loses the camera position,
+                    # selection, and any in-progress drag. Modal is
+                    # ESC-resistant: pressing ESC inside it does NOT
+                    # dismiss with "Leave"; you have to click. That
+                    # way mashing ESC by accident keeps you in the
+                    # editor instead of dumping you to the menu.
+                    leave = _confirm_exit(
+                        screen, clock, unsaved=unsaved_changes)
+                    guard.reset()
+                    if not leave:
                         continue
                     # Flush a fresh autosave on the way out so unsaved work
                     # is offered for recovery the next time the editor opens.
@@ -1162,19 +1903,24 @@ def run_editor(screen, clock, preload_filename=None):
                     show_grid = not show_grid
                 elif ev.key == pygame.K_h:
                     # Hitbox-only view: hides sprite art so the canvas is
-                    # a pure collision diagram (blocks / slabs / spikes /
-                    # saws + the player's recorded trace from the most
-                    # recent test / bot run).
+                    # a pure collision diagram. Toggles on/off; trace
+                    # samples once per 60Hz frame so dense passes (a
+                    # fast ship or saw run) stay legible instead of
+                    # smearing into a solid band.
                     show_hitboxes = not show_hitboxes
                     if show_hitboxes and not last_run_hitboxes:
                         msg, msg_timer = (
                             "Hitbox view ON — run Test or Bot to record"
                         ), 120
                     else:
+                        _hb_m = len(last_run_mirror_hitboxes)
+                        _hb_suffix = (
+                            f" ({len(last_run_hitboxes)} frames"
+                            + (f" + {_hb_m} mirror)" if _hb_m else ")")
+                        ) if show_hitboxes and last_run_hitboxes else ""
                         msg, msg_timer = (
-                            f"Hitbox view {'ON' if show_hitboxes else 'OFF'}"
-                            + (f" ({len(last_run_hitboxes)} frames)"
-                               if show_hitboxes and last_run_hitboxes else "")
+                            ("Hitbox view ON" if show_hitboxes
+                             else "Hitbox view OFF") + _hb_suffix
                         ), 90
                 elif ev.key == pygame.K_m:
                     music.toggle_mute()
@@ -1182,7 +1928,33 @@ def run_editor(screen, clock, preload_filename=None):
                         "Music: OFF" if music.is_muted() else "Music: ON"
                     ), 80
                 elif ev.key == pygame.K_b:
-                    tool = TOOL_BRUSH
+                    if (pygame.key.get_mods() & pygame.KMOD_SHIFT
+                            and selected_objs):
+                        # Shift+B: toggle the "bot only" flag on the
+                        # current selection. Phantom objects: visible
+                        # to the Y bot's lookahead probe but inert
+                        # during real play. Use case is steering the
+                        # bot away from a "real" path so it explores
+                        # an alternate route the level designer wants
+                        # to highlight.
+                        push_undo()
+                        already_on = sum(
+                            1 for o in selected_objs
+                            if o.get("_bot_only"))
+                        # Toggle: if every selected object already has
+                        # the flag, turn them all off; otherwise turn
+                        # them all on (mixed → on).
+                        new_state = (already_on != len(selected_objs))
+                        for o in selected_objs:
+                            if new_state:
+                                o["_bot_only"] = True
+                            else:
+                                o.pop("_bot_only", None)
+                        msg, msg_timer = (
+                            f"bot-only {'ON' if new_state else 'off'} "
+                            f"({len(selected_objs)} obj)"), 100
+                    else:
+                        tool = TOOL_BRUSH
                 elif ev.key == pygame.K_e:
                     tool = TOOL_ERASE
                 elif ev.key == pygame.K_k:
@@ -1363,6 +2135,14 @@ def run_editor(screen, clock, preload_filename=None):
                     # the start.
                     if pygame.key.get_mods() & pygame.KMOD_SHIFT:
                         do_test_from_cursor = True
+                elif ev.key == pygame.K_y:
+                    # Y key: simple greedy 1-step-lookahead bot. At
+                    # each frame it sims (held) vs (no-held) and
+                    # picks whichever reaches further; ties go to
+                    # no-held so the chain stays minimum-clicks.
+                    # The replay overlays the always-click and
+                    # never-click baselines so the viewer can compare.
+                    do_y_bot = True
                 elif ev.key == pygame.K_F2:
                     # Open the snippet palette → returned snippet becomes the
                     # cursor stamp; the next canvas click drops it.
@@ -1394,7 +2174,7 @@ def run_editor(screen, clock, preload_filename=None):
                     else:
                         level_music = tracks[cur_idx - 1].get("file")
                         msg, msg_timer = f"Music: {track_names[cur_idx]}", 90
-                    dirty = True
+                    dirty = True; unsaved_changes = True
                 elif ev.key == pygame.K_TAB:
                     active_cat = (active_cat + 1) % len(PALETTE_CATEGORIES)
                     selected_type = PALETTE_CATEGORIES[active_cat][1][0]
@@ -1483,24 +2263,36 @@ def run_editor(screen, clock, preload_filename=None):
                     if panel_rect.collidepoint(ev.pos):
                         panel_hit = True
                         zero_rect = pygame.Rect(0, 0, 0, 0)
-                        if pbr["rot_prev"].collidepoint(ev.pos):
-                            push_undo()
-                            for _o in selected_objs:
-                                _o["r"] = normalize_rotation(_o.get("r", 0) - 90)
-                        elif pbr["rot_next"].collidepoint(ev.pos):
-                            push_undo()
-                            for _o in selected_objs:
-                                _o["r"] = normalize_rotation(_o.get("r", 0) + 90)
-                        elif pbr["scale_prev"].collidepoint(ev.pos):
-                            push_undo()
-                            for _o in selected_objs:
-                                _o["scale"] = _step_scale(
-                                    float(_o.get("scale", 1.0)), -1)
-                        elif pbr["scale_next"].collidepoint(ev.pos):
-                            push_undo()
-                            for _o in selected_objs:
-                                _o["scale"] = _step_scale(
-                                    float(_o.get("scale", 1.0)), +1)
+                        if pbr["rot_value"].collidepoint(ev.pos):
+                            cur_r = float(active_obj.get("r", 0))
+                            # Pre-fill with bare int if the current
+                            # angle is whole — keeps the common 90°
+                            # case typing-friendly while still letting
+                            # authors enter free angles like 22.5.
+                            cur_disp = (str(int(cur_r))
+                                        if abs(cur_r - round(cur_r)) < 1e-3
+                                        else f"{cur_r:.1f}")
+                            typed = text_input_dialog(
+                                screen, clock, "Rotation (deg):", cur_disp)
+                            if typed is not None:
+                                push_undo()
+                                for _o in selected_objs:
+                                    _set_rotation_from_text(_o, typed)
+                        elif pbr["scale_value"].collidepoint(ev.pos):
+                            cur_sx = _obj_sx(active_obj)
+                            cur_sy = _obj_sy(active_obj)
+                            if abs(cur_sx - cur_sy) < 1e-6:
+                                cur_disp = f"{cur_sx:.2f}"
+                            else:
+                                cur_disp = f"{cur_sx:.2f}, {cur_sy:.2f}"
+                            typed = text_input_dialog(
+                                screen, clock,
+                                "Scale (e.g. 1.5  or  1.5,0.75):",
+                                cur_disp)
+                            if typed is not None:
+                                push_undo()
+                                for _o in selected_objs:
+                                    _set_scale_from_text(_o, typed)
                         elif pbr["delete"].collidepoint(ev.pos):
                             push_undo()
                             for _o in list(selected_objs):
@@ -1516,14 +2308,25 @@ def run_editor(screen, clock, preload_filename=None):
                         elif pbr["close"].collidepoint(ev.pos):
                             selected_objs = []
                             last_edit_cell = None
-                        elif pbr.get("param_prev", zero_rect).collidepoint(ev.pos):
-                            push_undo()
-                            for _o in selected_objs:
-                                _adjust_param(_o, -1)
-                        elif pbr.get("param_next", zero_rect).collidepoint(ev.pos):
-                            push_undo()
-                            for _o in selected_objs:
-                                _adjust_param(_o, 1)
+                        elif pbr.get("param_value", zero_rect).collidepoint(ev.pos):
+                            label = _param_info(active_obj)[0] or "Value"
+                            current = _current_param_text(active_obj)
+                            typed = text_input_dialog(
+                                screen, clock, f"{label}:", current)
+                            if typed is not None:
+                                push_undo()
+                                for _o in selected_objs:
+                                    _set_param_from_text(_o, typed)
+                        elif pbr.get("dash_dur_value", zero_rect).collidepoint(ev.pos):
+                            cur = int(active_obj.get("dash_dur", DASH_TIME))
+                            typed = text_input_dialog(
+                                screen, clock, "Dash duration (frames):",
+                                str(cur))
+                            if typed is not None:
+                                push_undo()
+                                for _o in selected_objs:
+                                    if _o["t"] == T_DASH_ORB:
+                                        _set_dash_dur_from_text(_o, typed)
                         elif pbr.get("stack_prev", zero_rect).collidepoint(ev.pos):
                             if active_obj in stack_here:
                                 idx = (stack_here.index(active_obj) - 1) % stack_len_here
@@ -1562,11 +2365,136 @@ def run_editor(screen, clock, preload_filename=None):
                                     _o.pop("invisible", None)
                             n = len(selected_objs)
                             msg, msg_timer = (
-                                f"Hid {n} block{'s' if n != 1 else ''}"
+                                f"Hid {n} object{'s' if n != 1 else ''}"
                                 if any_visible
-                                else f"Revealed {n} block{'s' if n != 1 else ''}",
+                                else f"Revealed {n} object{'s' if n != 1 else ''}",
                                 70,
                             )
+                        elif pbr.get("free_mode_toggle", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            # All-on or all-off across the selection so
+                            # the result mirrors the toggle button's
+                            # next state (matches invisible's behavior).
+                            # Only gamemode portals carry the rect, so a
+                            # mixed-type selection just gets a no-op for
+                            # the non-portal entries.
+                            portals = [_o for _o in selected_objs
+                                       if _o["t"] in MODE_PORTAL_TYPES]
+                            any_off = any(not _o.get("free_mode") for _o in portals)
+                            for _o in portals:
+                                if any_off:
+                                    _o["free_mode"] = True
+                                else:
+                                    _o.pop("free_mode", None)
+                            n = len(portals)
+                            msg, msg_timer = (
+                                f"Free cam ON for {n} portal{'s' if n != 1 else ''}"
+                                if any_off
+                                else f"Free cam OFF for {n} portal{'s' if n != 1 else ''}",
+                                70,
+                            )
+                        elif pbr.get("always_on_toggle", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            follows = [_o for _o in selected_objs
+                                       if _o["t"] == T_FOLLOW_TRIGGER]
+                            any_off = any(not _o.get("always_on") for _o in follows)
+                            for _o in follows:
+                                _o["always_on"] = bool(any_off)
+                            n = len(follows)
+                            msg, msg_timer = (
+                                f"Always On for {n} follow trigger"
+                                f"{'s' if n != 1 else ''}"
+                                if any_off
+                                else f"Always On off for {n} follow trigger"
+                                f"{'s' if n != 1 else ''}",
+                                70,
+                            )
+                        elif pbr.get("follow_player_toggle", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            follows = [_o for _o in selected_objs
+                                       if _o["t"] == T_FOLLOW_TRIGGER]
+                            any_off = any(not _o.get("follow_player") for _o in follows)
+                            for _o in follows:
+                                _o["follow_player"] = bool(any_off)
+                            n = len(follows)
+                            msg, msg_timer = (
+                                f"Follow Player ON for {n} trigger"
+                                f"{'s' if n != 1 else ''}"
+                                if any_off
+                                else f"Follow Player OFF for {n} trigger"
+                                f"{'s' if n != 1 else ''}",
+                                70,
+                            )
+                        elif pbr.get("off_x_minus", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            for _o in selected_objs:
+                                if _o["t"] == T_FOLLOW_TRIGGER:
+                                    _o["offset_cx"] = int(_o.get("offset_cx", 0)) - 1
+                            msg, msg_timer = "offset_cx -1", 60
+                        elif pbr.get("off_x_plus", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            for _o in selected_objs:
+                                if _o["t"] == T_FOLLOW_TRIGGER:
+                                    _o["offset_cx"] = int(_o.get("offset_cx", 0)) + 1
+                            msg, msg_timer = "offset_cx +1", 60
+                        elif pbr.get("off_y_minus", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            for _o in selected_objs:
+                                if _o["t"] == T_FOLLOW_TRIGGER:
+                                    _o["offset_cy"] = int(_o.get("offset_cy", 0)) - 1
+                            msg, msg_timer = "offset_cy -1", 60
+                        elif pbr.get("off_y_plus", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            for _o in selected_objs:
+                                if _o["t"] == T_FOLLOW_TRIGGER:
+                                    _o["offset_cy"] = int(_o.get("offset_cy", 0)) + 1
+                            msg, msg_timer = "offset_cy +1", 60
+                        elif pbr.get("pred_grav_toggle", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            active_obj["grav"] = -1 if int(active_obj.get("grav", 1)) >= 0 else 1
+                        elif pbr.get("pred_mini_toggle", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            active_obj["mini"] = not bool(active_obj.get("mini"))
+                        elif pbr.get("pred_hitbox_toggle", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            new_state = not bool(active_obj.get("show_hitbox"))
+                            if new_state:
+                                active_obj["show_hitbox"] = True
+                            else:
+                                active_obj.pop("show_hitbox", None)
+                            msg, msg_timer = (
+                                "Probe hitbox overlay ON" if new_state
+                                else "Probe hitbox overlay OFF"
+                            ), 70
+                        elif pbr.get("pred_nudge_reset", zero_rect).collidepoint(ev.pos):
+                            push_undo()
+                            active_obj["dx"] = 0
+                            active_obj["dy"] = 0
+                        elif any(pbr.get(k, zero_rect).collidepoint(ev.pos)
+                                 for k in ("pred_fine_left", "pred_fine_right",
+                                           "pred_fine_up", "pred_fine_down",
+                                           "pred_coarse_left", "pred_coarse_right",
+                                           "pred_coarse_up", "pred_coarse_down")):
+                            push_undo()
+                            from .jump_predictor import nudge_fine_px, nudge_coarse_px
+                            # Dispatch on which key was actually hit. Done
+                            # via a small table so we can add/remove
+                            # buttons by editing one list instead of
+                            # stacking more elif branches.
+                            _nudge_map = {
+                                "pred_fine_left":  ("dx", -nudge_fine_px()),
+                                "pred_fine_right": ("dx",  nudge_fine_px()),
+                                "pred_fine_up":    ("dy", -nudge_fine_px()),
+                                "pred_fine_down":  ("dy",  nudge_fine_px()),
+                                "pred_coarse_left":  ("dx", -nudge_coarse_px()),
+                                "pred_coarse_right": ("dx",  nudge_coarse_px()),
+                                "pred_coarse_up":    ("dy", -nudge_coarse_px()),
+                                "pred_coarse_down":  ("dy",  nudge_coarse_px()),
+                            }
+                            for _k, (_field, _delta) in _nudge_map.items():
+                                if pbr.get(_k, zero_rect).collidepoint(ev.pos):
+                                    active_obj[_field] = int(active_obj.get(_field, 0)) + _delta
+                                    break
                         elif ("curve" in pbr
                               and pbr["curve"].collidepoint(ev.pos)
                               and active_obj["t"] == T_MOVE_TRIGGER):
@@ -1665,7 +2593,7 @@ def run_editor(screen, clock, preload_filename=None):
                             else:
                                 level_music = tracks[cur_idx - 1].get("file")
                                 msg, msg_timer = f"Music: {track_names[cur_idx]}", 90
-                            dirty = True
+                            dirty = True; unsaved_changes = True
                         elif r_menu.collidepoint(ev.pos):
                             # Same as Esc — preserve unsaved work via autosave.
                             if dirty:
@@ -1763,6 +2691,12 @@ def run_editor(screen, clock, preload_filename=None):
                                    if selected_type == T_TELEPORT_ORB else 0)
                             _place_object(objects, gx, gy, selected_type,
                                           current_rotation, gid)
+                            # Mark this cell as already stamped so the
+                            # held-mouse loop later in the same frame
+                            # doesn't re-stamp it (one click was
+                            # producing two objects since same-type
+                            # stacking was opened up).
+                            last_brush_cell = (gx, gy)
                             if selected_type == T_TELEPORT_ORB:
                                 current_group_id = next_group_id(objects)
                 elif ev.button == 3:
@@ -1891,7 +2825,7 @@ def run_editor(screen, clock, preload_filename=None):
                         tmax = curve_cd[curve_drag_idx + 1][0] - 0.001
                         nt = max(tmin, min(tmax, nt))
                         curve_cd[curve_drag_idx] = [nt, ns]
-                    dirty = True
+                    dirty = True; unsaved_changes = True
             else:
                 curve_drag_idx = None
         else:
@@ -1913,21 +2847,33 @@ def run_editor(screen, clock, preload_filename=None):
                     moved_any = True
             if moved_any:
                 drag_moved = True
-                dirty = True
+                dirty = True; unsaved_changes = True
         if in_canvas and not over_panel and (mb[0] or mb[2]) and tool != TOOL_BOT_PATH:
             gx, gy = screen_to_cell(mx, my)
             if mb[0] and tool == TOOL_BRUSH:
-                gid = (current_group_id
-                       if selected_type == T_TELEPORT_ORB else 0)
-                _place_object(objects, gx, gy, selected_type,
-                              current_rotation, gid)
-                dirty = True
+                # Skip if we already stamped this cell on the current
+                # mouse-hold — drag-to-paint still flows across cells
+                # because the cell key changes each grid step, but
+                # holding still on one cell stops re-stamping after
+                # the first frame.
+                if (gx, gy) != last_brush_cell:
+                    gid = (current_group_id
+                           if selected_type == T_TELEPORT_ORB else 0)
+                    _place_object(objects, gx, gy, selected_type,
+                                  current_rotation, gid)
+                    last_brush_cell = (gx, gy)
+                    dirty = True; unsaved_changes = True
             elif mb[0] and tool == TOOL_ERASE:
                 _erase_at(objects, gx, gy)
-                dirty = True
+                dirty = True; unsaved_changes = True
             elif mb[2]:
                 _erase_at(objects, gx, gy)
-                dirty = True
+                dirty = True; unsaved_changes = True
+        # Reset the brush dedup the moment the left button releases so
+        # the next click can stamp the same cell (the user's "click
+        # separately to stack" workflow).
+        if not mb[0]:
+            last_brush_cell = None
         keys = pygame.key.get_pressed()
         spd = 22 if keys[pygame.K_LSHIFT] else 11
         if keys[pygame.K_LEFT] or keys[pygame.K_a]:
@@ -2001,6 +2947,7 @@ def run_editor(screen, clock, preload_filename=None):
                 # Real save supersedes any pending autosave.
                 clear_autosave()
                 dirty = False
+                unsaved_changes = False
                 autosave_timer = 0
                 msg, msg_timer = f"Saved as {fn}.json", 120
         if do_publish:
@@ -2082,6 +3029,7 @@ def run_editor(screen, clock, preload_filename=None):
                     # Publishing also commits the work — clear any autosave.
                     clear_autosave()
                     dirty = False
+                    unsaved_changes = False
                     autosave_timer = 0
                     msg, msg_timer = (f"Published {fn}.json as {req_diff} "
                                       f"— awaiting verification"), 180
@@ -2109,6 +3057,7 @@ def run_editor(screen, clock, preload_filename=None):
                     # (which referred to the previous slot).
                     clear_autosave()
                     dirty = False
+                    unsaved_changes = False
                     autosave_timer = 0
                     msg, msg_timer = f"Loaded: {level_name}", 120
         selected_objs = [o for o in selected_objs if o in objects]
@@ -2121,6 +3070,7 @@ def run_editor(screen, clock, preload_filename=None):
             # `last_run_hitboxes` is mutated in place by run_play so the
             # editor's H-toggle overlay always reflects the most recent run.
             last_run_hitboxes.clear()
+            last_run_mirror_hitboxes.clear()
             # Shift+T → spawn at the cursor's world x with music seeked
             # to the matching offset. Test-at-start otherwise.
             _test_start_x = None
@@ -2132,6 +3082,7 @@ def run_editor(screen, clock, preload_filename=None):
                      editor_test=True, level_music=level_music,
                      meta=level_meta,
                      out_hitboxes=last_run_hitboxes,
+                     out_mirror_hitboxes=last_run_mirror_hitboxes,
                      start_x=_test_start_x)
             guard.reset()  # prevent click-through from play
         if do_bot:
@@ -2141,32 +3092,79 @@ def run_editor(screen, clock, preload_filename=None):
             # audio, but at the default 1.0× speed it tracks fine.
             if bot_exact_inputs:
                 last_run_hitboxes.clear()
+                last_run_mirror_hitboxes.clear()
+                # Pass the solver's main waypoint path so run_play's
+                # desync watchdog can compare the live trajectory to
+                # the solver's expected path and flag drift.
                 run_play(screen, clock, list(objects), level_name + " (Bot Exact)",
                          editor_test=True, playback_inputs=bot_exact_inputs,
+                         playback_waypoints=(list(bot_waypoints)
+                                             if bot_waypoints else None),
                          level_music=level_music, meta=level_meta,
-                         out_hitboxes=last_run_hitboxes)
+                         out_hitboxes=last_run_hitboxes,
+                         out_mirror_hitboxes=last_run_mirror_hitboxes)
                 msg, msg_timer = f"Exact playback done — {len(bot_exact_inputs)} frames", 180
             elif bot_waypoints:
                 bot = BotController(list(bot_waypoints), objects=list(objects))
                 last_run_hitboxes.clear()
+                last_run_mirror_hitboxes.clear()
                 run_play(screen, clock, list(objects), level_name + " (Bot)",
                          editor_test=True, bot_controller=bot,
                          level_music=level_music, meta=level_meta,
-                         out_hitboxes=last_run_hitboxes)
+                         out_hitboxes=last_run_hitboxes,
+                         out_mirror_hitboxes=last_run_mirror_hitboxes)
                 bot.save_inputs()
                 msg, msg_timer = f"Bot done — {len(bot.inputs)} frames saved to level_bot_inputs.txt", 180
             else:
                 pb_inputs = load_bot_inputs()
                 if pb_inputs:
                     last_run_hitboxes.clear()
+                    last_run_mirror_hitboxes.clear()
                     run_play(screen, clock, list(objects), level_name + " (Playback)",
                              editor_test=True, playback_inputs=pb_inputs,
                              level_music=level_music, meta=level_meta,
-                             out_hitboxes=last_run_hitboxes)
+                             out_hitboxes=last_run_hitboxes,
+                             out_mirror_hitboxes=last_run_mirror_hitboxes)
                     msg, msg_timer = f"Playback done — {len(pb_inputs)} frames", 120
                 else:
                     msg, msg_timer = "Draw a bot path first (Bot tool) or have level_bot_inputs.txt", 120
             guard.reset()  # prevent click-through from play
+        if do_y_bot:
+            # Y key: LIVE Y bot. No precompute — the controller decides
+            # per frame against the real player and the editor's
+            # overlay reads the just-decided forecast for the two
+            # blue ghost lines.
+            from .y_bot import YBotController
+            from .physics import PhysicsParams
+            yb_params = PhysicsParams.from_meta(level_meta)
+            controller = YBotController(params=yb_params)
+            # Two shades of blue: a brighter one for the click/hold
+            # branch and a softer one for the no-click branch. The
+            # ``live: True`` flag tells play.py to pull each frame's
+            # waypoints from ``bot_controller.last_forecast`` instead
+            # of indexing a precomputed list.
+            ghost_paths = [
+                {"label": "click/hold (this frame)",
+                 "color": (140, 200, 255),
+                 "live": True, "branch": "click",
+                 "chosen_when": "click"},
+                {"label": "no click (this frame)",
+                 "color": (60, 130, 220),
+                 "live": True, "branch": "noclick",
+                 "chosen_when": "noclick"},
+            ]
+            last_run_hitboxes.clear()
+            last_run_mirror_hitboxes.clear()
+            run_play(screen, clock, list(objects),
+                     level_name + " (Y-bot — live)",
+                     editor_test=True,
+                     bot_controller=controller,
+                     level_music=level_music, meta=level_meta,
+                     out_hitboxes=last_run_hitboxes,
+                     out_mirror_hitboxes=last_run_mirror_hitboxes,
+                     ghost_paths=ghost_paths)
+            guard.reset()
+            msg, msg_timer = "Y bot live exited", 180
         if do_bot_menu:
             # Editor-side bot menu: when the user clicks Replay, run the
             # solved inputs against a real Player in the test-play screen.
@@ -2182,11 +3180,17 @@ def run_editor(screen, clock, preload_filename=None):
                 # replay silently runs on default physics and dies at the
                 # first divergent jump arc.
                 last_run_hitboxes.clear()
+                last_run_mirror_hitboxes.clear()
+                # Pass the solver's main waypoint path so run_play's
+                # desync watchdog can verify the replay stays on route.
+                _wp_for_check = list(bot_waypoints) if bot_waypoints else None
                 run_play(screen, clock, list(objects),
                          level_name + " (Bot Replay)",
                          editor_test=True, playback_inputs=inputs,
+                         playback_waypoints=_wp_for_check,
                          level_music=level_music, meta=level_meta,
-                         out_hitboxes=last_run_hitboxes)
+                         out_hitboxes=last_run_hitboxes,
+                         out_mirror_hitboxes=last_run_mirror_hitboxes)
                 guard.reset()
 
             result = run_bot_menu(
@@ -2240,12 +3244,12 @@ def run_editor(screen, clock, preload_filename=None):
                                       o["y"] * effective_cell - cam_y,
                                       effective_cell, pulse)
                         continue
-                    meta = o if o["t"] in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER) else None
+                    meta = o if o["t"] in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_SPIDER_ORB) else None
                     sx_e = o["x"] * effective_cell - cam_x
                     sy_e = o["y"] * effective_cell - cam_y
                     draw_obj(screen, o["t"], sx_e, sy_e,
                              effective_cell, pulse, o.get("r", 0), meta,
-                             scale=float(o.get("scale", 1.0)))
+                             scale=obj_scale(o))
                     # Invisible flag: sprite still draws in the editor so
                     # the author can select / reposition it, but we dim
                     # it and outline it to signal "won't render in play".
@@ -2257,6 +3261,20 @@ def run_editor(screen, clock, preload_filename=None):
                         dim.fill((0, 0, 0, 140))
                         screen.blit(dim, dim_rect)
                         pygame.draw.rect(screen, (200, 200, 255), dim_rect, 1)
+                    # Bot-only flag: phantom hazard. Visible in editor
+                    # for placement, marked with a purple X so the
+                    # author can tell at a glance that this object
+                    # only exists for the Y bot's lookahead.
+                    if o.get("_bot_only"):
+                        bx = int(sx_e)
+                        by = int(sy_e)
+                        cs = int(effective_cell)
+                        pygame.draw.line(screen, (180, 100, 230),
+                                         (bx + 6, by + 6),
+                                         (bx + cs - 6, by + cs - 6), 2)
+                        pygame.draw.line(screen, (180, 100, 230),
+                                         (bx + cs - 6, by + 6),
+                                         (bx + 6, by + cs - 6), 2)
         else:
             # Even in hitbox mode, keep a faint start-line / end-wall so the
             # level bounds are legible.
@@ -2296,6 +3314,44 @@ def run_editor(screen, clock, preload_filename=None):
                 tyl = first_target["y"] * effective_cell - cam_y + effective_cell // 2
                 pygame.draw.line(screen, (255, 200, 100), (txl, tyl), (exl, eyl), 1)
                 pygame.draw.circle(screen, (255, 200, 100), (exl, eyl), 6, 1)
+        # Jump-predictor overlay: if a probe is placed, run a headless
+        # sim from its cell and overlay the resulting arc. Runs each
+        # frame (well under 1ms even on a 300-object level) so the arc
+        # updates live as the user nudges / edits nearby geometry.
+        from .jump_predictor import (
+            find_probe as _find_probe, predict as _predict,
+            draw_overlay as _draw_pred_overlay,
+        )
+        _probe = _find_probe(objects)
+        if _probe is not None:
+            _pred_result = _predict(objects, _probe)
+            _draw_pred_overlay(
+                screen, _pred_result, cam_x, cam_y, zoom_level,
+                clip_rect=pygame.Rect(0, TOP_H, WIDTH, BAR_Y - TOP_H),
+                show_hitbox=bool(_probe.get("show_hitbox")),
+            )
+            # Floating one-liner anchored above the probe cell so the
+            # status stays readable even when the arc flies off-screen.
+            if _pred_result is not None:
+                _eff = int(CELL * zoom_level)
+                _sx = int(_probe["x"] * _eff - cam_x + _eff / 2)
+                _sy = int(_probe["y"] * _eff - cam_y - 6)
+                if _pred_result["hit"]:
+                    _label = (f"{_pred_result['mode']} · "
+                              f"f{_pred_result['hit'][3]} HIT: "
+                              f"{_pred_result['hit'][2]}")
+                    _col = (255, 120, 120)
+                elif _pred_result["landing"]:
+                    _label = (f"{_pred_result['mode']} · "
+                              f"f{_pred_result['landing'][2]} LAND")
+                    _col = (140, 255, 170)
+                else:
+                    _label = f"{_pred_result['mode']} · open"
+                    _col = (255, 210, 120)
+                if TOP_H < _sy < BAR_Y:
+                    txt(screen, _label, _sx, _sy, 12, _col, True, shadow=True)
+        else:
+            _pred_result = None
         # Hitbox playback overlay: draw the player's recorded rects from
         # the most recent run on top of the level. Frames are layered with
         # alpha so dense passes (a long ship hover) read as a single thick
@@ -2303,7 +3359,9 @@ def run_editor(screen, clock, preload_filename=None):
         # bot path / selection rings render on top.
         if show_hitboxes:
             from .constants import (PLAYER_SIZE as _HB_PSZ, T_SPIKE,
-                                    T_HALF_SPIKE, T_SAW)
+                                    T_HALF_SPIKE, T_SAW, T_SLOPE,
+                                    SOLID_HITBOX_FRACTION)
+            import math as _hb_math
             if _hb_scratch[0] is None:
                 _hb_scratch[0] = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
             hb_layer = _hb_scratch[0]
@@ -2312,24 +3370,67 @@ def run_editor(screen, clock, preload_filename=None):
             world_right = (cam_x + WIDTH) / zoom_level + 60
             world_top = cam_y / zoom_level - 60
             world_bot = (cam_y + HEIGHT) / zoom_level + 60
-            # Player's recorded path from the last run (if any) —
-            # cell-aligned 44×44 boxes in green (solid-collision
-            # footprint) with the inner hazard rect in red.
-            for hx, hy, hsz in last_run_hitboxes:
+
+            def _draw_obb(layer, hx, hy, hsz, hangle, outer_col, inner_col):
+                # OUTER rect rotates with the cube — kills on hazards
+                # (spike / saw). Drawn as a rotated polygon outline.
+                # INNER rect is axis-aligned regardless of ``hangle`` —
+                # kills on solid blocks / slabs. Drawn as a plain AABB
+                # outline so the overlay shows exactly the kill rule
+                # split: the rotated polygon is the "spike kills you"
+                # volume, the upright square is the "wall kills you"
+                # volume.
+                cx = hx + hsz / 2.0
+                cy = hy + hsz / 2.0
+                rad = -_hb_math.radians(hangle)
+                cs = _hb_math.cos(rad)
+                sn = _hb_math.sin(rad)
+                half = hsz / 2.0
+
+                outer_pts = []
+                for ox, oy in ((-half, -half), (half, -half),
+                               (half, half), (-half, half)):
+                    wx = cx + ox * cs - oy * sn
+                    wy = cy + ox * sn + oy * cs
+                    outer_pts.append((int(wx * zoom_level - cam_x),
+                                      int(wy * zoom_level - cam_y)))
+                pygame.draw.polygon(layer, outer_col, outer_pts, 1)
+
+                inner_half = half * SOLID_HITBOX_FRACTION
+                ix = int((cx - inner_half) * zoom_level - cam_x)
+                iy = int((cy - inner_half) * zoom_level - cam_y)
+                iw = max(1, int(inner_half * 2 * zoom_level))
+                ih = max(1, int(inner_half * 2 * zoom_level))
+                pygame.draw.rect(layer, inner_col, (ix, iy, iw, ih), 1)
+
+            # Trace samples are 4-tuples (x, y, size, angle) at one per
+            # logical frame. Legacy 3-tuples (saved from older runs)
+            # default to angle 0 so we don't blow up reading them.
+            # Outer = green rotated (hazard-kill volume); inner = blue
+            # axis-aligned (block-kill volume). Alpha tuned low so a
+            # dense run doesn't bleed into a solid block — each sample
+            # reads as a discrete frame even when many overlap.
+            for sample in last_run_hitboxes:
+                hx, hy, hsz = sample[0], sample[1], sample[2]
+                hangle = sample[3] if len(sample) > 3 else 0.0
                 if (hx + hsz < world_left or hx > world_right
                         or hy + hsz < world_top or hy > world_bot):
                     continue
-                sxh = int(hx * zoom_level - cam_x)
-                syh = int(hy * zoom_level - cam_y)
-                ssz = max(1, int(hsz * zoom_level))
-                pygame.draw.rect(hb_layer, (120, 255, 140, 90),
-                                 (sxh, syh, ssz, ssz), 1)
-                shrink = max(2, int(6 * hsz / _HB_PSZ))
-                ssh = max(1, int(shrink * zoom_level))
-                inner_sz = max(1, ssz - 2 * ssh)
-                pygame.draw.rect(hb_layer, (255, 110, 110, 110),
-                                 (sxh + ssh, syh + ssh,
-                                  inner_sz, inner_sz), 1)
+                _draw_obb(hb_layer, hx, hy, hsz, hangle,
+                          (120, 255, 140, 70),   # outer green (hazard)
+                          (90, 160, 255, 90))    # inner blue (blocks)
+            # Mirror trace from the same attempt. Outer = cyan rotated,
+            # inner = blue axis-aligned (same rule split, just lighter
+            # so it visually separates from the main body's green).
+            for sample in last_run_mirror_hitboxes:
+                hx, hy, hsz = sample[0], sample[1], sample[2]
+                hangle = sample[3] if len(sample) > 3 else 0.0
+                if (hx + hsz < world_left or hx > world_right
+                        or hy + hsz < world_top or hy > world_bot):
+                    continue
+                _draw_obb(hb_layer, hx, hy, hsz, hangle,
+                          (120, 220, 255, 70),   # outer cyan (hazard)
+                          (90, 160, 255, 90))    # inner blue (blocks)
             # Hazard + solid hitboxes so the author can see EXACTLY where
             # kill zones and landable surfaces live — distinct from the
             # rendered sprite art which has decorative margins.
@@ -2340,14 +3441,28 @@ def run_editor(screen, clock, preload_filename=None):
             for o in objects:
                 t = o["t"]
                 if t not in (T_SPIKE, T_HALF_SPIKE, T_SAW,
-                             T_BLOCK, T_SLAB):
+                             T_BLOCK, T_SLAB, T_SLOPE):
                     continue
                 gx = o["x"]
                 gy = o["y"]
                 if not (eff_left_gx <= gx <= eff_right_gx
                         and eff_top_gy <= gy <= eff_bot_gy):
                     continue
-                sc = float(o.get("scale", 1.0))
+                sc = obj_scale(o)
+                # Slopes are diagonal — drawn as a filled triangle
+                # rather than a rect. Skip the rect path entirely so
+                # the half of the cell that is empty doesn't read as
+                # solid in the overlay.
+                if t == T_SLOPE:
+                    pts = slope_polygon(gx, gy, o.get("r", 0), sc)
+                    spts = [(int(px * zoom_level - cam_x),
+                             int(py * zoom_level - cam_y))
+                            for px, py in pts]
+                    pygame.draw.polygon(
+                        hb_layer, (120, 180, 255, 50), spts)
+                    pygame.draw.polygon(
+                        hb_layer, (100, 160, 240, 220), spts, 1)
+                    continue
                 if t == T_SAW:
                     rects = [saw_hitbox(gx, gy, sc)]
                     fill = (255, 80, 80, 60)
@@ -2426,22 +3541,24 @@ def run_editor(screen, clock, preload_filename=None):
                 trry = tr["y"] * effective_cell - cam_y + effective_cell // 2
                 pygame.draw.circle(screen, (200, 150, 255), (trx, trry), 26, 2)
         for sobj in selected_objs:
-            sc_sel = float(sobj.get("scale", 1.0))
-            cell_sz = max(1, int(effective_cell * sc_sel))
+            sx_sel, sy_sel = obj_scale(sobj)
+            cell_w = max(1, int(effective_cell * sx_sel))
+            cell_h = max(1, int(effective_cell * sy_sel))
             cx = sobj["x"] * effective_cell - cam_x + effective_cell // 2
             cy = sobj["y"] * effective_cell - cam_y + effective_cell // 2
-            sxb = cx - cell_sz // 2
-            syb = cy - cell_sz // 2
+            sxb = cx - cell_w // 2
+            syb = cy - cell_h // 2
             pygame.draw.rect(screen, (120, 255, 140),
-                             (sxb, syb, cell_sz, cell_sz), 2)
+                             (sxb, syb, cell_w, cell_h), 2)
         if single_selected is not None:
-            sc_sel = float(single_selected.get("scale", 1.0))
-            cell_sz = max(1, int(effective_cell * sc_sel))
+            sx_sel, sy_sel = obj_scale(single_selected)
+            cell_w = max(1, int(effective_cell * sx_sel))
+            cell_h = max(1, int(effective_cell * sy_sel))
             cx = single_selected["x"] * effective_cell - cam_x + effective_cell // 2
             cy = single_selected["y"] * effective_cell - cam_y + effective_cell // 2
-            sxb = cx - cell_sz // 2
-            syb = cy - cell_sz // 2
-            ring = pygame.Surface((cell_sz + 12, cell_sz + 12), pygame.SRCALPHA)
+            sxb = cx - cell_w // 2
+            syb = cy - cell_h // 2
+            ring = pygame.Surface((cell_w + 12, cell_h + 12), pygame.SRCALPHA)
             pygame.draw.rect(ring, (120, 255, 140, 110), ring.get_rect(), 3, border_radius=6)
             screen.blit(ring, (sxb - 6, syb - 6))
             if single_selected["t"] == T_CAMERA_TRIGGER:
@@ -2501,7 +3618,7 @@ def run_editor(screen, clock, preload_filename=None):
                     gs.set_alpha(140)
                     draw_obj(gs, so["t"], 0, 0, effective_cell, pulse,
                              so.get("r", 0),
-                             scale=float(so.get("scale", 1.0)))
+                             scale=obj_scale(so))
                     screen.blit(gs, (cx, cy))
                 # Outline the bounding box so the user sees the footprint.
                 bw = (max_sx - min_sx + 1) * effective_cell

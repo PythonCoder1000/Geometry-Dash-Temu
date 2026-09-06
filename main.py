@@ -72,75 +72,110 @@ def main():
     sfx.init()
     gamepad.init()
 
+    from src.prefs import set as _pset
+    _pset("signed_in_username", "Christian Jin")
+
     state = "menu"
     while state != "quit":
-        if state == "menu":
-            state = run_menu(screen, clock)
-        elif state in ("play", "practice"):
-            _practice = state == "practice"
-            path = run_select(screen, clock, practice=_practice)
-            if path:
-                try:
-                    meta, objects = load_level_full(path)
-                except (OSError, ValueError):
-                    state = "menu"
-                    continue
-                run_play(
-                    screen, clock, objects,
-                    level_name=meta["name"],
-                    level_music=meta.get("music"),
-                    meta=meta,
-                    level_path=path,
-                    practice_mode=_practice,
-                )
+        try:
+            state = _dispatch_state(screen, clock, state)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            # Don't crash the process on an uncaught exception —
+            # print the traceback so the user can read what went
+            # wrong, then surface a modal so they can save / quit
+            # deliberately. The editor's autosave keeps in-progress
+            # level work on disk regardless.
+            import traceback as _tb
+            _tb.print_exc()
+            from src.editor import _show_error_modal
+            _show_error_modal(screen, clock, exc, where="game")
+            # Bounce back to the main menu — the only screen that's
+            # guaranteed to be safe after a crash. The user can re-
+            # open the editor to load their autosave.
             state = "menu"
-        elif state == "rate":
-            # Admin-only level rating screen. run_rate_menu itself
-            # guards against non-admin access, so even if the button
-            # somehow fires for a wrong user we bounce back cleanly.
-            run_rate_menu(screen, clock)
-            state = "menu"
-        elif state == "editor":
-            # Strict mode: editing is a per-account action. Require a
-            # signed-in user before we even show the picker — without
-            # an account there's no way to stamp authorship, and
-            # giving unsigned sessions full access bypasses the owner
-            # lock on everyone else's levels. Bounce back to menu and
-            # surface the auth screen as the suggested next step.
-            from src.prefs import get as _pget
-            from src.menus import confirm_dialog
-            if not _pget("signed_in_username", None):
-                go_auth = confirm_dialog(
-                    screen, clock,
-                    "Sign in to edit levels.",
-                    subtitle="The editor stamps your username as the "
-                             "level's author so only you can re-save or "
-                             "delete it.",
-                    ok_label="Sign in", cancel_label="Back",
-                )
-                state = "auth" if go_auth else "menu"
-                continue
-            pick = run_editor_picker(screen, clock)
-            if pick is not None:
-                action, fn = pick
-                run_editor(screen, clock, preload_filename=fn if action == "open" else None)
-            state = "menu"
-        elif state == "settings":
-            # Settings is a modal now — opens over the menu, returns
-            # directly when closed. run_settings handles fullscreen
-            # toggles internally so we just re-apply the display in
-            # case one happened.
-            run_settings(screen, clock, on_fullscreen_change=apply_display_mode)
-            screen = apply_display_mode()
-            state = "menu"
-        elif state == "auth":
-            # Chunk F will wire this to the real AuthStore. For now the
-            # stub just toggles a local pref so the main menu shows
-            # either "Login/Signup" or "Signed in: X".
-            _auth_stub(screen, clock)
-            state = "menu"
+        # If a settings toggle re-created the display surface during
+        # this iteration, the local ``screen`` reference is stale —
+        # refresh it from pygame so the next dispatch draws onto the
+        # current surface.
+        cur = pygame.display.get_surface()
+        if cur is not None:
+            screen = cur
     pygame.quit()
     sys.exit()
+
+
+def _dispatch_state(screen, clock, state):
+    """One iteration of the top-level state machine. Pulled out so
+    main() can wrap it in a try/except per iteration without
+    indenting the whole loop body. Returns the next state string."""
+    if state == "menu":
+        return run_menu(screen, clock) or "quit"
+    if state in ("play", "practice"):
+        _practice = state == "practice"
+        path = run_select(screen, clock, practice=_practice)
+        if path:
+            try:
+                meta, objects = load_level_full(path)
+            except (OSError, ValueError):
+                return "menu"
+            run_play(
+                screen, clock, objects,
+                level_name=meta["name"],
+                level_music=meta.get("music"),
+                meta=meta,
+                level_path=path,
+                practice_mode=_practice,
+            )
+        return "menu"
+    if state == "rate":
+        # Admin-only level rating screen. run_rate_menu itself
+        # guards against non-admin access, so even if the button
+        # somehow fires for a wrong user we bounce back cleanly.
+        run_rate_menu(screen, clock)
+        return "menu"
+    if state == "editor":
+        # Strict mode: editing is a per-account action. Require a
+        # signed-in user before we even show the picker — without
+        # an account there's no way to stamp authorship, and
+        # giving unsigned sessions full access bypasses the owner
+        # lock on everyone else's levels. Bounce back to menu and
+        # surface the auth screen as the suggested next step.
+        from src.prefs import get as _pget
+        from src.menus import confirm_dialog
+        if not _pget("signed_in_username", None):
+            go_auth = confirm_dialog(
+                screen, clock,
+                "Sign in to edit levels.",
+                subtitle="The editor stamps your username as the "
+                         "level's author so only you can re-save or "
+                         "delete it.",
+                ok_label="Sign in", cancel_label="Back",
+            )
+            return "auth" if go_auth else "menu"
+        pick = run_editor_picker(screen, clock)
+        if pick is not None:
+            action, fn = pick
+            run_editor(screen, clock,
+                       preload_filename=fn if action == "open" else None)
+        return "menu"
+    if state == "settings":
+        # Settings is a modal now — opens over the menu, returns
+        # directly when closed. run_settings handles fullscreen
+        # toggles internally so we just re-apply the display in
+        # case one happened.
+        run_settings(screen, clock, on_fullscreen_change=apply_display_mode)
+        apply_display_mode()
+        return "menu"
+    if state == "auth":
+        # Chunk F will wire this to the real AuthStore. For now the
+        # stub just toggles a local pref so the main menu shows
+        # either "Login/Signup" or "Signed in: X".
+        _auth_stub(screen, clock)
+        return "menu"
+    # Unknown state — fall back to menu rather than infinite-loop.
+    return "menu"
 
 
 def _auth_stub(screen, clock):
