@@ -9,21 +9,251 @@ per line trail) which was a large part of the frame budget.
 import pygame
 
 from ..constants import (
-    WIDTH, HEIGHT, PLAYER_SIZE,
-    MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER, MODE_SWING,
-    MODE_ROBOT,
+    WIDTH, HEIGHT, PLAYER_SIZE, ALL_MODES,
+    MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
+    MODE_SWING, MODE_ROBOT,
     C_DASH_ORB, C_PAD, C_MODE_WAVE, C_MODE_UFO, C_MODE_SPIDER,
     C_MODE_SWING, C_MODE_ROBOT,
 )
-from ..graphics import lighter, darker, draw_cube_icon_glyph
+from ..graphics import (
+    lighter, darker, draw_cube_icon_glyph, draw_bevel_rect, draw_bevel_circle,
+    draw_outlined_poly, draw_gloss, outline_col,
+)
 
-_LINE_TRAIL_MODES = frozenset({MODE_WAVE, MODE_SHIP, MODE_SPIDER, MODE_SWING})
-_LINE_THICKNESS = {MODE_SHIP: 5, MODE_SPIDER: 4}
+# Every mode draws the same thing: one solid, opaque ribbon of the
+# player's colour through the trail samples.  Only its thickness is
+# per-mode (unlisted modes take _LINE_THICKNESS_DEFAULT).  Because the
+# whole sample list is redrawn each frame in the CURRENT mode's style,
+# a mode portal instantly restyles the trail already on screen.
+_LINE_TRAIL_MODES = frozenset(ALL_MODES)
+_LINE_THICKNESS = {MODE_SHIP: 5, MODE_SPIDER: 4, MODE_CUBE: 6, MODE_BALL: 6,
+                   MODE_UFO: 5, MODE_ROBOT: 6}
+_LINE_THICKNESS_DEFAULT = 3
+
+# Icons are drawn on a canvas this many times larger than PLAYER_SIZE and
+# smoothscaled down. GD icons are dense (outline + bevel + glyph); drawn
+# straight at 44 px those details land on half-pixels and read as mush.
+# The result is cached per (mode, colour, icon, state) so the cost is paid
+# once per distinct icon, not per frame.
+PLAYER_SUPERSAMPLE = 3
+
+# Non-player-coloured accents shared by several modes.
+C_HULL = (78, 84, 104)          # ship / spider chassis metal
+C_GLASS = (150, 225, 255)       # canopy + UFO dome glass
+C_FLAME_CORE = (255, 245, 190)  # inner flame
 
 # Module-level caches (shared by every Player instance).
 _SPRITE_CACHE = {}
-_GHOST_CACHE = {}
 _LINE_SURF = [None]
+
+
+def _frect(s, x, y, w, h):
+    """Rect from fractions of the icon canvas size `s`."""
+    return pygame.Rect(int(s * x), int(s * y), max(1, int(s * w)),
+                       max(1, int(s * h)))
+
+
+def _fpts(s, pts):
+    return [(s * px, s * py) for px, py in pts]
+
+
+def _draw_flame(surf, s, tip_x, cy, back_x, spread, col):
+    """Rear thruster flame — two nested tapered triangles."""
+    outer = [(s * tip_x, s * cy), (s * back_x, s * (cy - spread)),
+             (s * back_x, s * (cy + spread))]
+    pygame.draw.polygon(surf, col, outer)
+    inner_tip = tip_x + (back_x - tip_x) * 0.4
+    pygame.draw.polygon(surf, C_FLAME_CORE, [
+        (s * inner_tip, s * cy), (s * back_x, s * (cy - spread * 0.5)),
+        (s * back_x, s * (cy + spread * 0.5))])
+
+
+def _draw_cube_body(surf, s, rect, col, icon_index):
+    """The player cube — used solo and as the pilot inside ship/UFO."""
+    radius = max(2, int(rect.w * 0.16))
+    draw_bevel_rect(surf, rect, col, radius=radius,
+                    outline=max(2, int(rect.w * 0.10)),
+                    bevel=max(1, int(rect.w * 0.09)))
+    draw_cube_icon_glyph(surf, rect.x, rect.y, rect.w, col, icon_index)
+    draw_gloss(surf, rect.inflate(-rect.w // 4, -rect.h // 3), alpha=60,
+               width_frac=0.9, height_frac=0.8)
+
+
+def _draw_ship(surf, s, col, icon_index, dashing):
+    cy = 0.5
+    # Sleek wedge hull: pointed nose, flat-ish belly, swept back edge.
+    hull = _fpts(s, [(0.99, 0.52), (0.74, 0.28), (0.34, 0.24), (0.14, 0.34),
+                     (0.07, 0.50), (0.13, 0.66), (0.38, 0.78), (0.80, 0.68)])
+    # Low tail fin behind the hull adds a ship silhouette without
+    # swamping the shape at mini size.
+    pygame.draw.polygon(surf, darker(C_HULL, 40),
+                        _fpts(s, [(0.36, 0.26), (0.20, 0.06), (0.12, 0.32)]))
+    draw_outlined_poly(surf, hull, C_HULL, max(2, int(s * 0.045)))
+    # Bright nose panel + belly shadow give the flat hull some form.
+    pygame.draw.polygon(surf, lighter(C_HULL, 55),
+                        _fpts(s, [(0.99, 0.52), (0.74, 0.28), (0.68, 0.40),
+                                  (0.88, 0.52)]))
+    pygame.draw.polygon(surf, darker(C_HULL, 35),
+                        _fpts(s, [(0.14, 0.62), (0.78, 0.62), (0.80, 0.68),
+                                  (0.38, 0.78)]))
+    _draw_flame(surf, s, 0.00, cy, 0.10, 0.12,
+                C_DASH_ORB if dashing else C_PAD)
+    cube = _frect(s, 0.28, 0.28, 0.38, 0.38)
+    _draw_cube_body(surf, s, cube, col, icon_index)
+    # Glass canopy arching over the pilot.
+    canopy = _frect(s, 0.26, 0.14, 0.44, 0.24)
+    glass = pygame.Surface(canopy.size, pygame.SRCALPHA)
+    pygame.draw.ellipse(glass, (*C_GLASS, 95), glass.get_rect())
+    pygame.draw.ellipse(glass, (*lighter(C_GLASS, 60), 210), glass.get_rect(),
+                        max(2, int(s * 0.02)))
+    surf.blit(glass, canopy.topleft)
+
+
+def _draw_ball(surf, s, col, icon_index):
+    c = s // 2
+    r = int(s * 0.46)
+    draw_bevel_circle(surf, (c, c), r, col, outline=max(2, int(s * 0.06)))
+    # GD's ball is banded: a darker equator ring with a lighter hub.
+    ring = darker(col, 55)
+    pygame.draw.circle(surf, ring, (c, c), int(r * 0.68))
+    pygame.draw.circle(surf, lighter(col, 35), (c, c), int(r * 0.68),
+                       max(2, int(s * 0.025)))
+    pygame.draw.circle(surf, lighter(col, 25), (c, c), int(r * 0.30))
+    pygame.draw.circle(surf, outline_col(col), (c, c), int(r * 0.30),
+                       max(1, int(s * 0.02)))
+    draw_gloss(surf, pygame.Rect(c - r, c - r, r * 2, r * 2), alpha=90)
+
+
+def _draw_wave(surf, s, col):
+    # Classic dart: sharp nose, notched tail.
+    pts = _fpts(s, [(0.96, 0.50), (0.10, 0.06), (0.30, 0.50), (0.10, 0.94)])
+    draw_outlined_poly(surf, pts, col, max(2, int(s * 0.05)))
+    inner = _fpts(s, [(0.78, 0.50), (0.26, 0.24), (0.40, 0.50), (0.26, 0.76)])
+    pygame.draw.polygon(surf, lighter(col, 55), inner)
+    pygame.draw.line(surf, lighter(C_MODE_WAVE, 40),
+                     (s * 0.30, s * 0.50), (s * 0.92, s * 0.50),
+                     max(1, int(s * 0.02)))
+
+
+def _draw_ufo(surf, s, col, icon_index):
+    cy = int(s * 0.58)
+    # Saucer hull carries the player colour (GD tints the UFO body, the
+    # dome stays glassy) so colour triggers still read on this mode.
+    hull = _frect(s, 0.02, 0.50, 0.96, 0.20)
+    pygame.draw.ellipse(surf, col, hull)
+    pygame.draw.ellipse(surf, outline_col(col), hull, max(2, int(s * 0.04)))
+    pygame.draw.ellipse(surf, lighter(col, 70),
+                        _frect(s, 0.10, 0.52, 0.80, 0.05))
+    skirt = _frect(s, 0.24, 0.64, 0.52, 0.14)
+    pygame.draw.ellipse(surf, darker(col, 55), skirt)
+    pygame.draw.ellipse(surf, outline_col(col), skirt, max(2, int(s * 0.03)))
+    dome = _frect(s, 0.30, 0.22, 0.40, 0.38)
+    pygame.draw.ellipse(surf, C_MODE_UFO, dome)
+    pygame.draw.ellipse(surf, outline_col(C_MODE_UFO), dome,
+                        max(2, int(s * 0.04)))
+    draw_gloss(surf, dome, alpha=130)
+    for fx in (0.18, 0.50, 0.82):
+        pygame.draw.circle(surf, (255, 255, 255), (int(s * fx), cy + 2),
+                           max(2, int(s * 0.035)))
+        pygame.draw.circle(surf, outline_col(col), (int(s * fx), cy + 2),
+                           max(2, int(s * 0.035)), max(1, int(s * 0.012)))
+
+
+def _draw_spider(surf, s, col):
+    c = s // 2
+    leg_w = max(2, int(s * 0.075))
+    leg = darker(C_MODE_SPIDER, 55)
+    # Jointed legs: out-and-down from the body, drawn before it so the
+    # chassis covers the hips.
+    for sx in (-1, 1):
+        for i, (kx, ky, fx, fy) in enumerate(
+                ((0.30, -0.30, 0.46, -0.06),
+                 (0.34, -0.02, 0.50, 0.26),
+                 (0.28, 0.24, 0.42, 0.44))):
+            knee = (c + sx * s * kx, c + s * ky)
+            foot = (c + sx * s * fx, c + s * fy)
+            pygame.draw.line(surf, leg, (c, c), knee, leg_w)
+            pygame.draw.line(surf, leg, knee, foot, leg_w)
+            pygame.draw.circle(surf, darker(leg, 40), (int(foot[0]),
+                                                       int(foot[1])),
+                               max(1, leg_w // 2))
+    body = _fpts(s, [(0.50, 0.16), (0.80, 0.34), (0.80, 0.66), (0.50, 0.84),
+                     (0.20, 0.66), (0.20, 0.34)])
+    draw_outlined_poly(surf, body, col, max(2, int(s * 0.05)))
+    visor = _frect(s, 0.30, 0.36, 0.40, 0.16)
+    pygame.draw.rect(surf, darker(C_MODE_SPIDER, 40), visor,
+                     border_radius=max(1, int(s * 0.04)))
+    pygame.draw.rect(surf, lighter(C_MODE_SPIDER, 70),
+                     visor.inflate(-int(s * 0.05), -int(s * 0.06)),
+                     border_radius=max(1, int(s * 0.03)))
+    draw_gloss(surf, _frect(s, 0.28, 0.18, 0.44, 0.20), alpha=70)
+
+
+def _draw_swing(surf, s, col):
+    c = s // 2
+    # Wings first — two swept blades either side of the core.
+    for sx in (-1, 1):
+        wing = [(c + sx * s * 0.10, c - s * 0.06),
+                (c + sx * s * 0.50, c - s * 0.30),
+                (c + sx * s * 0.46, c + s * 0.10),
+                (c + sx * s * 0.12, c + s * 0.12)]
+        draw_outlined_poly(surf, wing, C_MODE_SWING, max(2, int(s * 0.035)))
+    core = _fpts(s, [(0.50, 0.06), (0.72, 0.50), (0.50, 0.94), (0.28, 0.50)])
+    draw_outlined_poly(surf, core, col, max(2, int(s * 0.05)))
+    pygame.draw.polygon(surf, lighter(col, 60),
+                        _fpts(s, [(0.50, 0.22), (0.63, 0.50), (0.50, 0.78),
+                                  (0.37, 0.50)]))
+    pygame.draw.circle(surf, darker(col, 60), (c, c), max(2, int(s * 0.07)))
+
+
+def _draw_robot(surf, s, col, icon_index, burning):
+    torso = _frect(s, 0.14, 0.06, 0.72, 0.50)
+    _draw_cube_body(surf, s, torso, col, icon_index)
+    visor = _frect(s, 0.22, 0.14, 0.56, 0.14)
+    pygame.draw.rect(surf, darker(C_MODE_ROBOT, 55), visor,
+                     border_radius=max(1, int(s * 0.03)))
+    pygame.draw.rect(surf, lighter(C_MODE_ROBOT, 40),
+                     visor.inflate(-int(s * 0.05), -int(s * 0.05)),
+                     border_radius=max(1, int(s * 0.03)))
+    # Hips, thighs and feet — a jointed leg silhouette, not two bars.
+    hip = _frect(s, 0.24, 0.54, 0.52, 0.10)
+    draw_bevel_rect(surf, hip, darker(col, 30),
+                    radius=max(1, int(s * 0.03)),
+                    outline=max(2, int(s * 0.03)))
+    for fx in (0.20, 0.54):
+        thigh = _frect(s, fx, 0.62, 0.26, 0.22)
+        draw_bevel_rect(surf, thigh, darker(col, 45),
+                        radius=max(1, int(s * 0.03)),
+                        outline=max(2, int(s * 0.03)))
+        foot = _frect(s, fx - 0.03, 0.82, 0.32, 0.12)
+        draw_bevel_rect(surf, foot, darker(C_MODE_ROBOT, 30),
+                        radius=max(1, int(s * 0.03)),
+                        outline=max(2, int(s * 0.03)))
+    if burning:
+        for fx in (0.28, 0.62):
+            pygame.draw.polygon(surf, C_DASH_ORB, [
+                (s * fx, s * 0.94), (s * (fx + 0.20), s * 0.94),
+                (s * (fx + 0.10), s * 1.00)])
+            pygame.draw.polygon(surf, C_FLAME_CORE, [
+                (s * (fx + 0.04), s * 0.94), (s * (fx + 0.16), s * 0.94),
+                (s * (fx + 0.10), s * 0.99)])
+
+
+_MODE_BODIES = {
+    MODE_SHIP: lambda surf, s, col, icon, dash, burn: _draw_ship(
+        surf, s, col, icon, dash),
+    MODE_BALL: lambda surf, s, col, icon, dash, burn: _draw_ball(
+        surf, s, col, icon),
+    MODE_WAVE: lambda surf, s, col, icon, dash, burn: _draw_wave(surf, s, col),
+    MODE_UFO: lambda surf, s, col, icon, dash, burn: _draw_ufo(
+        surf, s, col, icon),
+    MODE_SPIDER: lambda surf, s, col, icon, dash, burn: _draw_spider(
+        surf, s, col),
+    MODE_SWING: lambda surf, s, col, icon, dash, burn: _draw_swing(
+        surf, s, col),
+    MODE_ROBOT: lambda surf, s, col, icon, dash, burn: _draw_robot(
+        surf, s, col, icon, burn),
+}
 
 
 def render_player_sprite(mode, col, icon_index, dashing=False, burning=False):
@@ -32,144 +262,18 @@ def render_player_sprite(mode, col, icon_index, dashing=False, burning=False):
     ps = _SPRITE_CACHE.get(key)
     if ps is not None:
         return ps
-    ps = pygame.Surface((PLAYER_SIZE, PLAYER_SIZE), pygame.SRCALPHA)
-    cx = PLAYER_SIZE // 2
-    cy = PLAYER_SIZE // 2
-    if mode == MODE_SHIP:
-        hull = (70, 76, 94)
-        hull_hi = lighter(hull, 40)
-        hull_lo = darker(hull, 30)
-        nose = PLAYER_SIZE - 4
-        tail = 7
-        top = 9
-        bot = PLAYER_SIZE - 9
-        hull_pts = [(nose, cy), (nose - 10, top), (tail + 2, top + 1),
-                    (tail - 1, cy), (tail + 2, bot - 1), (nose - 10, bot)]
-        pygame.draw.polygon(ps, darker(hull_lo, 30),
-                            [(p[0], p[1] + 2) for p in hull_pts])
-        pygame.draw.polygon(ps, hull, hull_pts)
-        pygame.draw.polygon(ps, hull_hi, hull_pts, 2)
-        canopy = pygame.Rect(cx - 2, cy - 10, 16, 8)
-        pygame.draw.ellipse(ps, darker((120, 210, 255), 40), canopy)
-        pygame.draw.ellipse(ps, (120, 210, 255), canopy.inflate(-2, -2))
-        cube = max(12, PLAYER_SIZE // 2 - 2)
-        cx0 = cx - cube // 2 - 1
-        cy0 = cy - cube // 2 + 1
-        pygame.draw.rect(ps, darker(col, 30), (cx0, cy0 + 2, cube, cube),
-                         border_radius=3)
-        pygame.draw.rect(ps, col, (cx0, cy0, cube, cube), border_radius=3)
-        pygame.draw.rect(ps, lighter(col, 60),
-                         (cx0 + 1, cy0 + 1, cube - 2, cube - 2), 1,
-                         border_radius=2)
-        draw_cube_icon_glyph(ps, cx0, cy0, cube, col, icon_index)
-        flame_col = C_DASH_ORB if dashing else C_PAD
-        flame_tip = tail - 5 if dashing else tail - 3
-        pygame.draw.polygon(ps, flame_col, [(flame_tip, cy), (tail + 3, cy - 5),
-                                            (tail + 3, cy + 5)])
-        pygame.draw.polygon(ps, lighter(flame_col, 60),
-                            [(flame_tip + 2, cy), (tail + 3, cy - 3),
-                             (tail + 3, cy + 3)])
-    elif mode == MODE_BALL:
-        pygame.draw.circle(ps, darker(col, 30), (cx, cy + 2), cx - 2)
-        pygame.draw.circle(ps, col, (cx, cy), cx - 2)
-        pygame.draw.circle(ps, lighter(col, 60), (cx, cy), cx - 8, 2)
-        pygame.draw.circle(ps, darker(col, 40), (cx, cy), 6)
-    elif mode == MODE_WAVE:
-        pts = [(PLAYER_SIZE - 3, cx), (3, 4), (3, PLAYER_SIZE - 4)]
-        pygame.draw.polygon(ps, darker(C_MODE_WAVE, 40),
-                            [(p[0], p[1] + 2) for p in pts])
-        pygame.draw.polygon(ps, col, pts)
-        pygame.draw.polygon(ps, lighter(col, 60), pts, 2)
-    elif mode == MODE_UFO:
-        body_rect = pygame.Rect(3, cy - 2, PLAYER_SIZE - 6, 10)
-        pygame.draw.ellipse(ps, darker(C_MODE_UFO, 40), body_rect.move(0, 2))
-        pygame.draw.ellipse(ps, C_MODE_UFO, body_rect)
-        pygame.draw.ellipse(ps, lighter(C_MODE_UFO, 60),
-                            body_rect.inflate(-6, -4), 2)
-        dome = pygame.Rect(cx - 10, cy - 12, 20, 16)
-        pygame.draw.ellipse(ps, darker(col, 30), dome.move(0, 2))
-        pygame.draw.ellipse(ps, col, dome)
-        pygame.draw.ellipse(ps, lighter(col, 70), dome.inflate(-6, -6), 2)
-        for ox in (-12, 0, 12):
-            pygame.draw.circle(ps, (255, 255, 255), (cx + ox, cy + 8), 2)
-    elif mode == MODE_SPIDER:
-        pygame.draw.circle(ps, darker(C_MODE_SPIDER, 30), (cx, cy + 1), cx - 6)
-        pygame.draw.circle(ps, C_MODE_SPIDER, (cx, cy), cx - 6)
-        pygame.draw.circle(ps, col, (cx, cy), cx - 12)
-        for ox in (-2, 2):
-            for oy in (-1, 1):
-                pygame.draw.line(ps, darker(C_MODE_SPIDER, 40), (cx, cy),
-                                 (cx + ox * cx, cy + oy * cy), 3)
-    elif mode == MODE_ROBOT:
-        torso = pygame.Rect(3, 4, PLAYER_SIZE - 6, PLAYER_SIZE - 14)
-        pygame.draw.rect(ps, darker(col, 30), torso.move(0, 2), border_radius=3)
-        pygame.draw.rect(ps, col, torso, border_radius=3)
-        pygame.draw.rect(ps, lighter(col, 60), torso.inflate(-6, -6), 2,
-                         border_radius=3)
-        visor = pygame.Rect(8, 8, PLAYER_SIZE - 16, 6)
-        pygame.draw.rect(ps, darker(C_MODE_ROBOT, 40), visor, border_radius=2)
-        pygame.draw.rect(ps, lighter(C_MODE_ROBOT, 30), visor.inflate(-4, -2),
-                         border_radius=2)
-        leg_y = PLAYER_SIZE - 10
-        for ox in (6, PLAYER_SIZE - 12):
-            pygame.draw.rect(ps, darker(col, 40), (ox, leg_y, 6, 8),
-                             border_radius=1)
-        glow_col = C_DASH_ORB if burning else darker(C_MODE_ROBOT, 20)
-        pygame.draw.polygon(ps, glow_col, [(cx - 6, PLAYER_SIZE - 3),
-                                           (cx + 6, PLAYER_SIZE - 3),
-                                           (cx, PLAYER_SIZE - 1)])
-    elif mode == MODE_SWING:
-        outer = [(PLAYER_SIZE - 4, cy), (cx, 3), (3, cy), (cx, PLAYER_SIZE - 4)]
-        pygame.draw.polygon(ps, darker(C_MODE_SWING, 40),
-                            [(p[0], p[1] + 2) for p in outer])
-        pygame.draw.polygon(ps, C_MODE_SWING, outer)
-        pygame.draw.polygon(ps, lighter(C_MODE_SWING, 60), outer, 2)
-        inner = [(PLAYER_SIZE - 12, cy), (cx, 11), (11, cy),
-                 (cx, PLAYER_SIZE - 12)]
-        pygame.draw.polygon(ps, col, inner)
-        pygame.draw.polygon(ps, darker(col, 40), inner, 1)
+    s = PLAYER_SIZE * PLAYER_SUPERSAMPLE
+    big = pygame.Surface((s, s), pygame.SRCALPHA)
+    body = _MODE_BODIES.get(mode)
+    if body is not None:
+        body(big, s, col, icon_index, dashing, burning)
     else:
-        pygame.draw.rect(ps, darker(col, 30),
-                         (1, 3, PLAYER_SIZE - 2, PLAYER_SIZE - 2), border_radius=3)
-        pygame.draw.rect(ps, col, (0, 0, PLAYER_SIZE, PLAYER_SIZE),
-                         border_radius=3)
-        pygame.draw.rect(ps, lighter(col, 60),
-                         (3, 3, PLAYER_SIZE - 6, PLAYER_SIZE - 6), 2,
-                         border_radius=3)
-        draw_cube_icon_glyph(ps, 0, 0, PLAYER_SIZE, col, icon_index)
+        _draw_cube_body(big, s, pygame.Rect(0, 0, s, s), col, icon_index)
+    ps = pygame.transform.smoothscale(big, (PLAYER_SIZE, PLAYER_SIZE))
     if len(_SPRITE_CACHE) > 256:
         _SPRITE_CACHE.clear()
     _SPRITE_CACHE[key] = ps
     return ps
-
-
-def _ghost_stamp(mode, size, col, alpha, flip):
-    """Cached translucent silhouette used for ghost-trail samples."""
-    a = max(0, min(255, alpha))
-    key = (mode, size, tuple(col), a // 8, flip)
-    ts = _GHOST_CACHE.get(key)
-    if ts is not None:
-        return ts
-    al_sm = int(a * 0.35)
-    al_fill = int(a * 0.4)
-    ts = pygame.Surface((PLAYER_SIZE, PLAYER_SIZE), pygame.SRCALPHA)
-    c = PLAYER_SIZE // 2
-    if mode == MODE_BALL:
-        pygame.draw.circle(ts, (*col, al_sm), (c, c), c - 2)
-    elif mode == MODE_UFO:
-        pygame.draw.ellipse(ts, (*col, al_sm), (4, c - 2, PLAYER_SIZE - 8, 10))
-    elif mode == MODE_SPIDER:
-        pygame.draw.circle(ts, (*col, al_sm), (c, c), c - 4)
-    else:
-        ts.fill((*col, al_fill))
-    if size != PLAYER_SIZE:
-        ts = pygame.transform.smoothscale(ts, (size, size))
-    if flip:
-        ts = pygame.transform.flip(ts, False, True)
-    if len(_GHOST_CACHE) > 512:
-        _GHOST_CACHE.clear()
-    _GHOST_CACHE[key] = ts
-    return ts
 
 
 def _line_surface():
@@ -183,38 +287,31 @@ def _line_surface():
 
 
 def draw_trail(surf, trail, mode, size, col, cam_x, cam_y, flip=False):
-    if not trail:
+    """Draw the trail as one solid ribbon in the player's colour.
+
+    ``flip`` is accepted for call-site symmetry with the mirror body; a
+    colour ribbon has no orientation, so it does not affect the drawing.
+    """
+    if len(trail) < 2:
         return
-    if mode in _LINE_TRAIL_MODES:
-        if len(trail) < 2:
-            return
-        thickness = _LINE_THICKNESS.get(mode, 3)
-        line_surf = _line_surface()
-        half = size // 2
-        drew = False
-        for i in range(len(trail) - 1):
-            x1, y1, _, al1 = trail[i]
-            x2, y2, _, al2 = trail[i + 1]
-            sx1 = x1 - cam_x + half
-            sx2 = x2 - cam_x + half
-            if (sx1 < -60 and sx2 < -60) or (sx1 > WIDTH + 60 and sx2 > WIDTH + 60):
-                continue
-            avg_al = max(0, min(255, int((al1 + al2) * 0.5 * 0.7)))
-            pygame.draw.line(line_surf, (*col, avg_al),
-                             (int(sx1), int(y1 - cam_y + half)),
-                             (int(sx2), int(y2 - cam_y + half)), thickness)
-            drew = True
-        if drew:
-            surf.blit(line_surf, (0, 0))
-        return
-    for tx, ty, ta, al in trail:
-        sx = tx - cam_x
-        if sx < -60 or sx > WIDTH + 60:
+    thickness = _LINE_THICKNESS.get(mode, _LINE_THICKNESS_DEFAULT)
+    line_surf = _line_surface()
+    half = size // 2
+    drew = False
+    for i in range(len(trail) - 1):
+        x1, y1 = trail[i][0], trail[i][1]
+        x2, y2 = trail[i + 1][0], trail[i + 1][1]
+        sx1 = x1 - cam_x + half
+        sx2 = x2 - cam_x + half
+        if (sx1 < -60 and sx2 < -60) or (sx1 > WIDTH + 60 and sx2 > WIDTH + 60):
             continue
-        stamp = _ghost_stamp(mode, size, col, int(al), flip)
-        rot = pygame.transform.rotate(stamp, ta) if ta else stamp
-        rr = rot.get_rect(center=(sx + size // 2, ty - cam_y + size // 2))
-        surf.blit(rot, rr)
+        # GD's trail is a solid ribbon, not a fading line — full alpha.
+        pygame.draw.line(line_surf, (*col, 255),
+                         (int(sx1), int(y1 - cam_y + half)),
+                         (int(sx2), int(y2 - cam_y + half)), thickness)
+        drew = True
+    if drew:
+        surf.blit(line_surf, (0, 0))
 
 
 class DrawMixin:

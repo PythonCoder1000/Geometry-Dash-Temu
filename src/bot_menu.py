@@ -1,9 +1,18 @@
-"""Bot menu — UI in front of AutoBot's single-threaded solve.
+"""Bot menu — UI in front of the two bots.
 
-Opened from the editor (B/L/Y key) and from a play session (B key).
-Lets the user run the autobot solver, watch its progress, view the
-result, tweak a couple of search-quality knobs, save / load runs, and
-(for the editor) replay the solved inputs against the live player.
+Opened from the editor (L key) and from a play session (B key).  Lets
+the user pick which bot to run, watch its progress, view the result,
+tweak a couple of search-quality knobs, save / load runs, and (for the
+editor) replay the solved inputs against the live player.
+
+The two choices are the whole roster:
+
+  * **Human** — :class:`~.bots.human.HumanBot`. Solves with inputs a
+    person could physically produce. Flags the result when it had to
+    fall back to frame-perfect timing.
+  * **Loophole** — :class:`~.bots.loophole.LoopholeBot`. Needs a drawn
+    path; hugs it but takes any shortcut that still wins, and reports
+    how far it strayed.
 
 Returns either ``None`` (cancelled, no path produced) or ``(waypoints,
 status)`` where ``status`` is one of ``"ok"`` / ``"partial"`` / ``"failed"``
@@ -11,11 +20,17 @@ and ``waypoints`` is a list of ``(x, y)`` world-pixel coordinates that
 visualise the route. The caller (play / editor) uses the path as a hint
 overlay and ``status`` to colour the badge.
 
-The earlier Parallel / Workers / Attempts knobs were removed when
-AutoBot moved to single-threaded — they were UI for a feature that
-caused the CPU-peg / unresponsive-ESC bug. The replacement knob is a
-``Time budget`` cap that bounds the whole pipeline's wall-clock so a
-hard level can't run forever in the background.
+``([], "cleared")`` is the one other shape: the user pressed "Clear
+result", so the caller must drop its own overlay / replay inputs too.
+The cached result is otherwise sticky — :func:`_record_result` refuses
+anything worse than what it holds, which without a clear action leaves a
+spuriously "solved" run permanently on screen and seeding every re-solve.
+
+The earlier Parallel / Workers / Attempts knobs were removed when the
+solver moved to single-threaded — they were UI for a feature that caused
+the CPU-peg / unresponsive-ESC bug. The replacement knob is a ``Time
+budget`` cap that bounds the whole pipeline's wall-clock so a hard level
+can't run forever in the background.
 """
 
 import sys
@@ -30,7 +45,6 @@ from .constants import (
 )
 from .graphics import (
     draw_bg, txt, btn, make_stars, make_mountains, lighter, darker,
-    draw_panel_footer,
 )
 from .input_guard import ClickGuard
 from . import bot_saves
@@ -61,11 +75,57 @@ _bot_time_budget_idx = 3       # default = 60 s
 # if it doesn't still win, runs ONE short A* repair to patch the break.
 _bot_fix_only = False
 
-# Last solve result.
+# Which bot runs. Exactly two exist; there is no third code path.
+BOT_HUMAN = "human"
+BOT_LOOPHOLE = "loophole"
+_BOT_KINDS = (BOT_HUMAN, BOT_LOOPHOLE)
+_BOT_LABELS = {BOT_HUMAN: "Human", BOT_LOOPHOLE: "Loophole"}
+_BOT_BLURBS = {
+    BOT_HUMAN: "Plays like a person could — one button, human timing",
+    BOT_LOOPHOLE: "Hugs your drawn path, takes shortcuts that still win",
+}
+_bot_kind_idx = 0
+
+# Last solve result. Replaced only by a STRICTLY better one — see
+# _record_result. Overwriting unconditionally is what used to let a
+# re-run lose a section the bot had already cleared.
 _last_waypoints = None
 _last_mirror_waypoints = None
 _last_inputs = None
 _last_status = ""
+_last_note = ""
+
+
+def _deepest_x(waypoints):
+    return max((p[0] for p in waypoints), default=-1.0)
+
+
+def _record_result(waypoints, mirror_waypoints, inputs, status, note=""):
+    """Adopt a new solve only if it beats the cached one.
+
+    A solve is better when it wins and the cached one did not, or when
+    it reaches farther at the same win status. Without this floor,
+    pressing Find Path a second time could replace a solved run with a
+    shallower partial — the "bot fails a section it already cleared"
+    report, which was a UI bookkeeping bug rather than a search bug.
+    """
+    global _last_waypoints, _last_mirror_waypoints, _last_inputs
+    global _last_status, _last_note
+    if not waypoints:
+        return False
+    was_ok = _last_status == "ok"
+    now_ok = status == "ok"
+    if was_ok and not now_ok:
+        return False
+    if was_ok == now_ok and _last_waypoints is not None:
+        if _deepest_x(waypoints) <= _deepest_x(_last_waypoints):
+            return False
+    _last_waypoints = list(waypoints)
+    _last_mirror_waypoints = list(mirror_waypoints)
+    _last_inputs = list(inputs)
+    _last_status = status
+    _last_note = note
+    return True
 
 
 def get_last_inputs():
@@ -80,11 +140,13 @@ def get_last_mirror_waypoints():
 
 def clear_last_solve():
     """Discard the cached solution. Call after edits invalidate the path."""
-    global _last_waypoints, _last_mirror_waypoints, _last_inputs, _last_status
+    global _last_waypoints, _last_mirror_waypoints, _last_inputs
+    global _last_status, _last_note
     _last_waypoints = None
     _last_mirror_waypoints = None
     _last_inputs = None
     _last_status = ""
+    _last_note = ""
 
 
 def _strip_internal(objects):
@@ -98,18 +160,19 @@ def _strip_internal(objects):
     return out
 
 
-def _run_solver(screen, clock, objects, params=None):
-    """Invoke the autobot with the current frontier / backtrack / budget
-    knobs. Returns
-    ``(waypoints, mirror_waypoints, inputs, status, error)``.
-    ``error`` is "" on success/partial, non-empty on hard failure."""
+def _run_solver(screen, clock, objects, params=None, kind=None,
+                drawn_path=None):
+    """Run the selected bot with the current knobs.
+
+    Returns ``(waypoints, mirror_waypoints, inputs, status, error)``.
+    ``error`` is "" on success/partial and non-empty on hard failure, so
+    a crash surfaces to the user instead of collapsing into a bare
+    "failed".
+    """
+    global _last_note
+    kind = kind or _BOT_KINDS[_bot_kind_idx]
     try:
-        from .autobot import AutoBot
         clean = _strip_internal(objects)
-        solver = AutoBot(clean, params=params)
-        solver.FRONTIER_CAP = _bot_frontier_caps[_bot_frontier_idx]
-        solver.BEAM_WIDTH = solver.FRONTIER_CAP
-        solver.BACKTRACK_DEPTH = _bot_backtrack_depths[_bot_backtrack_idx]
         max_frames = _bot_max_frames_opts[_bot_max_frames_idx]
         seed = list(_last_inputs) if _last_inputs else None
         time_budget = _bot_time_budget_opts[_bot_time_budget_idx]
@@ -117,12 +180,46 @@ def _run_solver(screen, clock, objects, params=None):
             return None, [], [], "failed", (
                 "fix-only needs a saved run to repair — "
                 "solve once or load a saved run first")
-        wp, mwp, inputs, won = solver.solve(
-            screen, clock, max_frames=max_frames, seed_inputs=seed,
-            fix_only=_bot_fix_only, time_budget=time_budget)
+
+        if kind == BOT_LOOPHOLE:
+            if not drawn_path:
+                return None, [], [], "failed", (
+                    "the loophole bot needs a drawn path — "
+                    "draw one with the Bot Path tool first")
+            from .bots import LoopholeBot
+            bot = LoopholeBot(
+                clean, list(drawn_path), params=params,
+                frontier_cap=_bot_frontier_caps[_bot_frontier_idx],
+                backtrack_depth=_bot_backtrack_depths[_bot_backtrack_idx])
+            wp, mwp, inputs, won = bot.solve(
+                screen, clock, max_frames=max_frames, seed_inputs=seed,
+                time_budget=time_budget)
+            note = ""
+            if won and bot.deviated:
+                note = (f"loophole found — strayed up to "
+                        f"{int(bot.max_deviation_px)} px off your path")
+            elif won:
+                note = "stayed on your drawn path"
+            if bot.used_frame_perfect:
+                note = "frame-perfect fallback — not humanly playable"
+        else:
+            from .bots import HumanBot
+            bot = HumanBot(clean, params=params)
+            bot.FRONTIER_CAP = _bot_frontier_caps[_bot_frontier_idx]
+            bot.BACKTRACK_DEPTH = _bot_backtrack_depths[_bot_backtrack_idx]
+            wp, mwp, inputs, won = bot.solve(
+                screen, clock, max_frames=max_frames, seed_inputs=seed,
+                fix_only=_bot_fix_only, time_budget=time_budget)
+            note = ("frame-perfect fallback — not humanly playable"
+                    if bot.used_frame_perfect else
+                    "played within human timing" if won else "")
+
         if not wp:
-            return None, [], [], "failed", "no path found (level may be unsolvable)"
-        return list(wp), list(mwp), list(inputs), ("ok" if won else "partial"), ""
+            return None, [], [], "failed", (
+                "no path found (level may be unsolvable)")
+        _last_note = note
+        return (list(wp), list(mwp), list(inputs),
+                ("ok" if won else "partial"), "")
     except Exception as exc:
         traceback.print_exc()
         return None, [], [], "failed", f"crash: {type(exc).__name__}: {exc}"
@@ -199,7 +296,8 @@ def _pick_saved_run(screen, clock, level_key):
             age = "never" if not ts else time.strftime(
                 "%Y-%m-%d %H:%M", time.localtime(ts))
             txt(screen, f"{age}  ·  {entry['input_frames']} frames  ·  "
-                f"{entry['status'] or '—'}",
+                f"{entry['status'] or '—'}"
+                + (f"  ·  {entry['bot']}" if entry.get("bot") else ""),
                 row_rect.x + 14, row_rect.y + 30, 12, status_col)
             del_rect = pygame.Rect(row_rect.right - 40, row_rect.y + 10,
                                    28, row_rect.h - 20)
@@ -254,7 +352,7 @@ def _stepper(screen, label, value_label, x_label, x_val_center, y, w, h,
 
 def run_bot_menu(screen, clock, objects, precomputed_path=None,
                  allow_replay=False, replay_callback=None,
-                 level_filename=None, meta=None):
+                 level_filename=None, meta=None, drawn_path=None):
     """Show the bot menu.
 
     Parameters
@@ -271,11 +369,17 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
     level_filename : str or None
         Identifies the level for Save / Load-run.
     meta : level meta dict (for PhysicsParams override)
+    drawn_path : optional list of (x, y) tuples
+        The route the loophole bot should hug. Defaults to
+        ``precomputed_path`` — whatever line is currently on screen.
     """
-    global _bot_frontier_idx, _bot_max_frames_idx
-    global _bot_backtrack_idx, _bot_time_budget_idx, _bot_fix_only
-    global _last_waypoints, _last_mirror_waypoints, _last_inputs, _last_status
+    # The stepper closures below declare their own globals; only the
+    # toggle and the result cache are written directly here.
+    global _bot_fix_only
+    global _last_waypoints, _last_mirror_waypoints, _last_inputs
+    global _last_status, _last_note
 
+    target_path = drawn_path if drawn_path is not None else precomputed_path
     if precomputed_path is not None and not _last_waypoints:
         _last_waypoints = list(precomputed_path)
         _last_status = "ok"
@@ -301,6 +405,34 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
     info_msg = ""
     info_color = C_GRAY
 
+    def _solve_and_record():
+        """Run the selected bot and fold the result into the cache.
+
+        Shared by the ENTER key and the Find Path button — the two used
+        to carry duplicate copies of this block, which is how they drifted
+        apart on error handling.
+        """
+        wp, mwp, inputs, status, err = _run_solver(
+            screen, clock, objects, params=params,
+            drawn_path=target_path)
+        if not wp:
+            return None, (f"Solver failed — {err}" if err
+                          else "Solver failed."), C_DANGER
+        adopted = _record_result(wp, mwp, inputs, status, _last_note)
+        if not adopted:
+            return ((list(_last_waypoints), _last_status),
+                    "Kept the earlier, deeper run (this one got less far).",
+                    (250, 200, 80))
+        msg = {
+            "ok": "Solved! Path drawn as hint overlay.",
+            "partial": "Partial path found — bot got stuck.",
+        }.get(status, "Solver failed.")
+        if _last_note:
+            msg = f"{msg}  ({_last_note})"
+        color = (C_SUCCESS if status == "ok"
+                 else (250, 200, 80) if status == "partial" else C_DANGER)
+        return (list(_last_waypoints), _last_status), msg, color
+
     while True:
         guard.tick()
         mpos = pygame.mouse.get_pos()
@@ -313,25 +445,9 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                 if ev.key == pygame.K_ESCAPE:
                     return return_value
                 if ev.key == pygame.K_RETURN:
-                    wp, mwp, inputs, status, err = _run_solver(
-                        screen, clock, objects, params=params)
-                    if wp:
-                        _last_waypoints = wp
-                        _last_mirror_waypoints = mwp
-                        _last_inputs = inputs
-                        _last_status = status
-                        return_value = (wp, status)
-                        info_msg = {
-                            "ok": "Solved! Path drawn as hint overlay.",
-                            "partial": "Partial path found — bot got stuck.",
-                        }.get(status, "Solver failed.")
-                        info_color = (C_SUCCESS if status == "ok"
-                                      else (250, 200, 80) if status == "partial"
-                                      else C_DANGER)
-                    else:
-                        info_msg = (f"Solver failed — {err}"
-                                    if err else "Solver failed.")
-                        info_color = C_DANGER
+                    result, info_msg, info_color = _solve_and_record()
+                    if result is not None:
+                        return_value = result
                     guard.reset()
             if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if not guard.consume_click(ev):
@@ -348,10 +464,11 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
         pygame.draw.rect(screen, C_DARK, panel, border_radius=14)
         pygame.draw.rect(screen, C_BLOCK_H, panel, 2, border_radius=14)
 
-        txt(screen, "AUTO-BOT", panel.centerx, panel.y + 22, 30, C_WHITE,
+        kind = _BOT_KINDS[_bot_kind_idx]
+        txt(screen, "BOT", panel.centerx, panel.y + 22, 30, C_WHITE,
             True, shadow=True)
-        txt(screen, "A* + reverse-DFS + pathfinder (single-threaded)",
-            panel.centerx, panel.y + 56, 13, C_GRAY, True)
+        txt(screen, _BOT_BLURBS[kind], panel.centerx, panel.y + 56, 13,
+            C_GRAY, True)
 
         col_x = panel.x + 32
         val_x = panel.x + panel.w - 220
@@ -361,6 +478,18 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
         def _cycle(arr, idx_setter, idx_getter, delta):
             new_idx = (idx_getter() + delta) % len(arr)
             idx_setter(new_idx)
+
+        # ---- Which bot ----------------------------------------------------
+        def _set_kind(i):
+            global _bot_kind_idx
+            _bot_kind_idx = i % len(_BOT_KINDS)
+
+        _stepper(screen, "Bot", _BOT_LABELS[kind],
+                 col_x, val_x + 80, row_y, 200, 30,
+                 (110, 80, 160), mpos, click_pos,
+                 lambda: _set_kind(_bot_kind_idx - 1),
+                 lambda: _set_kind(_bot_kind_idx + 1))
+        row_y += _STEP
 
         # ---- Frontier cap -------------------------------------------------
         def _set_fc(i):
@@ -445,31 +574,22 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                 col_x, row_y + 20, 12, C_GRAY)
         else:
             txt(screen, "No path computed yet.", col_x, row_y, 14, C_GRAY)
+        # The waypoint/frame counts already occupy row_y + 20, so the
+        # advisory line goes one row lower instead of printing on top.
+        if kind == BOT_LOOPHOLE and not target_path:
+            txt(screen, "Loophole bot needs a drawn path (Bot Path tool).",
+                col_x, row_y + 34, 12, (250, 200, 80))
+        elif _last_note:
+            txt(screen, _last_note, col_x, row_y + 34, 12, C_GRAY)
         row_y += 48
 
         # ---- Action buttons ----------------------------------------------
-        b_solve = btn(screen, "Find Path (Solve)",
+        b_solve = btn(screen, f"Run {_BOT_LABELS[kind]} bot",
                       panel.centerx, row_y + 14, 320, 40, C_BTN, mpos)
         if click_pos and b_solve.collidepoint(click_pos):
-            wp, mwp, inputs, status, err = _run_solver(
-                screen, clock, objects, params=params)
-            if wp:
-                _last_waypoints = wp
-                _last_mirror_waypoints = mwp
-                _last_inputs = inputs
-                _last_status = status
-                return_value = (wp, status)
-                info_msg = {
-                    "ok": "Solved! Path drawn as hint overlay.",
-                    "partial": "Partial path found — bot got stuck.",
-                }.get(status, "Solver failed.")
-                info_color = (C_SUCCESS if status == "ok"
-                              else (250, 200, 80) if status == "partial"
-                              else C_DANGER)
-            else:
-                info_msg = (f"Solver failed — {err}"
-                            if err else "Solver failed. Try a wider frontier.")
-                info_color = C_DANGER
+            result, info_msg, info_color = _solve_and_record()
+            if result is not None:
+                return_value = result
             guard.reset()
         row_y += 46
 
@@ -512,12 +632,19 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
         # ---- Save / Load saved runs --------------------------------------
         save_disabled = not _last_inputs
         b_save = btn(screen, "Save run...",
-                     panel.centerx - 82, row_y + 14, 156, 34,
+                     panel.centerx - 110, row_y + 14, 104, 34,
                      (80, 150, 110), mpos, font_size=14,
                      disabled=save_disabled)
         b_load = btn(screen, "Load run...",
-                     panel.centerx + 82, row_y + 14, 156, 34,
+                     panel.centerx, row_y + 14, 104, 34,
                      (80, 110, 160), mpos, font_size=14)
+        # Clear sits with Save / Load because all three act on the cached
+        # result rather than on the search.
+        clear_disabled = not (_last_waypoints or _last_inputs or _last_status)
+        b_clear = btn(screen, "Clear result",
+                      panel.centerx + 110, row_y + 14, 104, 34,
+                      (150, 80, 80), mpos, font_size=14,
+                      disabled=clear_disabled)
         if click_pos and b_save.collidepoint(click_pos):
             if save_disabled:
                 info_msg = "Solve first — nothing to save."
@@ -536,7 +663,8 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                         mirror_waypoints=_last_mirror_waypoints,
                         status=_last_status or "ok",
                         beam_width=_bot_frontier_caps[_bot_frontier_idx],
-                        attempts=1)
+                        attempts=1,
+                        bot=_BOT_LABELS[kind], note=_last_note)
                     if ok:
                         info_msg = f"Saved run \"{name}\"."
                         info_color = C_SUCCESS
@@ -554,9 +682,25 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                 _last_waypoints = list(picked["waypoints"])
                 _last_mirror_waypoints = list(picked["mirror_waypoints"])
                 _last_status = picked.get("status") or "ok"
+                _last_note = picked.get("note") or ""
                 return_value = (list(_last_waypoints), _last_status)
                 info_msg = (f"Loaded \"{picked['name']}\" "
                             f"({len(_last_inputs)} frames).")
+                info_color = C_SUCCESS
+
+        # ---- Clear cached result -----------------------------------------
+        # The only escape from the monotone gate in _record_result: without
+        # it a bad run that once reported "ok" can never be replaced, and
+        # the user cannot see where a fresh attempt actually dies.
+        if click_pos and b_clear.collidepoint(click_pos):
+            if clear_disabled:
+                info_msg = "Nothing cached to clear."
+                info_color = C_GRAY
+            else:
+                clear_last_solve()
+                return_value = ([], "cleared")
+                info_msg = ("Cleared — the next solve starts fresh "
+                            "and its result is shown as-is.")
                 info_color = C_SUCCESS
 
         # ---- Status line / Back ------------------------------------------

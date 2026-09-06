@@ -45,6 +45,10 @@ from .constants import (
     SPIDER_TELEPORT_RANGE as _SPIDER_TELEPORT_RANGE,
     ROBOT_THRUST as _ROBOT_THRUST,
     ROBOT_FLIGHT_SECONDS as _ROBOT_FLIGHT_SECONDS,
+    MINI_GRAVITY_SCALE as _MINI_GRAVITY_SCALE,
+    MINI_JUMP_SCALE as _MINI_JUMP_SCALE,
+    MINI_WAVE_ANGLE_SCALE as _MINI_WAVE_ANGLE_SCALE,
+    MINI_WAVE_VY_SCALE as _MINI_WAVE_VY_SCALE,
 )
 
 
@@ -70,6 +74,13 @@ class PhysicsParams:
     spider_teleport_range: int = _SPIDER_TELEPORT_RANGE
     robot_thrust: float = _ROBOT_THRUST
     robot_flight_seconds: float = _ROBOT_FLIGHT_SECONDS
+    # GD's mini icon isn't just a smaller hitbox — gravity/impulses feel a
+    # touch floatier and wave pitches harder. Scoped to size < PLAYER_SIZE
+    # so normal-size play is untouched.
+    mini_gravity_scale: float = _MINI_GRAVITY_SCALE
+    mini_jump_scale: float = _MINI_JUMP_SCALE
+    mini_wave_angle_scale: float = _MINI_WAVE_ANGLE_SCALE
+    mini_wave_vy_scale: float = _MINI_WAVE_VY_SCALE
 
     @classmethod
     def from_meta(cls, meta):

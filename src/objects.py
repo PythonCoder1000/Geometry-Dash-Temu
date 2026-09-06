@@ -24,7 +24,7 @@ in :mod:`player`; the registry only describes *data*.
 from dataclasses import dataclass
 
 from .constants import (
-    BG_PRESETS, DASH_SPEED, DASH_TIME, PLAYER_COLORS,
+    BG_PRESETS, PLAYER_COLORS,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING, MODE_ROBOT,
     T_BLOCK, T_SLAB, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW,
@@ -40,7 +40,7 @@ from .constants import (
     T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
-    T_JUMP_PREDICTOR, T_BOT_CHECKPOINT,
+    T_JUMP_PREDICTOR, T_BOT_CHECKPOINT, T_DASH_STOP,
     C_BLOCK, C_SLAB, C_SPIKE, C_SAW, C_ORB, C_PINK_ORB, C_RED_ORB,
     C_BLUE_ORB, C_GREEN_ORB, C_BLACK_ORB, C_DASH_ORB, C_DASH_ORB_GRAV,
     C_SPIDER_ORB, C_TELEPORT_ORB, C_PAD, C_PINK_PAD, C_RED_PAD, C_BLUE_PAD,
@@ -51,7 +51,7 @@ from .constants import (
     C_SPEED_FAST, C_SPEED_FASTER, C_SPEED_FASTEST, C_DECO_CRYSTAL,
     C_DECO_PILLAR, C_DECO_GLOW, C_CAM_TRIGGER, C_BG_TRIGGER, C_MOVE_TRIGGER,
     C_COLOR_TRIGGER, C_PULSE_TRIGGER, C_ROTATE_TRIGGER, C_FOLLOW_TRIGGER,
-    C_TIME_WARP, C_JUMP_PREDICTOR, C_BOT_CHECKPOINT,
+    C_TIME_WARP, C_JUMP_PREDICTOR, C_BOT_CHECKPOINT, C_DASH_STOP,
 )
 
 
@@ -153,6 +153,10 @@ class ObjectSpec:
     fields: tuple = ()
     single_instance: bool = False
     editor_only: bool = False
+    # ``invisible`` is a universal per-instance flag rather than a schema
+    # Field, so a type that should start hidden declares it here and
+    # ``seed_defaults`` writes it on placement.
+    invisible_by_default: bool = False
 
     def field(self, key):
         for f in self.fields:
@@ -167,12 +171,10 @@ class ObjectSpec:
 
 _F_TARGET_OID = Field("target_oid", "Target oid", "int", 0, 0, None,
                       persist="always")
-_F_DASH = (
-    Field("dash_speed", "Dash speed", "float", DASH_SPEED, 1.0, 60.0,
-          step=1.0, decimals=1),
-    Field("dash_dur", "Dash duration (f)", "int", DASH_TIME, 1, 240,
-          step=5),
-)
+# Orbs fire once per attempt by default (historical behaviour every
+# existing level is built around).  Turning this on makes an orb
+# re-triggerable, matching real GD "orb spam" / bunny-hopping.
+_F_MULTI_ACTIVATE = Field("multi_activate", "Multi Activate", "bool", False)
 _F_DIR = Field("dir", "Direction", "choice", "auto",
                choices=("auto", "up", "down", "left", "right"))
 _F_FREE_MODE = Field("free_mode", "Free camera", "bool", False)
@@ -190,8 +192,10 @@ CAT_SPEED = "Speed"
 CAT_DECO = "Deco"
 CAT_TRIGGERS = "Triggers"
 CAT_MISC = "Misc"
+CAT_EDITOR_UTILS = "Utils"
 CATEGORY_ORDER = (CAT_BLOCKS, CAT_HAZARDS, CAT_ORBS, CAT_PADS, CAT_PORTALS,
-                  CAT_SPEED, CAT_DECO, CAT_TRIGGERS, CAT_MISC)
+                  CAT_SPEED, CAT_DECO, CAT_TRIGGERS, CAT_MISC,
+                  CAT_EDITOR_UTILS)
 
 
 def _mode_portal(t, name, tip, col):
@@ -214,31 +218,39 @@ _SPEC_LIST = [
                animated=True),
     # ---- Orbs (GD semantics) -----------------------------------------
     ObjectSpec(T_ORB, "Yellow Orb", "Click in air for a medium jump.",
-               C_ORB, CAT_ORBS, animated=True),
+               C_ORB, CAT_ORBS, animated=True,
+               fields=(_F_MULTI_ACTIVATE,)),
     ObjectSpec(T_PINK_ORB, "Pink Orb", "Click for a small hop.",
-               C_PINK_ORB, CAT_ORBS, animated=True),
+               C_PINK_ORB, CAT_ORBS, animated=True,
+               fields=(_F_MULTI_ACTIVATE,)),
     ObjectSpec(T_RED_ORB, "Red Orb", "Click for a big jump.",
-               C_RED_ORB, CAT_ORBS, animated=True),
+               C_RED_ORB, CAT_ORBS, animated=True,
+               fields=(_F_MULTI_ACTIVATE,)),
     ObjectSpec(T_BLUE_ORB, "Blue Orb", "Click to flip gravity.",
-               C_BLUE_ORB, CAT_ORBS, animated=True),
+               C_BLUE_ORB, CAT_ORBS, animated=True,
+               fields=(_F_MULTI_ACTIVATE,)),
     ObjectSpec(T_GREEN_ORB, "Green Orb", "Click to jump AND flip gravity.",
-               C_GREEN_ORB, CAT_ORBS, animated=True),
+               C_GREEN_ORB, CAT_ORBS, animated=True,
+               fields=(_F_MULTI_ACTIVATE,)),
     ObjectSpec(T_BLACK_ORB, "Black Orb", "Click to slam downward.",
-               C_BLACK_ORB, CAT_ORBS, animated=True),
-    ObjectSpec(T_DASH_ORB, "Dash Orb", "Hold to dash in the orb's "
-               "direction; release to stop.", C_DASH_ORB, CAT_ORBS,
-               animated=True, fields=_F_DASH),
-    ObjectSpec(T_DASH_ORB_GRAV, "Gravity Dash Orb", "Hold to dash; gravity "
-               "flips when the dash ends.", C_DASH_ORB_GRAV, CAT_ORBS,
-               animated=True, fields=_F_DASH),
+               C_BLACK_ORB, CAT_ORBS, animated=True,
+               fields=(_F_MULTI_ACTIVATE,)),
+    ObjectSpec(T_DASH_ORB, "Dash Orb", "Click to dash in the orb's "
+               "direction; dashes until an S Block stops it.", C_DASH_ORB,
+               CAT_ORBS, animated=True, fields=(_F_MULTI_ACTIVATE,)),
+    ObjectSpec(T_DASH_ORB_GRAV, "Gravity Dash Orb", "Click to dash until an "
+               "S Block stops it; gravity flips when the dash ends.",
+               C_DASH_ORB_GRAV, CAT_ORBS, animated=True,
+               fields=(_F_MULTI_ACTIVATE,)),
     ObjectSpec(T_SPIDER_ORB, "Spider Orb", "Click to teleport to the "
                "nearest surface + flip gravity.", C_SPIDER_ORB, CAT_ORBS,
-               animated=True, fields=(_F_DIR,)),
+               animated=True, fields=(_F_DIR, _F_MULTI_ACTIVATE)),
     ObjectSpec(T_TELEPORT_ORB, "Teleport Orb", "Link two with the Group "
                "tool to teleport.", C_TELEPORT_ORB, CAT_ORBS, animated=True,
                fields=(Field("group_id", "Group ID", "int", 0, 0, None,
                              persist="always"),
-                       Field("dest", "Destination", "bool", False))),
+                       Field("dest", "Destination", "bool", False),
+                       _F_MULTI_ACTIVATE)),
     # ---- Pads --------------------------------------------------------
     ObjectSpec(T_PAD, "Yellow Pad", "Auto medium jump (spring).", C_PAD,
                CAT_PADS),
@@ -304,8 +316,12 @@ _SPEC_LIST = [
                CAT_DECO, animated=True),
     # ---- Triggers ----------------------------------------------------
     ObjectSpec(T_CAMERA_TRIGGER, "Camera Trigger", "Pans the camera to the "
-               "target row.", C_CAM_TRIGGER, CAT_TRIGGERS,
-               fields=(Field("cy", "Target row", "int", 0, default_from="y",
+               "target row, freezes it in place (Static), or resumes "
+               "following the player (Follow).", C_CAM_TRIGGER, CAT_TRIGGERS,
+               fields=(Field("cam_mode", "Mode", "choice", "pan",
+                             choices=("pan", "static", "follow"),
+                             persist="always"),
+                       Field("cy", "Target row", "int", 0, default_from="y",
                              persist="always"),)),
     ObjectSpec(T_BG_TRIGGER, "BG Trigger", "Changes the background "
                "preset.", C_BG_TRIGGER, CAT_TRIGGERS,
@@ -355,8 +371,11 @@ _SPEC_LIST = [
                fields=(Field("factor", "Factor", "float", 1.0, 0.0, 10.0,
                              step=0.1, persist="always"),)),
     # ---- Misc --------------------------------------------------------
-    ObjectSpec(T_START, "Start Pos", "Player spawn point.", C_START, CAT_MISC,
-               single_instance=True),
+    ObjectSpec(T_START, "Start Pos", "Player spawn point. A level may hold "
+               "several; the active one is where every attempt begins.",
+               C_START, CAT_MISC,
+               fields=(Field("active", "Active", "bool", False,
+                             persist="always"),)),
     ObjectSpec(T_END, "Finish", "Finish line.", C_END, CAT_MISC,
                animated=True),
     ObjectSpec(T_COIN, "Coin", "Collect all 3 to verify mastery!", C_COIN,
@@ -380,6 +399,10 @@ _SPEC_LIST = [
     ObjectSpec(T_BOT_CHECKPOINT, "Bot Checkpoint", "Bot waypoint: pulls the "
                "auto-bot search toward this cell.", C_BOT_CHECKPOINT,
                CAT_MISC, editor_only=True),
+    # ---- Editor utils ------------------------------------------------
+    ObjectSpec(T_DASH_STOP, "S Block", "Stops an active dash — invisible "
+               "by default.", C_DASH_STOP, CAT_EDITOR_UTILS,
+               invisible_by_default=True),
     # ---- Transient (never placeable) ---------------------------------
     ObjectSpec(T_CHECKPOINT, "Checkpoint", "Practice-mode save spot.",
                C_CHECKPOINT, None, animated=True),
@@ -414,6 +437,50 @@ ALL_TYPES = [t for _, items in PALETTE_CATEGORIES for t in items]
 
 
 # ---------------------------------------------------------------------------
+# Start positions
+# ---------------------------------------------------------------------------
+# A level may hold any number of Start Pos objects; exactly one carries
+# ``active=True`` and that is where every attempt begins.  Levels saved
+# before the field existed (and corrupt ones flagging none or several)
+# fall back to the historical leftmost-wins rule, so the spawn point is
+# always well defined.  Player, editor and play session all resolve the
+# spawn through these three functions so they can never disagree.
+
+def start_objects(objects):
+    """Every Start Pos in ``objects``, in cycling order (left to right)."""
+    return sorted((o for o in objects if o.get("t") == T_START),
+                  key=lambda o: (o["x"], o["y"]))
+
+
+def active_start(objects):
+    """The Start Pos attempts spawn from, or ``None`` if the level has none."""
+    starts = start_objects(objects)
+    if not starts:
+        return None
+    flagged = [o for o in starts if o.get("active")]
+    return flagged[0] if len(flagged) == 1 else starts[0]
+
+
+def set_active_start(objects, target):
+    """Make ``target`` the one and only active Start Pos.  Returns it."""
+    for o in objects:
+        if o.get("t") == T_START:
+            o["active"] = o is target
+    return target
+
+
+def cycle_active_start(objects, delta):
+    """Move the active flag ``delta`` places along the x-ordered Start Pos
+    list.  Returns the newly active object, or ``None`` if there are none."""
+    starts = start_objects(objects)
+    if not starts:
+        return None
+    current = active_start(objects)
+    index = next((i for i, o in enumerate(starts) if o is current), 0)
+    return set_active_start(objects, starts[(index + delta) % len(starts)])
+
+
+# ---------------------------------------------------------------------------
 # Generic field helpers used by the loader and the editor
 # ---------------------------------------------------------------------------
 
@@ -423,6 +490,8 @@ def seed_defaults(obj):
     for f in spec.fields:
         if f.key not in obj:
             obj[f.key] = f.default_for(obj)
+    if spec.invisible_by_default and "invisible" not in obj:
+        obj["invisible"] = True
     return obj
 
 

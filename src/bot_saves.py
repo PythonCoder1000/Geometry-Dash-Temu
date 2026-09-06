@@ -85,8 +85,13 @@ def _path_for(level_key, name):
 
 
 def save_run(level_key, name, *, inputs, waypoints, mirror_waypoints,
-             status, beam_width=None, attempts=None):
-    """Persist one bot run. Overwrites any prior save with the same name."""
+             status, beam_width=None, attempts=None, bot="", note=""):
+    """Persist one bot run. Overwrites any prior save with the same name.
+
+    ``bot`` records which of the two bots produced the run and ``note``
+    carries its verdict (e.g. that a frame-perfect fallback was needed),
+    so a reloaded run still says how it was obtained.
+    """
     if not level_key or not name:
         return False
     payload = {
@@ -94,6 +99,8 @@ def save_run(level_key, name, *, inputs, waypoints, mirror_waypoints,
         "level_key": level_key,
         "saved_at": int(time.time()),
         "status": status,
+        "bot": bot,
+        "note": note,
         "inputs": [[bool(h), bool(p)] for h, p in (inputs or [])],
         "waypoints": [[float(x), float(y)] for x, y in (waypoints or [])],
         "mirror_waypoints": [[float(x), float(y)]
@@ -144,6 +151,7 @@ def list_runs(level_key):
             "name": data.get("name") or fn[len(prefix):-5],
             "saved_at": int(data.get("saved_at", 0)),
             "status": data.get("status", ""),
+            "bot": data.get("bot", ""),
             "input_frames": len(data.get("inputs", [])),
             "path": path,
         })

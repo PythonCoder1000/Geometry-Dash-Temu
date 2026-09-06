@@ -218,7 +218,7 @@ def _auth_stub(screen, clock):
 if __name__ == "__main__":
     # In frozen PyInstaller builds, each multiprocessing.spawn child
     # re-executes this binary. Without freeze_support() it re-enters
-    # main() and opens another game window; the parallel autobot would
+    # main() and opens another game window; the parallel bot would
     # spawn one extra window per worker. freeze_support intercepts the
     # spawn handoff and runs only the worker code path instead. No-op
     # in regular `python main.py` runs.

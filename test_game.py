@@ -33,7 +33,7 @@ from src.constants import (
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     SOLID_TYPES, HAZARD_TYPES, ORB_TYPES, PAD_TYPES,
-    DIFFICULTIES, LEVEL_FORMAT_VERSION, LEVELS_DIR, BLUE_ORB_PUSH_SCALE,
+    DIFFICULTIES, LEVEL_FORMAT_VERSION, LEVELS_DIR,
 )
 from src.graphics import (
     normalize_rotation, cell_rect, slab_rect, spike_hitboxes, saw_hitbox,
@@ -68,7 +68,7 @@ def section(name):
 
 
 def make_flat_level(length=50, extras=None):
-    objs = [{"t": T_START, "x": 3, "y": 9, "r": 0}]
+    objs = [{"t": T_START, "x": 3, "y": 9, "r": 0, "active": True}]
     for gx in range(length):
         objs.append({"t": T_BLOCK, "x": gx, "y": 10, "r": 0})
     objs.append({"t": T_END, "x": length - 5, "y": 9, "r": 0})
@@ -319,8 +319,7 @@ p = Player(objs)
 for _ in range(22):
     p.update(False, False)
 p.update(True, True)
-check("Green orb flips gravity and launches in the new direction",
-      p.grav == -1 and p.vy > 0)
+check("Green orb flips gravity when walked into", p.grav == -1)
 
 
 # ---------------------------------------------------------------------------
@@ -916,7 +915,7 @@ check("_draw_player_swatch helper exists",
 
 
 # ---------------------------------------------------------------------------
-# Hint mode — autobot ghost overlay available from play.py
+# Hint mode — bot ghost overlay available from play.py
 # ---------------------------------------------------------------------------
 section("Hint mode")
 
@@ -927,25 +926,25 @@ from src import play as _play_mod
 check("play.run_play exists",
       callable(getattr(_play_mod, "run_play", None)))
 
-# The autobot itself must be importable and solve a trivial flat level.
+# The human bot itself must be importable and solve a trivial flat level.
 # This is the same path the H key triggers, so a passing test gives us
 # reasonable confidence the hint button won't crash on a real level.
-from src.autobot import AutoBot as _HintBot
+from src.bots import HumanBot as _HintBot
 flat = make_flat_level(length=20)
 # Strip any runtime-only keys the test level doesn't have.
 _hb = _HintBot([dict(o) for o in flat])
-check("AutoBot accepts plain object list", _hb is not None)
+check("HumanBot accepts plain object list", _hb is not None)
 
 # solve() returns (waypoints, mirror_waypoints, inputs, won). Pass a tiny
 # max_frames so the test stays quick even if the solver has to explore a bit.
 _hwp, _hmwp, _hin, _hwon = _hb.solve(screen=None, clock=None, max_frames=600)
-check("AutoBot.solve returns a waypoint list",
+check("HumanBot.solve returns a waypoint list",
       isinstance(_hwp, list))
-check("AutoBot.solve returns a mirror waypoint list",
+check("HumanBot.solve returns a mirror waypoint list",
       isinstance(_hmwp, list))
-check("AutoBot.solve returns an input list",
+check("HumanBot.solve returns an input list",
       isinstance(_hin, list))
-check("AutoBot waypoints have 2-tuples",
+check("HumanBot waypoints have 2-tuples",
       not _hwp or (len(_hwp[0]) == 2 and isinstance(_hwp[0][0], (int, float))))
 check("Flat-level mirror waypoints empty (no dual portal)", _hmwp == [])
 
@@ -958,7 +957,7 @@ if _hwp:
     check("hint waypoints stay in sensible world range",
           max_x < 20 * C.CELL + 500)
 
-# AutoBot end-to-end on trivial flat ground: the solver should actually
+# HumanBot end-to-end on trivial flat ground: the solver should actually
 # win, not just return a shape. This is the strongest single check that
 # the beam search, scoring, and replay verification all line up.
 trivial = [
@@ -969,12 +968,12 @@ for gx in range(40):
 trivial.append({"t": T_END, "x": 35, "y": 9, "r": 0})
 _solver = _HintBot([dict(o) for o in trivial])
 _twp, _tmwp, _tin, _twon = _solver.solve(screen=None, clock=None, max_frames=2000)
-check("AutoBot solves trivial flat level", _twon is True)
-check("AutoBot trivial solution has inputs", len(_tin) > 0)
-check("AutoBot trivial waypoints reach end x",
+check("HumanBot solves trivial flat level", _twon is True)
+check("HumanBot trivial solution has inputs", len(_tin) > 0)
+check("HumanBot trivial waypoints reach end x",
       _twp and max(p[0] for p in _twp) >= 30 * C.CELL)
 
-# AutoBot with an obstacle: a single spike in the middle. The solver must
+# HumanBot with an obstacle: a single spike in the middle. The solver must
 # discover that jumping is required (not just walking) to reach the end.
 spike_level = [
     {"t": T_START, "x": 3, "y": 9, "r": 0},
@@ -985,13 +984,12 @@ spike_level.append({"t": T_SPIKE, "x": 12, "y": 9, "r": 0})
 spike_level.append({"t": T_END, "x": 35, "y": 9, "r": 0})
 _obstacle_bot = _HintBot([dict(o) for o in spike_level])
 _owp, _omwp, _oin, _owon = _obstacle_bot.solve(screen=None, clock=None, max_frames=3000)
-check("AutoBot solves single-spike level", _owon is True)
+check("HumanBot solves single-spike level", _owon is True)
 # When the bot solves with a jump, at least one frame must have pressed=True
 if _owon:
-    # Three-action bot: cube can now jump with (T, F) "hold" alone,
-    # so a clean spike clear may not contain a pressed=True frame.
-    # The meaningful invariant is that the bot held the button at
-    # least once (otherwise it never left the ground).
+    # One-button bot: a hold that begins on the ground carries its own
+    # press edge, so the meaningful invariant is that the button was
+    # held at least once (otherwise the player never left the ground).
     check("Spike solution holds the button at least once",
           any(held for held, _ in _oin))
 
@@ -1077,23 +1075,27 @@ check("Default (r=0) spider orb still flips gravity", _saw_flip)
 # ---------------------------------------------------------------------------
 # Dash orb — persistence + bot uses it correctly
 # ---------------------------------------------------------------------------
-section("Dash orb persistence + autobot integration")
+section("Dash orb persistence + human-bot integration")
 from src.constants import T_DASH_ORB as _TDO
 from src.levels import normalize_object as _nrm
 
-# 1) Custom dash_speed / dash_dur survive the save normalisation.
-_orb = {"t": _TDO, "x": 11, "y": 9, "r": 0,
-        "dash_speed": 18.0, "dash_dur": 25}
-_n = _nrm(_orb)
-check("dash_speed persists through normalize_object",
-      _n.get("dash_speed") == 18.0)
-check("dash_dur persists through normalize_object",
-      _n.get("dash_dur") == 25)
+# 1) Dash speed / duration are no longer per-orb: the registry has no
+#    such fields and legacy values in old level files are dropped.
+from src.objects import spec_for as _spec_for
+_dash_spec = _spec_for(_TDO)
+check("dash orb has no per-orb dash_speed / dash_dur fields",
+      _dash_spec.field("dash_speed") is None
+      and _dash_spec.field("dash_dur") is None)
+_n = _nrm({"t": _TDO, "x": 11, "y": 9, "r": 0,
+           "dash_speed": 18.0, "dash_dur": 25})
+check("legacy dash_speed / dash_dur are dropped on normalize_object",
+      "dash_speed" not in _n and "dash_dur" not in _n)
 
 # 2) Default-valued orbs don't bloat the JSON with redundant fields.
 _n_def = _nrm({"t": _TDO, "x": 11, "y": 9, "r": 0})
-check("default dash orb omits dash_speed / dash_dur fields",
-      "dash_speed" not in _n_def and "dash_dur" not in _n_def)
+check("default dash orb writes no optional fields",
+      "dash_speed" not in _n_def and "dash_dur" not in _n_def
+      and "multi_activate" not in _n_def)
 
 # 3) Solver wins a level whose only viable solution is the dash orb,
 #    after the orb has been round-tripped through normalize_object.
@@ -1104,19 +1106,18 @@ check("default dash orb omits dash_speed / dash_dur fields",
 _dash_lvl = [{"t": T_START, "x": 3, "y": 9, "r": 0}]
 for _gx in list(range(13)) + list(range(18, 30)):
     _dash_lvl.append({"t": T_BLOCK, "x": _gx, "y": 10, "r": 0})
-_dash_lvl.append({"t": _TDO, "x": 11, "y": 9, "r": 0,
-                  "dash_speed": 18.0, "dash_dur": 20})
+_dash_lvl.append({"t": _TDO, "x": 11, "y": 9, "r": 0})
 _dash_lvl.append({"t": T_END, "x": 27, "y": 9, "r": 0})
 _dash_lvl_saved = [_nrm(o) for o in _dash_lvl]
 _dash_bot = _HintBot([dict(o) for o in _dash_lvl_saved])
 _, _, _dash_inputs, _dash_won = _dash_bot.solve(
     screen=None, clock=None, max_frames=3000)
-check("autobot solves dash-orb level after save round-trip",
+check("human bot solves dash-orb level after save round-trip",
       _dash_won is True)
 if _dash_won:
     # Replay to confirm the dash actually fired (not solved by some
     # other unintended path).
-    from src.autobot import _SimPlayer as _DashSim
+    from src.bots import SimPlayer as _DashSim
     _replay = _DashSim([dict(o) for o in _dash_lvl_saved])
     _saw_dash = False
     for _h, _pr in _dash_inputs:
@@ -1125,7 +1126,7 @@ if _dash_won:
             _saw_dash = True
         if _replay.won:
             break
-    check("autobot solution genuinely uses the dash orb",
+    check("human bot solution genuinely uses the dash orb",
           _saw_dash is True)
 
 # 4) Jump probe hint integration — adding a probe to the level should
@@ -1139,10 +1140,133 @@ _probe_lvl.append({"t": _TJP_dash, "x": 11, "y": 9, "r": 0,
 _probe_bot = _HintBot([dict(o) for o in _probe_lvl])
 _, _, _probe_inputs, _probe_won = _probe_bot.solve(
     screen=None, clock=None, max_frames=3000)
-check("autobot solves spike level with a jump probe present",
+check("human bot solves spike level with a jump probe present",
       _probe_won is True)
-check("AutoBot._probe_xs index populated when probes exist",
+check("HumanBot probe index populated when probes exist",
       len(_probe_bot._probe_xs) == 1 and _probe_bot._probe_xs[0] == 11)
+
+
+# ---------------------------------------------------------------------------
+# Dash rework: one global speed, no duration of its own, stopped by the
+# S Block rather than by releasing the button.
+# ---------------------------------------------------------------------------
+section("Dash rework + S Block")
+from src.constants import (T_DASH_ORB_GRAV as _TDOG, T_DASH_STOP as _TDS,
+                           DASH_TIMER_INFINITE as _DASH_INF)
+from src.physics import DEFAULT_PARAMS as _DEF_PARAMS
+
+
+def _dash_level(extras):
+    return make_flat_level(40, extras=extras)
+
+
+def _run_to_dash(p, orb_gx, max_frames=60):
+    """Step until the orb at ``orb_gx`` has started a dash."""
+    for _ in range(max_frames):
+        over = p.x + p.size > orb_gx * 50 and p.x < (orb_gx + 1) * 50
+        p.update(over, over)
+        if p.dash_timer > 0:
+            return True
+    return False
+
+
+_dp = Player(_dash_level([{"t": _TDO, "x": 6, "y": 9, "r": 0}]))
+check("dash orb starts a dash", _run_to_dash(_dp, 6))
+check("dash uses the single global dash speed",
+      abs(_dp.dash_vx - _DEF_PARAMS.dash_speed) < 1e-6)
+check("dash duration is the infinite sentinel",
+      _dp.dash_timer > _DASH_INF - 100)
+_x_before = _dp.x
+for _ in range(20):
+    _dp.update(False, False)
+check("releasing the button no longer ends the dash", _dp.dash_timer > 0)
+check("released dash keeps travelling at dash speed",
+      abs((_dp.x - _x_before) - 20 * _DEF_PARAMS.dash_speed) < 1e-6)
+
+# S Block stops it, and the gravity variant still flips on that stop.
+_sp_dash = Player(_dash_level([{"t": _TDOG, "x": 6, "y": 9, "r": 0},
+                            {"t": _TDS, "x": 14, "y": 9, "r": 0}]))
+check("gravity dash orb starts a dash", _run_to_dash(_sp_dash, 6))
+_grav_before = _sp_dash.grav
+_stopped = False
+for _ in range(60):
+    _sp_dash.update(False, False)
+    if _sp_dash.dash_timer == 0:
+        _stopped = True
+        break
+check("S Block stops an active dash", _stopped)
+check("gravity dash orb still flips gravity when an S Block ends the dash",
+      _sp_dash.grav == -_grav_before)
+
+# Registry / placement wiring for the S Block.
+from src.objects import (SPECS as _SPECS, CAT_EDITOR_UTILS as _CAT_UTILS,
+                         PALETTE_CATEGORIES as _PAL_CATS,
+                         seed_defaults as _seed_defaults)
+from src.editor import ops as _ops_mod
+check("S Block is registered as 'dash_stop' named 'S Block'",
+      _SPECS[_TDS].name == "S Block")
+check("S Block lives in the Editor Utils palette category",
+      _SPECS[_TDS].category == _CAT_UTILS
+      and _TDS in dict(_PAL_CATS)[_CAT_UTILS])
+check("Editor Utils tab is the last palette category",
+      _PAL_CATS[-1][0] == _CAT_UTILS)
+_placed_objs = []
+_placed = _ops_mod.place_object(_placed_objs, 4, 9, _TDS, 0)
+check("freshly placed S Block is invisible by default",
+      _placed.get("invisible") is True and _placed_objs == [_placed])
+check("only the S Block seeds invisible",
+      _seed_defaults({"t": T_ORB, "x": 1, "y": 1}).get("invisible") is None)
+
+# Orb multi-activate flag: default False = fire once ever (unchanged).
+section("Orb multi-activate flag")
+
+
+def _orb_double_touch(multi):
+    """Fire the same orb twice with two discrete presses, stepping the
+    player back to the pre-touch pose in between (= leaving and coming
+    back to the orb).  Returns one bool per touch: did the orb fire?"""
+    orb = {"t": T_ORB, "x": 6, "y": 9, "r": 0, "multi_activate": multi}
+    p = Player(_dash_level([orb]))
+    while p.x + p.size < 6 * 50 + 10:
+        p.update(False, False)
+    pose = (p.x, p.y, p.vy)
+    fired = []
+    for _ in range(2):
+        p.x, p.y, p.vy = pose
+        p.on_ground = False
+        before = p.vy
+        p.update(True, True)
+        fired.append(p.vy < before - 5)
+        p.update(False, False)
+    return fired
+
+
+check("default orb (multi_activate off) fires once and never again",
+      _orb_double_touch(False) == [True, False])
+check("multi_activate orb fires again on a second discrete touch",
+      _orb_double_touch(True) == [True, True])
+
+_ma_orb = {"t": T_ORB, "x": 6, "y": 9, "r": 0, "multi_activate": True}
+_ma_p = Player(_dash_level([_ma_orb]))
+while _ma_p.x + _ma_p.size < 6 * 50 + 10:
+    _ma_p.update(False, False)
+_ma_pose = (_ma_p.x, _ma_p.y, _ma_p.vy)
+_ma_p.update(True, True)
+check("multi_activate orb stays out of `passed`",
+      ("orb", 6, 9) not in _ma_p.passed
+      and ("orb", 6, 9) in _ma_p.held_orbs)
+_ma_p.x, _ma_p.y, _ma_p.vy = _ma_pose
+_ma_p.update(True, False)
+check("multi_activate orb does not refire during the same hold",
+      _ma_p.vy > -5)
+_ma_p.update(False, False)
+check("releasing clears the multi-activate hold gate", not _ma_p.held_orbs)
+check("every orb type exposes the multi_activate field",
+      all(_SPECS[_t].field("multi_activate") is not None
+          for _t in ORB_TYPES))
+_ma_norm = _nrm({"t": T_ORB, "x": 6, "y": 9, "r": 0, "multi_activate": True})
+check("multi_activate survives normalize_object",
+      _ma_norm.get("multi_activate") is True)
 
 
 # ---------------------------------------------------------------------------
@@ -1188,10 +1312,10 @@ check("dir=right teleports the player horizontally",
 
 
 # ---------------------------------------------------------------------------
-# BotController upgrades — hysteresis, hazard lookahead, mirror-aware safety
+# PathFollowController upgrades — hysteresis, hazard lookahead, mirror-aware safety
 # ---------------------------------------------------------------------------
-section("BotController upgrades")
-from src.bot import BotController as _LiveBot
+section("PathFollowController upgrades")
+from src.bots import PathFollowController as _LiveBot
 from src.constants import (
     T_BLOCK as _TB, T_SPIKE as _TSP,
     MODE_CUBE as _MC, MODE_WAVE as _MW, MODE_SHIP as _MSH,
@@ -1202,14 +1326,14 @@ from src.physics import PhysicsParams as _PP
 _bc_h = _LiveBot([(0, 0), (1000, 0)])
 _bc_h._hold_state = False
 # One flip request in isolation is swallowed.
-_r1 = _bc_h._hysteretic_hold(True)
+_r1 = _bc_h.hysteretic_hold(True)
 check("hysteresis: single flip request keeps prior state", _r1 is False)
 # Two consecutive flip requests commit the flip.
-_r2 = _bc_h._hysteretic_hold(True)
+_r2 = _bc_h.hysteretic_hold(True)
 check("hysteresis: two consecutive flip requests commit", _r2 is True)
 # Consistent requests reset the counter; a single dissent is swallowed.
-_bc_h._hysteretic_hold(True)
-_r3 = _bc_h._hysteretic_hold(False)
+_bc_h.hysteretic_hold(True)
+_r3 = _bc_h.hysteretic_hold(False)
 check("hysteresis: single dissent after settled state is ignored",
       _r3 is True)
 
@@ -1224,16 +1348,16 @@ check("reset clears hysteresis hold state",
 _haz_objs = [{"t": _TSP, "x": 10, "y": 5, "r": 0}]
 _bc_p = _LiveBot([(0, 0)], objects=_haz_objs)
 # 10 frames forward at vx=5 puts us at cell 10 where the spike sits.
-_hits = _bc_p._path_crosses_hazard(
+_hits = _bc_p.path_crosses_hazard(
     pcx=50.0, pcy=5 * CELL + CELL // 2,
     vx=CELL / 1.0, vy=0.0, frames=10,
 )
-check("_path_crosses_hazard flags a spike on the trajectory", _hits is True)
-_clear = _bc_p._path_crosses_hazard(
+check("path_crosses_hazard flags a spike on the trajectory", _hits is True)
+_clear = _bc_p.path_crosses_hazard(
     pcx=50.0, pcy=0 * CELL + CELL // 2,
     vx=CELL / 1.0, vy=0.0, frames=10,
 )
-check("_path_crosses_hazard misses when path sits well above hazard row",
+check("path_crosses_hazard misses when path sits well above hazard row",
       _clear is False)
 
 # 4) Wave-mode lookahead flips the PD choice when it sails into a spike.
@@ -1268,7 +1392,7 @@ _below_spike = [{"t": _TSP, "x": 4, "y": 6, "r": 0},  # just below/ahead
 _wps = [(50.0, 5 * CELL - 200), (300.0, 5 * CELL - 200)]
 _bc_w = _LiveBot(_wps, objects=_below_spike)
 # Nudge hysteresis so whatever the decision comes out to is returned live.
-_bc_w._HOLD_CONFIRM_FRAMES = 0
+_bc_w.HOLD_CONFIRM_FRAMES = 0
 held, pressed = _bc_w.compute_input(_fp)
 # PD would dive (want_hold=False since error_future<0 and grav=1), but
 # diving hits the spike at cell (4-5, 6). Lookahead should flip to
@@ -1315,18 +1439,19 @@ _mirror_spike = [{"t": _TSP, "x": 4, "y": 9, "r": 0},
 # Bot should flip to held=True so the mirror stays safe.
 _wps2 = [(50.0, 5 * CELL + 400), (300.0, 5 * CELL + 400)]
 _bc_m = _LiveBot(_wps2, objects=_mirror_spike)
-_bc_m._HOLD_CONFIRM_FRAMES = 0
+_bc_m.HOLD_CONFIRM_FRAMES = 0
 held_m, _ = _bc_m.compute_input(_fp2)
 check("mirror-aware lookahead flips when main-safe choice kills mirror",
       held_m is True)
 
 
 # ---------------------------------------------------------------------------
-# Dual mode — mirror inherits player state, autobot snapshots it
+# Dual mode — mirror inherits player state, the bots snapshot it
 # ---------------------------------------------------------------------------
 section("Dual mode")
 from src.constants import T_MODE_DUAL, HEIGHT as _DH
-from src.autobot import _snap as _ab_snap, _restore as _ab_restore, _build_obj_index, _SimPlayer
+from src.bots import (snapshot as _ab_snap, restore as _ab_restore,
+                      build_obj_index as _build_obj_index, SimPlayer as _SimPlayer)
 
 # 1) `_enter_dual` should inherit the player's current motion state.
 #    A grounded player crossing a dual portal should produce a grounded
@@ -1398,10 +1523,11 @@ if _sp.mirror is not None:
     expected_grav = snap_mirror["grav"]
     snap = _ab_snap(_sp)
     # snap layout: (vals, passed, anims, obj_pos, mirror, mirror_passed,
-    # coins_collected) — coins slot was added when the autobot started
-    # rewarding coin pickups in its heuristic.
-    check("Snapshot is 7-tuple (mirror + mirror_passed + coins slots present)",
-          isinstance(snap, tuple) and len(snap) == 7)
+    # coins_collected, held_orbs) — coins slot was added when the bot
+    # started rewarding coin pickups in its heuristic; held_orbs when
+    # orbs gained the multi-activate flag.
+    check("Snapshot is 8-tuple (mirror, mirror_passed, coins, held_orbs)",
+          isinstance(snap, tuple) and len(snap) == 8)
     check("Snapshot mirror is non-None when player has a mirror",
           snap[4] is not None)
     # Now corrupt the live mirror, restore, and confirm we got the snapshot's
@@ -1607,19 +1733,24 @@ check("Same click also activates mirror's orb",
       _mirror_jumped)
 
 section("Blue orb behavior")
-# Blue orb must flip gravity AND give a launch impulse in the new gravity
-# direction (matching the blue pad and every other orb type) — it used to
-# only flip gravity with zero vy, leaving the player with no pop at all.
+# Blue orb flips gravity AND reverses momentum: falling into one launches
+# you back the way you came under the new gravity (a "bounce"), unlike
+# the green orb which only flips gravity and lets momentum carry through.
 _bp = Player(make_flat_level())
-_bp.vy = 0.0
+_bp.vy = 8.0  # falling
 _grav_before = _bp.grav
 _bp.activate_blue_orb()
 check("Blue orb flips gravity", _bp.grav == -_grav_before)
-check("Blue orb imparts a launch impulse (nonzero vy)", _bp.vy != 0.0)
-check("Blue orb push matches new gravity direction",
-      _bp.vy == _bp.params.jump_force * BLUE_ORB_PUSH_SCALE * _bp.grav)
-check("Blue orb push is weaker than a yellow-orb jump (GD: flip only)",
-      abs(_bp.vy) < abs(_bp.params.jump_force))
+check("Blue orb reverses momentum", _bp.vy == -8.0)
+
+section("Green orb behavior")
+# Green orb flips gravity only — momentum is untouched.
+_gp = Player(make_flat_level())
+_gp.vy = 8.0
+_grav_before = _gp.grav
+_gp.activate_green_orb()
+check("Green orb flips gravity", _gp.grav == -_grav_before)
+check("Green orb does not touch momentum", _gp.vy == 8.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1732,14 +1863,23 @@ check("Replay callback crash surfaces in info_msg, not silent",
 # ---------------------------------------------------------------------------
 section("Wave / ship line trail")
 from src import player as _player_mod
-from src.constants import MODE_WAVE as _MW, MODE_SHIP as _MSh, MODE_BALL as _MB
+from src.constants import (MODE_WAVE as _MW, MODE_SHIP as _MSh,
+                           MODE_BALL as _MB, ALL_MODES as _ALL_MODES)
 
 from src.player import draw as _player_draw_mod
 _draw_src = inspect.getsource(_player_draw_mod.draw_trail)
-check("Line-trail modes include wave and ship",
-      _MW in _player_draw_mod._LINE_TRAIL_MODES
+check("Every mode uses the solid ribbon trail (no icon-copy ghosts)",
+      all(_m in _player_draw_mod._LINE_TRAIL_MODES for _m in _ALL_MODES)
+      and _MW in _player_draw_mod._LINE_TRAIL_MODES
       and _MSh in _player_draw_mod._LINE_TRAIL_MODES
-      and _MB not in _player_draw_mod._LINE_TRAIL_MODES)
+      and _MB in _player_draw_mod._LINE_TRAIL_MODES)
+check("Ghost-stamp icon-copy trail is gone",
+      not hasattr(_player_draw_mod, "_ghost_stamp")
+      and "_ghost_stamp" not in _draw_src)
+check("Every mode has a ribbon thickness (explicit or default)",
+      all(isinstance(_player_draw_mod._LINE_THICKNESS.get(
+          _m, _player_draw_mod._LINE_THICKNESS_DEFAULT), int)
+          for _m in _ALL_MODES))
 check("Line trail uses pygame.draw.line with thickness",
       "pygame.draw.line" in _draw_src and "thickness" in _draw_src)
 check("Line trail uses a single SRCALPHA surface for alpha blending",
@@ -1784,6 +1924,57 @@ try:
 except Exception:
     _ship_drew = False
 check("Ship trail draws without crash", _ship_drew)
+
+# The whole trail is redrawn every frame in the CURRENT mode's style, so
+# a mode switch restyles even samples recorded under the previous mode.
+from src.constants import MODE_CUBE as _MC
+_p.mode = _MW
+_p.trail = []
+for _ in range(30):
+    _p.update(False, False)
+_wave_pts = len(_p.trail)
+_surf.fill((0, 0, 0))
+_p.draw(_surf, 0, 0)
+_wave_shot = _surf.copy()
+_p.mode = _MC
+_surf.fill((0, 0, 0))
+_p.draw(_surf, 0, 0)
+_cube_shot = _surf.copy()
+check("mode switch keeps every recorded trail sample", len(_p.trail) == _wave_pts)
+
+
+def _trail_pixels(shot, col):
+    hits = 0
+    for _sx in range(0, 1200, 4):
+        for _sy in range(0, 700, 4):
+            if shot.get_at((_sx, _sy))[:3] == col:
+                hits += 1
+    return hits
+
+
+_col = _p._player_color()
+check("wave trail is a solid ribbon in the player colour",
+      _trail_pixels(_wave_shot, _col) > 0)
+check("the whole trail re-renders in the new mode's style after a switch",
+      _trail_pixels(_cube_shot, _col) > 0
+      and _cube_shot.get_size() == _wave_shot.get_size())
+
+# ---------------------------------------------------------------------------
+# S Block sprite: a hollow white rectangle with an "S", drawn through the
+# normal gameplay draw_obj path (it is a real object, not an editor overlay).
+# ---------------------------------------------------------------------------
+section("S Block sprite")
+from src.sprites import draw_obj as _draw_obj
+from src.constants import T_DASH_STOP as _TDS_spr, C_DASH_STOP as _CDS
+_sb = _pg.Surface((100, 100))
+_sb.fill((0, 0, 0))
+_draw_obj(_sb, _TDS_spr, 25, 25, 50, 0, 0)
+_white_hits = sum(1 for _x in range(100) for _y in range(100)
+                  if min(_sb.get_at((_x, _y))[:3]) > 180)
+check("S Block renders white pixels through draw_obj", _white_hits > 20)
+check("S Block is hollow (its centre stays background)",
+      min(_sb.get_at((50, 36))[:3]) < 100)
+check("S Block colour is white", _CDS == (255, 255, 255))
 
 
 # ---------------------------------------------------------------------------
@@ -2038,13 +2229,14 @@ check("Spatial index: close rect finds the objects in that cell range",
 
 # CR3 #2: _restore must un-move objects that animated after the snap was
 # taken. Without this fix the beam search's sibling expansions desync.
-from src.autobot import _SimPlayer, _snap as _ab_snap2, _restore as _ab_restore2
+from src.bots import (SimPlayer, snapshot as _ab_snap2,
+                      restore as _ab_restore2)
 _dm_objs = [
     {"t": T_START, "x": 3, "y": 9, "oid": 1},
     {"t": T_BLOCK, "x": 20, "y": 10, "oid": 2},
     {"t": T_END, "x": 80, "y": 0, "oid": 3},
 ]
-_dm_sp = _SimPlayer([dict(o) for o in _dm_objs])
+_dm_sp = SimPlayer([dict(o) for o in _dm_objs])
 _snap_before = _ab_snap2(_dm_sp)
 # Fire a move trigger that relocates block #2.
 _dm_sp._start_move_trigger({
@@ -2062,7 +2254,7 @@ check("_restore un-moved the post-snap mutation back to origin",
 
 # CR3 #4: dedup key must distinguish candidates with different
 # mirror_input_buffer when a mirror is present.
-from src.autobot import _dedup_key as _dk, SnapVals
+from src.bots import dedup_key as _dk, SnapVals
 _make_snap = lambda mib: (
     SnapVals(  # vals
         0.0, 0.0, 0.0, True, True, False, 0.0, 1, 0, MODE_CUBE,
@@ -2079,24 +2271,307 @@ _k_buf_6 = _dk(_make_snap(6))
 check("Dedup key distinguishes different mirror_input_buffer values",
       _k_buf_0 != _k_buf_6)
 
-# Single-threaded pipeline: AutoBot.solve must NOT spawn workers /
+# Single-threaded pipeline: the solver must NOT spawn workers /
 # multiprocessing pools. The earlier parallel widening / parallel
 # pathfinder were removed because they caused the CPU-peg / unresponsive
 # ESC bug. We assert the source no longer mentions multiprocessing or
 # the now-removed worker functions.
-from src import autobot as _ab_mod
-_ab_src = inspect.getsource(_ab_mod.AutoBot.solve)
-check("AutoBot.solve is single-threaded (no multiprocessing imports)",
+import src.bots as _bots_pkg
+from src.bots import human as _hb_mod, toggle_search as _ts_mod
+_ab_src = inspect.getsource(_hb_mod.HumanBot.solve)
+check("HumanBot.solve is single-threaded (no multiprocessing imports)",
       "multiprocessing" not in _ab_src and "Pool(" not in _ab_src)
-_ab_module_src = inspect.getsource(_ab_mod)
-check("AutoBot module no longer pulls in multiprocessing",
-      "import multiprocessing" not in _ab_module_src)
+for _mod in (_hb_mod, _ts_mod, _bots_pkg):
+    check(f"{_mod.__name__} does not pull in multiprocessing",
+          "import multiprocessing" not in inspect.getsource(_mod))
+
+# Exactly two bots exist. A third search variant sneaking back in is the
+# regression this whole consolidation was about, so pin the roster.
+import os as _os_roster
+_bot_modules = sorted(
+    f for f in _os_roster.listdir(_os_roster.path.dirname(_bots_pkg.__file__))
+    if f.endswith(".py"))
+check("bots package holds exactly the two bots plus shared machinery",
+      _bot_modules == ["__init__.py", "action_space.py", "human.py",
+                       "loophole.py", "progress.py", "sim.py",
+                       "toggle_search.py"])
+check("no legacy bot modules remain",
+      not any(_os_roster.path.exists(_os_roster.path.join("src", _f))
+              for _f in ("autobot.py", "bot.py", "pathfinder_bot.py",
+                         "y_bot.py")))
+
+
+# ---------------------------------------------------------------------------
+# One-button realism — a bot may only produce inputs a person could.
+#
+# The old three-way action space ((F,F) / (T,T) / (T,F)) let the search
+# place a press edge anywhere inside a continuous hold. Since orbs fire
+# on the press edge, that was an orb picker: with two overlapping orbs
+# the solver could hold through the first and press on the second. It
+# also meant nothing structurally forced the two dual bodies onto one
+# input. Both collapse once the action space is a single boolean whose
+# rising edge IS the press.
+# ---------------------------------------------------------------------------
+section("One-button input model")
+from src.bots import HUMAN as _HM, FRAME_PERFECT as _FP
+from src.bots.action_space import InputModel as _IM, replay_state as _rstate
+
+# 1) Two options at most, and the press is always the rising edge.
+_acts = _HM.actions(prev_held=False, dwell=9)
+check("action space offers at most two options (one button)", len(_acts) == 2)
+check("every action's press is the rising edge of its held bit",
+      all(p == (h and not False) for h, p, _d in _acts))
+_hold_acts = _HM.actions(prev_held=True, dwell=9)
+check("holding cannot re-press (no edge while already held)",
+      all(p is False for h, p, _d in _hold_acts if h))
+
+# 2) The dwell rule removes the flip until the state has lasted long enough.
+check("dwell rule hides the flip before min_dwell",
+      len(_HM.actions(prev_held=False, dwell=1)) == 1)
+check("frame-perfect model may flip every frame",
+      len(_FP.actions(prev_held=False, dwell=1)) == 2)
+check("frame-perfect still keeps the one-button rule",
+      all(p == h for h, p, _d in _FP.actions(prev_held=False, dwell=1)))
+
+# 3) An impossible chain (re-press mid-hold) is rejected and repairable.
+_illegal = [(True, True), (True, False), (True, True), (True, False)]
+check("violations() catches a re-press inside a continuous hold",
+      any("press edge" in why for _i, why in _HM.violations(_illegal)))
+check("sanitize() repairs an illegal chain",
+      _HM.violations(_HM.sanitize(_illegal)) == [])
+check("sanitize() preserves the held track it repairs",
+      [h for h, _p in _HM.sanitize(_illegal)] == [h for h, _p in _illegal])
+_too_fast = _HM.stream([False, True, False, True, False])
+check("violations() catches toggling faster than a hand can",
+      any("min_dwell" in why for _i, why in _HM.violations(_too_fast)))
+
+# 4) Real solves come back one-button clean. These are the same levels
+#    the solver tests above use, so a regression in the search's action
+#    space shows up here rather than as a mysterious replay desync.
+check("flat-level solution is reproducible on one button",
+      _HM.violations(_tin) == [])
+check("spike-level solution is reproducible on one button",
+      _HM.violations(_oin) == [])
+check("dash-orb solution is reproducible on one button",
+      _HM.violations(_dash_inputs) == [])
+
+# 5) Dual mode: the physics has no per-body input channel, and the bot
+#    emits one bit per frame, so independent-per-body control is not
+#    representable. Pin both halves.
+_core_src = inspect.getsource(Player.update)
+check("Player.update feeds the mirror the SAME input it got",
+      "self._step_mirror(input_held, input_pressed)" in _core_src)
+_dual_lvl = make_flat_level(length=30,
+                            extras=[{"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0}])
+_dual_bot = _HintBot([dict(o) for o in _dual_lvl])
+_, _, _dual_in, _dual_won = _dual_bot.solve(screen=None, clock=None,
+                                            max_frames=2000, time_budget=15)
+check("dual level solves", _dual_won is True)
+check("dual solution is one-button (both bodies share the bit)",
+      _HM.violations(_dual_in) == [])
+
+
+# ---------------------------------------------------------------------------
+# Solver progress — the "stuck at 98%, SOLVED only after ESC" bug.
+#
+# Root cause 1: the bar divided the deepest player.x by the end wall's
+# pixel column. player.x is the LEFT edge and the win fires when the
+# RIGHT edge crosses the wall, so a winning run's x is end_x - size and
+# the bar could never reach 100.
+# Root cause 2: the win was surfaced lazily — the search returned on the
+# winning frame but the caller then spent seconds polishing with the
+# stale frame on screen, and ESC (which aborted the polish) was what
+# appeared to "reveal" the solve.
+# ---------------------------------------------------------------------------
+section("Solver progress reporting")
+from src.bots import SolveProgress as _SP, win_x_for_objects as _winx
+
+_pg_lvl = make_flat_level(length=20)
+_pg_win_x = _winx(_pg_lvl)
+_pg_end_x = max(o["x"] for o in _pg_lvl if o["t"] == T_END) * C.CELL
+from src.bots.progress import TRIGGER_INFLATE_PX as _TRIG
+check("win x is the end wall minus the player, not the wall itself",
+      _pg_win_x == _pg_end_x - PLAYER_SIZE - _TRIG and _pg_win_x < _pg_end_x)
+
+# The x a real winning run actually stops at must read as 100%, which is
+# exactly what the old denominator got wrong.
+_pg_bot = _HintBot([dict(o) for o in _pg_lvl])
+_, _, _pg_in, _pg_won = _pg_bot.solve(screen=None, clock=None, max_frames=900)
+check("progress level solves", _pg_won is True)
+_pg_player = Player([dict(o) for o in _pg_lvl])
+for _h, _p in _pg_in:
+    _pg_player.update(_h, _p)
+    if _pg_player.won:
+        break
+_pg = _SP(None, None, _pg_win_x)
+_pg.note_x(_pg_player.x)
+check("a genuinely winning x reads as 100%", _pg.percent() == 100)
+check("old denominator would have capped below 100 (the reported bug)",
+      int(_pg_player.x / _pg_end_x * 100) < 100)
+
+# report_win pins 100% immediately, before any post-win work runs.
+_pg2 = _SP(None, None, _pg_win_x)
+_pg2.note_x(0.0)
+check("before the win the bar is not at 100", _pg2.percent() == 0)
+_pg2.report_win()
+check("report_win latches solved on the spot", _pg2.solved is True)
+check("report_win pins the bar at 100% immediately", _pg2.percent() == 100)
+_pg2.note_x(1.0)
+check("a later low x cannot drag the bar back off 100",
+      _pg2.percent() == 100)
+check("percent clamps to 100 for oversized x",
+      (lambda q: (q.note_x(_pg_win_x * 10), q.percent())[1])(
+          _SP(None, None, _pg_win_x)) == 100)
+
+# The search must call report_win on the frame the sim wins, not later.
+from src.bots import human as _hb_src_mod
+_astar_src = inspect.getsource(_hb_src_mod.HumanBot._astar)
+check("A* reports the win on the winning frame",
+      "if player.won:" in _astar_src
+      and 'self.progress.report_win("SOLVED")' in _astar_src)
+check("every phase result routes through report_win before returning",
+      'self.progress.report_win("SOLVED")'
+      in inspect.getsource(_hb_src_mod.HumanBot._run_pipeline))
+
+
+# ---------------------------------------------------------------------------
+# Backsliding + local minima — the bot must not lose cleared ground, and
+# must be able to abandon a branch it cannot finish.
+# ---------------------------------------------------------------------------
+section("Monotone progress + backtracking")
+from src.bots import BestSolution as _BS, CheckpointLadder as _CL
+
+_bs = _BS()
+check("first result is adopted",
+      _bs.offer([(0.0, 0.0), (500.0, 0.0)], [], [(True, True)]) is True)
+check("a shallower replacement is refused",
+      _bs.offer([(0.0, 0.0), (200.0, 0.0)], [], [(False, False)]) is False)
+check("the floor still holds the deeper chain", _bs.deepest_x == 500.0)
+check("a deeper replacement is adopted",
+      _bs.offer([(0.0, 0.0), (900.0, 0.0)], [], [(True, True)]) is True)
+_bs.offer([(0.0, 0.0), (950.0, 0.0)], [], [(True, True)], won=True)
+check("a win is adopted over a partial", _bs.won is True)
+check("a deeper NON-win cannot displace a win",
+      _bs.offer([(0.0, 0.0), (5000.0, 0.0)], [], []) is False)
+
+_cl = _CL()
+for _i in range(1, 9):
+    _cl.record(_i * _CL.STRIDE_PX * 2, [(True, True)] * _i)
+check("ladder records a rung per stride of progress", len(_cl.rungs) == 9)
+check("ladder starts at the deepest rung",
+      _cl.rung_index() == len(_cl.rungs) - 1)
+_deep_prefix = _cl.prefix()
+_cl.on_stall()
+_back1 = _cl.rung_index()
+_cl.on_stall()
+_back2 = _cl.rung_index()
+_cl.on_stall()
+_back3 = _cl.rung_index()
+check("a stall restarts from an EARLIER prefix, not the deepest",
+      len(_cl.prefix()) < len(_deep_prefix))
+check("consecutive stalls walk back geometrically (1, 2, 4 rungs)",
+      (len(_cl.rungs) - 1 - _back1, _back1 - _back2, _back2 - _back3)
+      == (1, 2, 4))
+_cl.on_progress()
+check("progress resets the walk-back to the deepest rung",
+      _cl.rung_index() == len(_cl.rungs) - 1)
+for _ in range(12):
+    _cl.on_stall()
+check("the ladder reports exhaustion once it walks off the front",
+      _cl.exhausted() is True)
+
+# The reverse walk must rank branches by distance reached. Ranking on
+# survival frames is what let the old reverse-DFS adopt a chain that
+# hovered longer but got less far — the backsliding report.
+_walk_src = inspect.getsource(_hb_src_mod.HumanBot._reverse_walk)
+check("reverse walk commits through the monotone floor, not a survival rank",
+      "commit(" in _walk_src and "alive_frames" not in _walk_src
+      and "best_alive" not in _walk_src)
+
+# The menu keeps the better of the cached and the new run.
+_bm.clear_last_solve()
+check("menu adopts the first result",
+      _bm._record_result([(0.0, 0.0), (800.0, 0.0)], [], [(True, True)],
+                         "ok") is True)
+check("menu refuses a shallower re-run",
+      _bm._record_result([(0.0, 0.0), (300.0, 0.0)], [], [(False, False)],
+                         "ok") is False)
+check("menu refuses to downgrade a solved run to a partial",
+      _bm._record_result([(0.0, 0.0), (9999.0, 0.0)], [], [],
+                         "partial") is False)
+check("menu still holds the good run",
+      _bm.get_last_inputs() == [(True, True)])
+_bm.clear_last_solve()
+
+
+# ---------------------------------------------------------------------------
+# Frame-perfect escape hatch — only for levels with no human solution,
+# and always labelled as such.
+# ---------------------------------------------------------------------------
+section("Frame-perfect escape hatch")
+_eh_bot = _HintBot([dict(o) for o in make_flat_level(length=20)])
+_, _, _eh_in, _eh_won = _eh_bot.solve(screen=None, clock=None, max_frames=900)
+check("an easy level solves without the escape hatch",
+      _eh_won is True and _eh_bot.used_frame_perfect is False)
+check("the human pass gets the bulk of the budget before the fallback",
+      0.5 <= _hb_src_mod.HumanBot.HUMAN_BUDGET_FRACTION < 1.0)
+_solve_src = inspect.getsource(_hb_src_mod.HumanBot.solve)
+check("the fallback is opt-out-able and explicitly flagged",
+      "ALLOW_FRAME_PERFECT" in _solve_src
+      and "self.used_frame_perfect = True" in _solve_src)
+
+# Determinism: the search must return the same chain twice. The replay
+# cache and the saved-run format both depend on it.
+_det_bot_a = _HintBot([dict(o) for o in spike_level])
+_det_bot_b = _HintBot([dict(o) for o in spike_level])
+_, _, _det_a, _ = _det_bot_a.solve(screen=None, clock=None, max_frames=3000)
+_, _, _det_b, _ = _det_bot_b.solve(screen=None, clock=None, max_frames=3000)
+check("two solves of the same level return identical inputs",
+      _det_a == _det_b)
+
+
+# ---------------------------------------------------------------------------
+# Loophole bot — hugs a drawn path but is allowed to leave it.
+# ---------------------------------------------------------------------------
+section("Loophole bot")
+from src.bots import LoopholeBot as _LB, DrawnPath as _DP
+
+_dp = _DP([(0.0, 100.0), (100.0, 200.0)])
+check("drawn path interpolates between waypoints", _dp.target_y(50.0) == 150.0)
+check("drawn path clamps before its first point", _dp.target_y(-10.0) == 100.0)
+check("drawn path clamps past its last point", _dp.target_y(999.0) == 200.0)
+check("offset past the path end is free (no penalty)",
+      _dp.offset(999.0, 0.0) == 0.0)
+check("empty path has no target", _DP([]).target_y(5.0) is None)
+
+_lb_lvl = make_flat_level(length=25)
+# A path drawn right along the ground line the player runs on.
+_lb_path = [(x * C.CELL, 9 * C.CELL + PLAYER_SIZE / 2) for x in range(25)]
+_lb = _LB([dict(o) for o in _lb_lvl], _lb_path)
+_lwp, _lmwp, _lin, _lwon = _lb.solve(screen=None, clock=None,
+                                     max_frames=1200, time_budget=20)
+check("loophole bot solves a level along the drawn path", _lwon is True)
+check("loophole bot output is one-button too", _HM.violations(_lin) == [])
+check("loophole bot reports how far it strayed",
+      isinstance(_lb.max_deviation_px, float)
+      and 0.0 <= _lb.off_path_fraction <= 1.0)
+check("a route that follows the ground line is not flagged as a loophole",
+      _lb.deviated is False)
+check("path bias is a bias, not a wall (zero outside the corridor)",
+      _lb.path_bias(Player([dict(o) for o in _lb_lvl])) >= 0.0)
+
+# It needs a path: the menu must say so rather than silently solving.
+_no_path_wp, _, _, _no_path_status, _no_path_err = _bm._run_solver(
+    None, None, _lb_lvl, kind=_bm.BOT_LOOPHOLE, drawn_path=None)
+check("loophole bot without a drawn path fails loudly",
+      _no_path_wp is None and _no_path_status == "failed"
+      and "drawn path" in _no_path_err)
 
 
 # ---------------------------------------------------------------------------
 # Physics determinism (TEST.md §1.2) — same inputs must produce
 # bit-identical trajectories across runs. This is the property the
-# autobot's replay-verify relies on.
+# the bots' replay-verify relies on.
 # ---------------------------------------------------------------------------
 section("Physics determinism")
 
@@ -2456,6 +2931,230 @@ finally:
     _lvls_st.LEVELS_DIR = _prev_levels_dir
     import shutil as _sh_st
     _sh_st.rmtree(_stores_tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Multiple Start Positions — a level may hold several; exactly one is
+# active and every attempt (human OR bot) begins there.
+# ---------------------------------------------------------------------------
+section("Multiple start positions")
+
+from src.objects import (
+    active_start as _active_start, start_objects as _start_objects,
+    cycle_active_start as _cycle_active_start,
+    set_active_start as _set_active_start, spec_for as _spec_for,
+)
+from src.editor import ops as _sp_ops
+
+
+def _multi_start_level():
+    objs = [{"t": T_START, "x": 3, "y": 9, "r": 0},
+            {"t": T_START, "x": 20, "y": 9, "r": 0, "active": True},
+            {"t": T_START, "x": 40, "y": 9, "r": 0}]
+    objs += [{"t": T_BLOCK, "x": gx, "y": 10, "r": 0} for gx in range(60)]
+    objs.append({"t": T_END, "x": 55, "y": 9, "r": 0})
+    return objs
+
+
+_ms_objs = _multi_start_level()
+_ms_expect_x = 20 * CELL + (CELL - PLAYER_SIZE) / 2
+
+check("Start Pos declares a persisted 'active' field",
+      _spec_for(T_START).field("active") is not None
+      and _spec_for(T_START).field("active").persist == "always")
+check("active start is the flagged one, not the leftmost",
+      _active_start(_ms_objs)["x"] == 20)
+check("Player spawns at the active start",
+      Player([dict(o) for o in _ms_objs]).x == _ms_expect_x)
+
+# Fallbacks: a pre-feature level (no flags) and a corrupt one (many
+# flags) both resolve to the historical leftmost-wins spawn.
+_ms_unflagged = [{k: v for k, v in o.items() if k != "active"}
+                 for o in _ms_objs]
+check("no start flagged -> leftmost wins",
+      _active_start(_ms_unflagged)["x"] == 3)
+_ms_all = [dict(o, active=True) if o["t"] == T_START else dict(o)
+           for o in _ms_objs]
+check("several flagged -> leftmost wins",
+      _active_start(_ms_all)["x"] == 3)
+check("no start object -> None", _active_start([]) is None)
+check("start_objects is ordered left to right",
+      [o["x"] for o in _start_objects(_ms_objs)] == [3, 20, 40])
+
+# Cycling keeps the "exactly one active" invariant.
+_ms_cyc = _multi_start_level()
+check("cycle forward picks the next start by x",
+      _cycle_active_start(_ms_cyc, 1)["x"] == 40)
+check("cycle wraps around", _cycle_active_start(_ms_cyc, 1)["x"] == 3)
+check("cycle backward walks the other way",
+      _cycle_active_start(_ms_cyc, -1)["x"] == 40)
+check("exactly one start stays flagged after cycling",
+      sum(1 for o in _ms_cyc if o.get("active")) == 1)
+check("set_active_start clears every other flag",
+      sum(1 for o in _ms_cyc
+          if o.get("active")) == 1
+      and _set_active_start(_ms_cyc, _start_objects(_ms_cyc)[0])["x"] == 3)
+
+# Placement: start positions coexist now (they used to be a singleton).
+_ms_place = _multi_start_level()
+_ms_new = _sp_ops.place_object(_ms_place, 7, 9, T_START, 0)
+check("placing a Start Pos no longer deletes the existing ones",
+      len(_start_objects(_ms_place)) == 4)
+check("a freshly placed Start Pos becomes the active one",
+      _active_start(_ms_place) is _ms_new)
+
+# Save / load round-trip of the flag.
+import tempfile as _ms_tmp, shutil as _ms_shutil
+from src.levels import save_level as _ms_save, load_level_full as _ms_load
+_ms_dir = _ms_tmp.mkdtemp(prefix="gdt_start_")
+try:
+    from src import levels as _ms_lvls
+    _ms_prev_dir = _ms_lvls.LEVELS_DIR
+    _ms_lvls.LEVELS_DIR = _ms_dir
+    _ms_path = _ms_save(_multi_start_level(), "multi_start_test")
+    _ms_meta, _ms_back = _ms_load(_ms_path)
+    check("saved level keeps all three start positions",
+          len(_start_objects(_ms_back)) == 3)
+    check("the active flag survives a save/load round-trip",
+          _active_start(_ms_back)["x"] == 20)
+    check("a reloaded level spawns the player at the active start",
+          Player(_ms_back).x == _ms_expect_x)
+finally:
+    _ms_lvls.LEVELS_DIR = _ms_prev_dir
+    _ms_shutil.rmtree(_ms_dir, ignore_errors=True)
+
+# Bots resolve the spawn through the same helper as the real player, so
+# a solver can never start somewhere the player would not.
+from src.bots.sim import SimPlayer as _MsSimPlayer
+check("SimPlayer spawns at the active start",
+      _MsSimPlayer([dict(o) for o in _ms_objs]).x == _ms_expect_x)
+from src.bots import HumanBot as _MsHumanBot
+_ms_bot = _MsHumanBot([dict(o) for o in _ms_objs])
+_ms_wp, _ms_mwp, _ms_inputs, _ms_won = _ms_bot.solve(
+    None, None, max_frames=4000, time_budget=20)
+check("HumanBot's first waypoint is the active start, not the leftmost",
+      bool(_ms_wp) and abs(_ms_wp[0][0] - _ms_expect_x) < CELL)
+
+
+# ---------------------------------------------------------------------------
+# Start-position key bindings + the bot menu's "Clear result" escape hatch
+# ---------------------------------------------------------------------------
+section("Start position keys / bot result clearing")
+
+from src.constants import WIDTH as _MS_W, HEIGHT as _MS_H
+_ms_screen = pygame.display.set_mode((_MS_W, _MS_H))
+_ms_clock = pygame.time.Clock()
+
+from src.editor import session as _ms_sess_mod
+from src.editor.state import MODE_BUILD as _MS_BUILD, MODE_EDIT as _MS_EDIT
+
+_ms_had_autosave = _ms_sess_mod.has_autosave
+_ms_sess_mod.has_autosave = lambda: False       # never open the recover modal
+try:
+    _ms_sess = _ms_sess_mod.EditorSession(_ms_screen, _ms_clock)
+finally:
+    _ms_sess_mod.has_autosave = _ms_had_autosave
+_ms_sess.st.objects[:] = _multi_start_level()
+_ms_sess.st.mode = _MS_EDIT
+
+
+def _ms_key(k):
+    _ms_sess._handle_key(pygame.event.Event(pygame.KEYDOWN, key=k, unicode="",
+                                            mod=0, scancode=0))
+
+
+_ms_undo_before = len(_ms_sess.st.undo_stack)
+_ms_key(pygame.K_2)
+check("editor 2 makes the next Start Pos active",
+      _active_start(_ms_sess.st.objects)["x"] == 40)
+check("cycling the active Start Pos is undoable",
+      len(_ms_sess.st.undo_stack) == _ms_undo_before + 1)
+check("cycling jumps the editor camera to the new Start Pos",
+      abs(_ms_sess.st.cam_x
+          - ((40 + 0.5) * _ms_sess.st.eff_cell - _MS_W / 2)) < 1)
+check("the newly active Start Pos is what the property panel shows",
+      bool(_ms_sess.st.selected) and _ms_sess.st.selected[0]["x"] == 40)
+_ms_key(pygame.K_1)
+check("editor 1 walks back to the previous Start Pos",
+      _active_start(_ms_sess.st.objects)["x"] == 20)
+_ms_sess.st.undo()
+check("undo restores the previously active Start Pos",
+      _active_start(_ms_sess.st.objects)["x"] == 40)
+
+# 1-9 still belong to the palette in Build mode — no binding collision.
+_ms_sess.st.mode = _MS_BUILD
+_ms_before_x = _active_start(_ms_sess.st.objects)["x"]
+_ms_key(pygame.K_2)
+check("Build mode keeps 1-9 as palette picks",
+      _active_start(_ms_sess.st.objects)["x"] == _ms_before_x)
+
+# Q / E in a real play session: switch AND restart from there.
+from src.play import PlaySession as _MsPlaySession
+_ms_play = _MsPlaySession(_ms_screen, _ms_clock, _multi_start_level(),
+                          "start-pos test", editor_test=True)
+check("play session spawns at the active Start Pos",
+      _ms_play.player.x == _ms_expect_x)
+_ms_play.player.save_checkpoint()
+_ms_play._handle_key(pygame.K_e)
+check("E activates the next Start Pos and restarts there",
+      _active_start(_ms_play.objects)["x"] == 40
+      and _ms_play.player.x == 40 * CELL + (CELL - PLAYER_SIZE) / 2)
+check("switching Start Pos drops practice checkpoints",
+      _ms_play.player.checkpoints == [])
+_ms_play._handle_key(pygame.K_q)
+check("Q activates the previous Start Pos and restarts there",
+      _active_start(_ms_play.objects)["x"] == 20
+      and _ms_play.player.x == _ms_expect_x)
+check("a bot Player agrees with the live session's spawn after Q/E",
+      Player([dict(o) for o in _ms_play.objects]).x == _ms_play.player.x)
+
+_ms_practice = _MsPlaySession(_ms_screen, _ms_clock, _multi_start_level(),
+                              "start-pos practice", practice_mode=True)
+_ms_practice._handle_key(pygame.K_q)
+check("practice mode honours Q/E too",
+      _active_start(_ms_practice.objects)["x"] == 3
+      and _ms_practice.player.x == 3 * CELL + (CELL - PLAYER_SIZE) / 2)
+
+# The monotone gate in _record_result is only escapable via a clear.
+from src import bot_menu as _ms_bm
+_ms_bm.clear_last_solve()
+_ms_deep = [(900.0, 100.0)]
+_ms_shallow = [(100.0, 100.0)]
+_ms_bm._record_result(_ms_deep, [], [1, 0, 1], "ok", "")
+check("a cached solved run rejects a worse one",
+      _ms_bm._record_result(_ms_shallow, [], [0], "partial", "") is False
+      and _ms_bm._last_waypoints == _ms_deep)
+_ms_bm.clear_last_solve()
+check("clearing wipes waypoints, inputs and status",
+      _ms_bm._last_waypoints is None and _ms_bm._last_inputs is None
+      and _ms_bm._last_status == "")
+check("after a clear even a partial result is adopted and shown",
+      _ms_bm._record_result(_ms_shallow, [], [0], "partial", "") is True
+      and _ms_bm._last_status == "partial")
+check("the bot menu offers a Clear result action",
+      "Clear result" in inspect.getsource(_ms_bm.run_bot_menu)
+      and '([], "cleared")' in inspect.getsource(_ms_bm.run_bot_menu))
+check("the editor drops its overlay when the menu reports 'cleared'",
+      '"cleared"' in inspect.getsource(_ms_sess_mod.EditorSession.do_bot_menu))
+check("play drops its hint overlay when the menu reports 'cleared'",
+      '"cleared"' in inspect.getsource(_MsPlaySession._open_bot_menu))
+
+_ms_sess.st.bot_waypoints = list(_ms_shallow)
+_ms_sess.st.bot_exact_inputs = [1, 0]
+_ms_sess.clear_bot_path()
+check("clear_bot_path wipes the editor overlay and the menu cache",
+      _ms_sess.st.bot_waypoints == []
+      and _ms_sess.st.bot_exact_inputs is None
+      and _ms_bm._last_waypoints is None)
+
+_ms_sess.st.bot_waypoints = list(_ms_shallow)
+_ms_bm._record_result(_ms_shallow, [], [0], "partial", "")
+_ms_sess._adopt_level({"name": "other"}, _multi_start_level(), "other.json")
+check("loading another level clears the previous level's bot path",
+      _ms_sess.st.bot_waypoints == [] and _ms_bm._last_waypoints is None)
+check("finishing a solve no longer force-switches to the Bot Path tool",
+      "st.edit_tool = TOOL_BOT_PATH"
+      not in inspect.getsource(_ms_sess_mod.EditorSession.do_bot_menu))
 
 
 print(f"\n=== Summary: {passed} passed, {failed} failed ===")

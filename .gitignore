@@ -268,3 +268,4 @@ levels/*.json
 
 # Level PNG exports (Ctrl+E in the editor) — generated output.
 exports/
+.claude/

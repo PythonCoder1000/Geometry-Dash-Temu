@@ -44,11 +44,13 @@ from .particles import Particles
 from .physics import PhysicsParams
 from .player import Player
 from .levels import update_meta
+from .objects import cycle_active_start, start_objects
 from .play_render import (
     render_world, render_hint_overlay, render_predicted_path,
     render_ghost_paths, render_death_hitbox_marker, render_best_run_ghost,
     render_player_and_particles, render_checkpoint_markers,
     render_death_reason, render_slowmo_vignette, render_pulse_flash,
+    render_toast,
     render_hud, render_debug_overlay, render_state_hud,
     render_pause_overlay, render_win_overlay,
 )
@@ -257,6 +259,8 @@ class PlaySession:
         self.win_sfx_played = False
         self.meta_persisted = False
         self.show_debug = False
+        self.toast_text = ""
+        self.toast_timer = 0
         self.show_state = bool(editor_test)
         self.dbg_frame_times = []
         self.test_speed_idx = len(TEST_SPEEDS) - 1
@@ -383,11 +387,12 @@ class PlaySession:
 
     # ---- hints / persistence ---------------------------------------------
     def _compute_hint_path(self):
-        """Run the autobot once for the practice-mode H overlay.
+        """Run the human bot once for the practice-mode H overlay.
         Returns ``(status, waypoints, mirror_waypoints)``."""
         try:
-            from .autobot import AutoBot
-            solver = AutoBot(_clean_objects(self.objects), params=self.player.params)
+            from .bots import HumanBot
+            solver = HumanBot(_clean_objects(self.objects),
+                              params=self.player.params)
             wp, mwp, _inputs, won = solver.solve(self.screen, self.clock)
             if not wp:
                 return "failed", None, None
@@ -453,10 +458,16 @@ class PlaySession:
         lfn = os.path.basename(self.level_path) if self.level_path else None
         result = run_bot_menu(
             self.screen, self.clock, [dict(o) for o in self.objects],
-            precomputed_path=self.hint_path, level_filename=lfn, meta=self.meta)
+            precomputed_path=self.hint_path, drawn_path=self.hint_path,
+            level_filename=lfn, meta=self.meta)
         if result is not None:
             new_path, new_status = result
-            if new_path:
+            if new_status == "cleared":
+                self.hint_path = None
+                self.hint_mirror_path = None
+                self.hint_status = ""
+                self.hint_visible = False
+            elif new_path:
                 self.hint_path = new_path
                 self.hint_mirror_path = get_last_mirror_waypoints()
                 self.hint_status = new_status
@@ -472,6 +483,27 @@ class PlaySession:
             self.guard.reset()
         else:
             self.hint_visible = not self.hint_visible
+
+    def toast(self, text, frames=110):
+        self.toast_text = text
+        self.toast_timer = frames
+
+    def _cycle_start_position(self, delta):
+        """Q / E: make the previous / next Start Pos active and restart the
+        attempt there right away.  Practice checkpoints belong to the start
+        position they were dropped from, so they go with it."""
+        starts = start_objects(self.objects)
+        if len(starts) < 2:
+            self.toast("Level has only one Start Position")
+            return
+        new_start = cycle_active_start(self.objects, delta)
+        index = next(i for i, o in enumerate(start_objects(self.objects))
+                     if o is new_start) + 1
+        self.start_x = None          # a test-from-cursor spawn no longer applies
+        self.player.checkpoints.clear()
+        self.paused = False
+        self.reset_attempt()
+        self.toast(f"Start Position {index}/{len(starts)}")
 
     def _handle_key(self, key):
         """Returns a session result to exit with, or None."""
@@ -498,6 +530,9 @@ class PlaySession:
             sfx.toggle_mute()
         elif key == pygame.K_r and not p.won:
             self.reset_attempt()
+        elif (key in (pygame.K_q, pygame.K_e) and not p.won
+              and not self.is_sim_run):
+            self._cycle_start_position(-1 if key == pygame.K_q else 1)
         elif key == pygame.K_c and self.practice_mode and p.alive and not p.won:
             p.save_checkpoint()
             sfx.play("practice_checkpoint", 0.4)
@@ -663,7 +698,8 @@ class PlaySession:
         self.attempt_frames += 1
         if self.attempt_frames % 2 == 0:
             self.current_run.append((self.attempt_frames, p.x, p.y))
-        self.cam_x = p.x - CAMERA_LEAD_PX
+        if not p.camera_locked:
+            self.cam_x = p.x - CAMERA_LEAD_PX
         after_passed = set(p.passed)
         _play_interaction_sounds(
             before_passed, after_passed, before_pads,
@@ -745,8 +781,9 @@ class PlaySession:
         if p.free_cam_mode:
             p.target_cam_y = p.y + p.size / 2 - HEIGHT / 2
         self.prev_cam_y = self.cam_y
-        dy = (p.target_cam_y - self.cam_y) * CAM_Y_EASE
-        self.cam_y += max(-CAM_Y_MAX_STEP, min(CAM_Y_MAX_STEP, dy))
+        if not p.camera_locked:
+            dy = (p.target_cam_y - self.cam_y) * CAM_Y_EASE
+            self.cam_y += max(-CAM_Y_MAX_STEP, min(CAM_Y_MAX_STEP, dy))
         target_top, target_bot = BG_PRESETS[p.bg_preset % len(BG_PRESETS)]
         for i in range(3):
             self.bg_top[i] += (target_top[i] - self.bg_top[i]) * 0.06
@@ -817,6 +854,7 @@ class PlaySession:
         render_checkpoint_markers(s, self.practice_mode, p, self.pulse,
                                   cam_x, cam_y, shake_x, shake_y)
         render_death_reason(s, self.death_timer, p)
+        render_toast(s, self.toast_text, self.toast_timer)
         render_slowmo_vignette(s, os_, self.CLEAR, self.death_slowmo_timer)
         render_pulse_flash(s, os_, p.pulse_intensity())
         if self.death_flash_timer > 0:
@@ -850,6 +888,8 @@ class PlaySession:
         while True:
             self.guard.tick()
             self.pulse += 1
+            if self.toast_timer > 0:
+                self.toast_timer -= 1
             mpos = pygame.mouse.get_pos()
             result, clicked_pos = self._poll_input()
             if result is not None:

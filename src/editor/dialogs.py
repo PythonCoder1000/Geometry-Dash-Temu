@@ -31,6 +31,7 @@ EDITOR_SHORTCUTS = [
         ("Ctrl+D", "Duplicate in place"),
         ("Del", "Delete selection"),
         ("Shift+B", "Toggle bot-only on selection"),
+        ("1 / 2", "Previous / next active Start Pos (not in Build mode)"),
     ]),
     ("View", [
         ("Arrows / WASD", "Pan (Shift = faster)"),
@@ -41,9 +42,8 @@ EDITOR_SHORTCUTS = [
     ]),
     ("Run / save", [
         ("T / Shift+T", "Test play / test from cursor"),
-        ("K", "Run bot on drawn path"),
+        ("K", "Run drawn path live"),
         ("L", "Bot menu"),
-        ("Y", "Live Y-bot"),
         ("S / Ctrl+L", "Save / load"),
         ("Ctrl+E", "Export PNG"),
         ("Ctrl+Shift+S", "Save selection as snippet"),

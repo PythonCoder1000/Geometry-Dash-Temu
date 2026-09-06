@@ -15,6 +15,7 @@ from ..geometry import (
     obj_scale, spike_hitboxes, saw_hitbox, cell_rect, slab_rect, slope_polygon,
 )
 from ..levels import get_group_id
+from ..objects import active_start
 from ..jump_predictor import find_probe, predict, draw_overlay
 from .state import TOP_H, BAR_Y, MODE_BUILD, MODE_DELETE, TOOL_LINK, TOOL_BOT_PATH
 from . import ops
@@ -77,6 +78,9 @@ def render_canvas(screen, st, stars, mountains):
         screen.blit(_grid_surface(e), (ox, TOP_H + oy))
     left, right, top, bot = visible_cell_range(st)
     pulse = st.pulse
+    # Several Start Pos objects may sit in a level; only one spawns the
+    # player, so it gets a ring the inactive ones do not have.
+    live_start = active_start(st.objects)
     for o in st.objects:
         if not _in_view(o, left, right, top, bot):
             continue
@@ -94,6 +98,10 @@ def render_canvas(screen, st, stars, mountains):
             dim.fill((0, 0, 0, 140))
             screen.blit(dim, (sx, sy))
             pygame.draw.rect(screen, (200, 200, 255), (sx, sy, e, e), 1)
+        if o is live_start:
+            pygame.draw.rect(screen, (120, 255, 140),
+                             (sx - 2, sy - 2, e + 4, e + 4), 2,
+                             border_radius=4)
         if o.get("_bot_only"):
             bx, by = int(sx), int(sy)
             pygame.draw.line(screen, (180, 100, 230), (bx + 6, by + 6), (bx + e - 6, by + e - 6), 2)

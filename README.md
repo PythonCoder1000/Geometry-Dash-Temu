@@ -28,7 +28,7 @@ Tests (custom check script, replays golden playthroughs and flags physics drift)
 | `src/editor/` | Level editor (`session`, `ui`, `ops`, `props`, `render`, `state`, `dialogs`) |
 | `src/geometry.py`, `src/sprites.py`, `src/graphics.py` | Hitbox maths, sprite baking, screen drawing |
 | `src/levels.py` | Level files and format migrations |
-| `src/autobot.py`, `src/bot.py`, `src/y_bot.py`, `src/bot_menu.py` | Bots |
+| `src/bots/` (`human.py`, `loophole.py` + shared sim/search), `src/bot_menu.py` | Bots |
 
 ## Editor
 

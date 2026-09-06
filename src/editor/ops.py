@@ -21,7 +21,7 @@ from ..graphics import draw_obj
 from ..levels import (
     next_group_id, next_object_id, next_coin_id, get_group_id,
 )
-from ..objects import seed_defaults, spec_for
+from ..objects import seed_defaults, set_active_start, spec_for
 
 MAX_UNDO_STACK = 60
 
@@ -39,6 +39,26 @@ _DIR_FLIP_V = {"up": "down", "down": "up"}
 
 def objects_at_cell(objects, gx, gy):
     return [o for o in objects if o["x"] == gx and o["y"] == gy]
+
+
+def index_by_id(seq, obj):
+    """``seq.index(obj)`` but by identity, not ``==``. Objects are plain
+    dicts, so two structurally-identical objects (e.g. several identical
+    blocks stacked on one cell — a completely normal thing to build)
+    compare equal by value; the built-in ``list.index``/``in`` would then
+    silently match whichever *equal* one comes first instead of the exact
+    object the caller means, corrupting anything that tracks "this
+    specific object" (stack cycling, front/back reordering). Returns -1
+    if not found, mirroring ``str.find``."""
+    target = id(obj)
+    for i, o in enumerate(seq):
+        if id(o) == target:
+            return i
+    return -1
+
+
+def contains_id(seq, obj):
+    return index_by_id(seq, obj) != -1
 
 
 def object_at_cell(objects, gx, gy, prefer_non_start=True):
@@ -82,11 +102,14 @@ def initial_objects():
 
 def place_object(objects, gx, gy, selected_type, rotation, group_id_counter=0):
     """Append a new object of ``selected_type`` at a cell.  Registry
-    defaults are seeded; single-instance types move instead of stack."""
+    defaults are seeded; the jump probe moves instead of stacking."""
     if selected_type == T_START:
-        objects[:] = [o for o in objects if o["t"] != T_START]
-        objects.append({"t": T_START, "x": gx, "y": gy, "r": rotation})
-        return objects[-1]
+        # Start positions coexist (as in GD); the newest one becomes the
+        # active spawn and every other one is cleared.
+        start = {"t": T_START, "x": gx, "y": gy, "r": rotation}
+        objects.append(start)
+        set_active_start(objects, start)
+        return start
     if selected_type == T_JUMP_PREDICTOR:
         from ..jump_predictor import detect_mode, detect_mini
         existing = next((o for o in objects if o["t"] == T_JUMP_PREDICTOR), None)

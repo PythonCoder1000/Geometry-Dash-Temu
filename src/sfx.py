@@ -52,7 +52,7 @@ def _gen_click():
 
 
 def _gen_bot_click():
-    """Sharper two-tone tick — fires when the autobot presses.
+    """Sharper two-tone tick — fires when the bot presses.
 
     Distinct from the regular coin "click" so the ear can tell a bot press
     apart from a pickup, and shorter/higher so rapid press sequences stay

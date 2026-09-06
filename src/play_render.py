@@ -415,6 +415,14 @@ def render_death_reason(screen, death_timer, player):
         22, (255, 220, 220), True, shadow=True)
 
 
+def render_toast(screen, text, timer):
+    """Brief centred notice (Start Position switches and the like)."""
+    if timer <= 0 or not text:
+        return
+    txt(screen, text, WIDTH // 2, HEIGHT // 2 - 120, 20, C_WHITE, True,
+        shadow=True)
+
+
 def render_slowmo_vignette(screen, overlay_scratch, clear_color,
                             death_slowmo_timer):
     """Bordered darkening while the punchy death slow-mo is active."""
@@ -538,7 +546,7 @@ def render_hud(screen, player, max_x, attempts, attempt_frames, meta,
     # Hint-mode status: a subtle top-left line the player can ignore
     # unless they've opted in by pressing H.
     if hint_visible and hint_path:
-        badge = "HINT · autobot path"
+        badge = "HINT · bot path"
         if hint_status == "partial":
             badge += " (partial)"
         txt(screen, badge, 20, 78, 13, (255, 200, 80), shadow=True)

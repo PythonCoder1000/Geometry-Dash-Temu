@@ -15,7 +15,9 @@ from ..constants import (
 )
 from ..graphics import txt, draw_obj, lighter
 from ..geometry import obj_scale, normalize_rotation
-from ..objects import spec_for, get_field_value, TYPE_NAMES
+from ..objects import (
+    spec_for, get_field_value, set_active_start, TYPE_NAMES,
+)
 from .state import TOP_H, BAR_Y
 from . import ops
 
@@ -212,7 +214,8 @@ class PropPanel:
         elif row.kind == "stack":
             single = objs[0]
             stack = ops.objects_at_cell(st.objects, single["x"], single["y"])
-            idx = stack.index(single) + 1 if single in stack else 0
+            found = ops.index_by_id(stack, single)
+            idx = found + 1 if found != -1 else 0
             txt(screen, f"Stack {idx}/{len(stack)}  (F/B: to front / back)",
                 row.rect.centerx, row.rect.centery, 11, C_WHITE, True)
             self._draw_box(screen, row.minus, "<", mpos, (60, 60, 90))
@@ -287,6 +290,9 @@ class PropPanel:
                     new = any(not get_field_value(o, row.field) for o in objs)
                     for o in objs:
                         o[row.key] = new
+                    if row.key == "active" and new:
+                        # Only one Start Pos may be active at a time.
+                        set_active_start(st.objects, objs[0])
                 else:
                     ops.toggle_flag(objs, row.key)
                 return True
@@ -296,10 +302,11 @@ class PropPanel:
             if row.kind == "stack":
                 single = objs[0]
                 stack = ops.objects_at_cell(st.objects, single["x"], single["y"])
-                if row.minus.collidepoint(pos) and single in stack:
-                    st.selected = [stack[(stack.index(single) - 1) % len(stack)]]
-                elif row.plus.collidepoint(pos) and single in stack:
-                    st.selected = [stack[(stack.index(single) + 1) % len(stack)]]
+                idx = ops.index_by_id(stack, single)
+                if row.minus.collidepoint(pos) and idx != -1:
+                    st.selected = [stack[(idx - 1) % len(stack)]]
+                elif row.plus.collidepoint(pos) and idx != -1:
+                    st.selected = [stack[(idx + 1) % len(stack)]]
                 elif row.rect.collidepoint(pos):
                     return True
                 else:

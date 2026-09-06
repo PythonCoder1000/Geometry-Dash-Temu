@@ -100,6 +100,12 @@ class EditorState:
         e = self.eff_cell
         return gx * e - self.cam_x, gy * e - self.cam_y
 
+    def center_on_cell(self, gx, gy):
+        """Put a grid cell in the middle of the visible canvas."""
+        e = self.eff_cell
+        self.cam_x = (gx + 0.5) * e - WIDTH / 2
+        self.cam_y = (gy + 0.5) * e - (TOP_H + BAR_Y) / 2
+
     def say(self, text, frames=90):
         self.msg = text
         self.msg_timer = frames

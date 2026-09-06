@@ -23,6 +23,7 @@ import pygame
 
 from ..constants import (
     CELL, HEIGHT, PLAYER_SIZE, MINI_PLAYER_SIZE, PLAYER_START_GX,
+    TRAIL_MAX_DISTANCE,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING, MODE_ROBOT, MODE_FROM_TYPE, SPEED_VALUES, PLAYER_COLORS,
     PLAYER_ICONS,
@@ -34,13 +35,13 @@ from ..constants import (
     T_MODE_MINI, T_MODE_BIG, T_MODE_DUAL, T_MODE_SOLO,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
-    PAD_TYPES, ORB_TYPES, DASH_ORB_TYPES,
-    COLLISION_SUBSTEP_PX,
+    PAD_TYPES, ORB_TYPES, DASH_ORB_TYPES, T_DASH_STOP,
+    COLLISION_SUBSTEP_PX, DASH_TIMER_INFINITE,
     ORB_PINK_SCALE, ORB_RED_SCALE, PAD_PINK_SCALE, PAD_RED_SCALE,
-    BLUE_ORB_PUSH_SCALE, BLUE_PAD_PUSH_SCALE,
 )
 from ..geometry import cell_rect, pad_trigger_rect, obj_scale, clamp
 from ..levels import get_group_id
+from ..objects import active_start
 from ..physics import DEFAULT_PARAMS
 from .. import settings
 from .body import MirrorBody
@@ -51,8 +52,6 @@ from .draw import DrawMixin
 # Orbs the mirror body reacts to (dash / teleport orbs are main-only).
 _MIRROR_ORBS = frozenset({T_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,
                           T_SPIDER_ORB, T_RED_ORB, T_PINK_ORB})
-_LINE_TRAIL_MODES = frozenset({MODE_WAVE, MODE_SHIP, MODE_SPIDER, MODE_SWING})
-
 _DIR_FROM_NAME = {"up": (0, -1), "down": (0, 1), "left": (-1, 0),
                   "right": (1, 0)}
 _DIR_FROM_ROT = {90: (1, 0), 180: (0, 1), 270: (-1, 0)}
@@ -75,7 +74,7 @@ def orb_direction(obj):
 class Player(CollisionMixin, TriggerMixin, DrawMixin):
     # __slots__: the physics inner loops touch x / y / vy / size / angle
     # hundreds of times per substep, so skipping the instance __dict__
-    # is a measurable win.  Subclasses (``_SimPlayer`` in autobot.py)
+    # is a measurable win.  Subclasses (``SimPlayer`` in bots/sim.py)
     # declare their own __slots__ for extra fields.
     __slots__ = (
         "objects", "params",
@@ -91,12 +90,13 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         "wave_vy_smooth", "trail",
         # shared
         "grounded_frames", "last_jump", "death_reason",
-        "target_cam_y", "free_cam_mode",
+        "target_cam_y", "free_cam_mode", "camera_locked",
         "color_index", "player_color", "icon_index", "bg_preset",
         "move_speed", "dash_timer", "dash_vx", "dash_vy",
         "_dash_flip_on_end",
         "input_buffer", "mirror_input_buffer", "teleport_cooldown",
-        "_mirror", "mirror_passed", "passed", "coins_collected", "frame",
+        "_mirror", "mirror_passed", "passed", "held_orbs",
+        "coins_collected", "frame",
         "_checkpoint_request", "_x_at_frame_start",
         "_hold_consumed", "_was_on_ground",
         "move_animations", "active_rotations", "active_pulses",
@@ -186,7 +186,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.active_rotations = []
         self.active_pulses = []
         # id(obj) -> obj for everything a trigger ever moved this
-        # session (the autobot's restore needs the candidate set).
+        # session (the bots' restore needs the candidate set).
         self._ever_moved = {}
         self._rebuild_spatial_index()
         self.x, self.y = self._spawn_point()
@@ -201,6 +201,9 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.grav = 1
         self.trail = []
         self.passed = set()
+        # Multi-activate orbs fired during the current hold; cleared on
+        # release so one press can never fire the same orb twice.
+        self.held_orbs = set()
         self.frame = 0
         self.mode = MODE_CUBE
         self.move_speed = self.params.base_move_speed
@@ -214,6 +217,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.teleport_cooldown = 0
         self.target_cam_y = 0.0
         self.free_cam_mode = False
+        self.camera_locked = False
         self.bg_preset = 0
         self.color_index = settings.get_player_color_index() % len(PLAYER_COLORS)
         self.player_color = PLAYER_COLORS[self.color_index]
@@ -242,10 +246,9 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
 
     # ---- spawn -----------------------------------------------------------
     def _start_object(self):
-        starts = [o for o in self.objects if o["t"] == T_START]
-        if starts:
-            return min(starts, key=lambda o: (o["x"], o["y"]))
-        return None
+        """The active Start Pos, so bots and the real player always spawn
+        at the same place (see :func:`objects.active_start`)."""
+        return active_start(self.objects)
 
     def _spawn_point(self):
         start = self._start_object()
@@ -323,6 +326,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             "angle": self.angle, "bg_preset": self.bg_preset,
             "target_cam_y": self.target_cam_y,
             "free_cam_mode": self.free_cam_mode,
+            "camera_locked": self.camera_locked,
             "color_index": self.color_index,
             "size": self.size,
             "coins": set(self.coins_collected),
@@ -343,11 +347,13 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.bg_preset = cp["bg_preset"]
         self.target_cam_y = cp["target_cam_y"]
         self.free_cam_mode = bool(cp.get("free_cam_mode", False))
+        self.camera_locked = bool(cp.get("camera_locked", False))
         self.color_index = cp.get("color_index", 0)
         self.player_color = PLAYER_COLORS[self.color_index % len(PLAYER_COLORS)]
         self.size = int(cp.get("size", PLAYER_SIZE))
         self.coins_collected = set(cp.get("coins", set()))
         self.passed = set(cp.get("passed", set()))
+        self.held_orbs = set()
         self.on_ground = False
         self.alive = True
         self.won = False
@@ -406,31 +412,34 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.input_buffer = 0
 
     def activate_blue_orb(self):
-        """Blue orb (GD): flip gravity with a small push, no jump."""
-        self._blue_flip(self, BLUE_ORB_PUSH_SCALE)
+        """Blue orb (GD): flip gravity AND reverse momentum — falling into
+        one launches you back the way you came, under the new gravity."""
+        self._blue_flip(self)
         self.input_buffer = 0
 
     def activate_green_orb(self):
-        """Green orb (GD): flip gravity and jump."""
+        """Green orb (GD): flip gravity only — momentum carries through,
+        so the arc bends smoothly into the new direction instead of
+        snapping like the blue orb."""
         self.grav *= -1
-        self._orb_jump(self, 1.0)
         self.input_buffer = 0
 
-    def _blue_flip(self, b, push_scale):
+    def _blue_flip(self, b):
         b.grav *= -1
         if b.mode not in (MODE_WAVE, MODE_SWING):
-            b.vy = self.params.jump_force * push_scale * b.grav
+            b.vy = -b.vy
         b.on_ground = False
 
     def activate_dash_orb(self, orb):
-        """Directional hold-dash from the orb's rotation. The gravity
-        variant flips gravity when the dash ends."""
-        speed = float(orb.get("dash_speed", self.params.dash_speed))
-        duration = int(orb.get("dash_dur", self.params.dash_time))
+        """Directional dash from the orb's rotation, at the one global
+        dash speed and with no duration of its own: it runs until an S
+        Block (or a wall / death) ends it.  The gravity variant flips
+        gravity whenever the dash ends, whatever ended it."""
+        speed = self.params.dash_speed
         angle = math.radians(float(orb.get("r", 0)))
         self.dash_vx = speed * math.cos(angle)
         self.dash_vy = speed * math.sin(angle)
-        self.dash_timer = max(1, duration)
+        self.dash_timer = DASH_TIMER_INFINITE
         self._dash_flip_on_end = orb["t"] == T_DASH_ORB_GRAV
         self.input_buffer = 0
 
@@ -569,28 +578,32 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         p = self.params
         mode = b.mode
         main = b is self
+        mini = b.size < PLAYER_SIZE
+        gmul = p.mini_gravity_scale if mini else 1.0
+        jmul = p.mini_jump_scale if mini else 1.0
         if mode == MODE_SHIP:
-            b.vy += p.ship_gravity * b.grav
+            b.vy += p.ship_gravity * gmul * b.grav
             if mode_held:
-                b.vy -= p.ship_thrust * b.grav
+                b.vy -= p.ship_thrust * gmul * b.grav
             b.vy = clamp(b.vy, -13.0, 13.0)
         elif mode == MODE_WAVE:
-            target_vy = self.move_speed * (-1 if mode_held else 1) * b.grav
+            wave_mul = p.mini_wave_vy_scale if mini else 1.0
+            target_vy = self.move_speed * wave_mul * (-1 if mode_held else 1) * b.grav
             b.vy = b.vy * 0.6 + target_vy * 0.4
         elif mode == MODE_UFO:
-            b.vy += p.gravity * b.grav
+            b.vy += p.gravity * gmul * b.grav
             b.vy = clamp(b.vy, -18.0, 18.0)
             if mode_held and b.on_ground:
                 if main:
                     self._record_jump_timing("ufo", input_pressed)
-                b.vy = p.jump_force * b.grav
+                b.vy = p.jump_force * jmul * b.grav
                 b.on_ground = False
             elif mode_pressed and not b.on_ground:
-                b.vy = p.ufo_jump_force * b.grav
+                b.vy = p.ufo_jump_force * jmul * b.grav
                 if main:
                     self.input_buffer = 0
         elif mode == MODE_SPIDER:
-            b.vy += p.gravity * b.grav
+            b.vy += p.gravity * gmul * b.grav
             b.vy = clamp(b.vy, -18.0, 18.0)
             if mode_pressed and b.on_ground:
                 if main:
@@ -599,7 +612,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 if main:
                     self.input_buffer = 0
         elif mode == MODE_SWING:
-            b.vy += p.gravity * b.grav
+            b.vy += p.gravity * gmul * b.grav
             b.vy = clamp(b.vy, -18.0, 18.0)
             if mode_pressed:
                 if main:
@@ -612,9 +625,9 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             # Held thruster, one boost per takeoff, budget refills on landing.
             if not raw_held and not b.on_ground:
                 b.thrust_disabled = True
-            b.vy += p.gravity * b.grav
+            b.vy += p.gravity * gmul * b.grav
             if mode_held and b.flight_budget > 0 and not b.thrust_disabled:
-                b.vy -= p.robot_thrust * b.grav
+                b.vy -= p.robot_thrust * gmul * b.grav
                 b.flight_budget -= 1
                 if b.on_ground:
                     if main:
@@ -625,21 +638,21 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             else:
                 b.vy = clamp(b.vy, -18.0, 5.4)
         elif mode == MODE_BALL:
-            b.vy += p.gravity * b.grav
+            b.vy += p.gravity * gmul * b.grav
             b.vy = clamp(b.vy, -18.0, 18.0)
             if mode_pressed and b.on_ground:
                 if main:
                     self._record_jump_timing("ball", input_pressed)
                 b.grav *= -1
-                b.vy = p.ball_flip_force * b.grav
+                b.vy = p.ball_flip_force * jmul * b.grav
                 b.on_ground = False
         else:  # cube
-            b.vy += p.gravity * b.grav
+            b.vy += p.gravity * gmul * b.grav
             b.vy = clamp(b.vy, -18.0, 18.0)
             if mode_held and b.on_ground:
                 if main:
                     self._record_jump_timing("cube", input_pressed)
-                b.vy = p.jump_force * b.grav
+                b.vy = p.jump_force * jmul * b.grav
                 b.on_ground = False
 
     def _apply_rotation(self, b):
@@ -653,7 +666,10 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             b.wave_vy_smooth = b.wave_vy_smooth * 0.55 + b.vy * 0.45
             commit = clamp(b.wave_vy_smooth / max(1.0, self.move_speed),
                            -1.0, 1.0)
-            b.angle = b.angle * 0.55 + (-commit * self.params.wave_angle) * 0.45
+            angle_mul = (self.params.mini_wave_angle_scale
+                         if b.size < PLAYER_SIZE else 1.0)
+            wave_angle = clamp(self.params.wave_angle * angle_mul, 0.0, 89.0)
+            b.angle = b.angle * 0.55 + (-commit * wave_angle) * 0.45
         elif mode == MODE_BALL:
             if b.on_ground:
                 b.angle = round(b.angle / 90) * 90
@@ -681,7 +697,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             self._spider_teleport(b, orb_direction(o))
             return
         if t == T_BLUE_PAD:
-            self._blue_flip(b, BLUE_PAD_PUSH_SCALE)
+            self._blue_flip(b)
             return
         if b.mode == MODE_WAVE:
             return  # GD: pads don't affect the wave
@@ -708,10 +724,9 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             b.vy = -self.params.jump_force * b.grav
             b.on_ground = False
         elif t == T_BLUE_ORB:
-            self._blue_flip(b, BLUE_ORB_PUSH_SCALE)
+            self._blue_flip(b)
         elif t == T_GREEN_ORB:
             b.grav *= -1
-            self._orb_jump(b, 1.0)
         elif t == T_SPIDER_ORB:
             self._spider_teleport(b, orb_direction(o))
             self._hold_consumed = True
@@ -787,8 +802,15 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 if cid and cid not in self.coins_collected:
                     self.coins_collected.add(cid)
                 continue
+            if t == T_DASH_STOP:
+                # S Block: ends the dash it lands in, every time it is
+                # touched, so it is never recorded in ``passed``.
+                if main and self.dash_timer > 0:
+                    self._end_dash()
+                continue
             if t in ORB_TYPES:
-                if key in self.passed or (not main and t not in _MIRROR_ORBS):
+                if (key in self.passed or key in self.held_orbs
+                        or (not main and t not in _MIRROR_ORBS)):
                     continue
                 cell = (o["x"], o["y"])
                 if activated_orb_cell is None:
@@ -801,7 +823,13 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 elif cell != activated_orb_cell:
                     continue
                 if self._apply_orb(b, o):
-                    self.passed.add(key)
+                    # Multi-activate orbs stay out of ``passed`` so a
+                    # later touch can fire them again; ``held_orbs``
+                    # still blocks a refire within the same hold.
+                    if o.get("multi_activate"):
+                        self.held_orbs.add(key)
+                    else:
+                        self.passed.add(key)
                     if t == T_TELEPORT_ORB:
                         self.input_buffer = 0
                         return True
@@ -848,8 +876,19 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             elif key in self.passed:
                 continue
             elif t == T_CAMERA_TRIGGER:
-                row = o.get("cy", o["y"])
-                self.target_cam_y = row * CELL + CELL / 2 - HEIGHT / 2
+                mode = o.get("cam_mode", "pan")
+                if mode == "static":
+                    # Freeze the camera exactly where it is; play.py's
+                    # per-frame camera update skips both axes while this
+                    # is set, until a "follow" trigger clears it.
+                    self.camera_locked = True
+                elif mode == "follow":
+                    self.camera_locked = False
+                    self.free_cam_mode = True
+                else:  # "pan" — one-shot vertical pan to a target row
+                    self.camera_locked = False
+                    row = o.get("cy", o["y"])
+                    self.target_cam_y = row * CELL + CELL / 2 - HEIGHT / 2
                 self.passed.add(key)
             elif t == T_BG_TRIGGER:
                 self.bg_preset = int(o.get("bg", 0))
@@ -964,12 +1003,13 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 self.mirror_input_buffer -= 1
         if not input_held:
             self._hold_consumed = False
-        dashing = self.dash_timer > 0 and input_held
+            self.held_orbs.clear()
+        # A dash is automatic once triggered (GD dash rings): releasing
+        # the button no longer ends it — only _end_dash does.
+        dashing = self.dash_timer > 0
         mode_held = input_held and not self._hold_consumed
         mode_pressed = input_pressed and not self._hold_consumed
         if not dashing:
-            if self.dash_timer > 0 and not input_held:
-                self._end_dash()
             self._apply_mode_physics(self, mode_held, mode_pressed,
                                      input_held, input_pressed)
             if not self.alive:
@@ -1050,17 +1090,18 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self._record_mirror_hitbox()
 
     def _sample_trails(self):
+        # GD's trail is a solid streak, not a fading dotted line — keep
+        # every sample at full alpha and only drop ones the camera has
+        # scrolled far enough past that they can never be on screen again
+        # (bounds memory without visually fading anything).
         if self.frame % 3 == 0:
             self.trail.append([self.x, self.y, self.angle, 100])
             m = self._mirror
             if m is not None and m.alive:
                 m.trail.append([self.x, m.y, m.angle, 100])
-        for seg in self.trail:
-            seg[3] -= 5
+        cutoff = self.x - TRAIL_MAX_DISTANCE
         if self.trail:
-            self.trail = [seg for seg in self.trail if seg[3] > 5]
+            self.trail = [seg for seg in self.trail if seg[0] > cutoff]
         m = self._mirror
         if m is not None and m.trail:
-            for seg in m.trail:
-                seg[3] -= 5
-            m.trail = [seg for seg in m.trail if seg[3] > 5]
+            m.trail = [seg for seg in m.trail if seg[0] > cutoff]

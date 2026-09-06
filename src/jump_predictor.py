@@ -10,7 +10,7 @@ The probe is always stripped from the simulated object list — the probe
 is an editor annotation, not a real object — so the player never
 collides with it.
 
-The predictor deliberately reuses the real `_SimPlayer` rather than a
+The predictor deliberately reuses the real `SimPlayer` rather than a
 hand-rolled arc formula: orbs, pads, portals, gravity, and scaled
 blocks all affect the trajectory, and re-deriving that physics by hand
 would drift from real gameplay the moment the engine changed.
@@ -39,7 +39,7 @@ from .constants import (
 # what the sim-rate setting is — raising TPS means finer per-tick
 # physics resolution and proportionally more probe ticks to cover the
 # same span. Falls back to 180 if the settings module isn't importable
-# (headless pytest runs, import-time probes in autobot).
+# (headless pytest runs, import-time probes in the bots).
 _PROBE_SECONDS = 3.0
 _PROBE_FALLBACK_FRAMES = 180
 
@@ -214,8 +214,8 @@ def predict(objects, probe):
     if probe is None or probe.get("t") != T_JUMP_PREDICTOR:
         return None
     # Import locally so the constants-only consumers don't drag pygame
-    # (via autobot → player → graphics) into cold-path code paths.
-    from .autobot import _SimPlayer
+    # (via bots.sim → player → graphics) into cold-path code paths.
+    from .bots.sim import SimPlayer
 
     mode = probe.get("mode", MODE_CUBE)
     if mode not in _ALL_MODES:
@@ -228,7 +228,7 @@ def predict(objects, probe):
     gx = int(probe["x"])
     gy = int(probe["y"])
     # Strip the probe from the world so the simulated player can't
-    # collide with or react to it. _SimPlayer needs at least one object
+    # collide with or react to it. SimPlayer needs at least one object
     # to size its grid; if the caller passed an empty world, bail.
     world = [o for o in objects if o.get("t") != T_JUMP_PREDICTOR]
     if not world:
@@ -248,7 +248,7 @@ def predict(objects, probe):
     # source of "not accurate at all" in earlier passes).
     detected_speed = detect_speed(world, gx)
 
-    sim = _SimPlayer(world)
+    sim = SimPlayer(world)
     sim.mode = mode
     sim.grav = grav
     sim.size = size

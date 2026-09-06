@@ -37,7 +37,7 @@ from ..menus import (
     text_input_dialog, load_level_dialog, difficulty_picker, confirm_dialog,
     snippet_picker,
 )
-from ..objects import TYPE_NAMES
+from ..objects import TYPE_NAMES, cycle_active_start, start_objects
 from ..play import run_play
 from ..snippets import save_user_snippet, normalize_to_origin
 from .. import music, sfx, settings, prefs
@@ -111,6 +111,8 @@ class EditorSession:
         st.unsaved_changes = False
         st.autosave_timer = 0
         st.group_id_counter = next_group_id(st.objects)
+        # A bot path belongs to the level it was solved for.
+        self.clear_bot_path()
 
     def _load_path(self, path, quiet=False):
         try:
@@ -262,14 +264,15 @@ class EditorSession:
     def do_bot(self):
         """K: replay exact inputs, else drive the drawn waypoint path,
         else play back the saved input file."""
-        from ..bot import BotController, load_bot_inputs
+        from ..bots import PathFollowController, load_bot_inputs
         st = self.st
         if st.bot_exact_inputs:
             self._run(" (Bot Exact)", playback_inputs=st.bot_exact_inputs,
                       playback_waypoints=list(st.bot_waypoints) or None)
             st.say(f"Exact playback done — {len(st.bot_exact_inputs)} frames", 180)
         elif st.bot_waypoints:
-            bot = BotController(list(st.bot_waypoints), objects=list(st.objects))
+            bot = PathFollowController(list(st.bot_waypoints),
+                                       objects=list(st.objects))
             self._run(" (Bot)", bot_controller=bot)
             bot.save_inputs()
             st.say(f"Bot done — {len(bot.inputs)} frames saved to level_bot_inputs.txt", 180)
@@ -281,18 +284,18 @@ class EditorSession:
             else:
                 st.say("Draw a bot path first (Edit > Bot Path) or solve one (Bot menu)", 150)
 
-    def do_y_bot(self):
-        from ..y_bot import YBotController
-        from ..physics import PhysicsParams
-        controller = YBotController(params=PhysicsParams.from_meta(self.st.level_meta))
-        ghost_paths = [
-            {"label": "click/hold (this frame)", "color": (140, 200, 255),
-             "live": True, "branch": "click", "chosen_when": "click"},
-            {"label": "no click (this frame)", "color": (60, 130, 220),
-             "live": True, "branch": "noclick", "chosen_when": "noclick"},
-        ]
-        self._run(" (Y-bot — live)", bot_controller=controller, ghost_paths=ghost_paths)
-        self.st.say("Y bot live exited", 120)
+    def clear_bot_path(self):
+        """Drop every trace of a solved/drawn bot path: the overlay the
+        editor draws, the exact inputs K replays, and the bot menu's
+        cached result (which also seeds and gates the next solve)."""
+        from ..bot_menu import clear_last_solve
+        st = self.st
+        st.bot_waypoints = []
+        st.bot_mirror_waypoints = []
+        st.bot_exact_inputs = None
+        st.last_run_hitboxes.clear()
+        st.last_run_mirror_hitboxes.clear()
+        clear_last_solve()
 
     def do_bot_menu(self):
         from ..bot_menu import run_bot_menu, get_last_inputs, get_last_mirror_waypoints
@@ -304,17 +307,20 @@ class EditorSession:
 
         result = run_bot_menu(self.screen, self.clock, list(st.objects),
                               precomputed_path=st.bot_waypoints or None,
+                              drawn_path=list(st.bot_waypoints) or None,
                               allow_replay=True, replay_callback=replay,
                               level_filename=st.level_filename, meta=st.level_meta)
         self.guard.reset()
         if result is not None:
             wp, status = result
-            if wp:
+            if status == "cleared":
+                self.clear_bot_path()
+                st.say("Bot path cleared", 150)
+            elif wp:
                 st.bot_waypoints = list(wp)
                 st.bot_mirror_waypoints = get_last_mirror_waypoints()
                 st.bot_exact_inputs = get_last_inputs() or st.bot_exact_inputs
                 st.mode = MODE_EDIT
-                st.edit_tool = TOOL_BOT_PATH
                 st.say(f"Bot path ready ({status}) — {len(st.bot_waypoints)} waypoints", 200)
 
     # ------------------------------------------------------------------
@@ -355,6 +361,30 @@ class EditorSession:
         ops.remove_objects(st.objects, st.selected)
         st.clear_selection()
         st.say(f"Deleted {n} object{'s' if n != 1 else ''}", 80)
+
+    def _cycle_start_pos(self, delta):
+        """1 / 2 (outside Build mode, where 1-9 pick palette items): make
+        the previous / next Start Pos the active spawn, jump the camera to
+        it and show it in the property panel."""
+        st = self.st
+        starts = start_objects(st.objects)
+        if not starts:
+            st.say("No Start Pos placed", 90)
+            return
+        if len(starts) == 1:
+            st.center_on_cell(starts[0]["x"], starts[0]["y"])
+            st.say("Only one Start Pos in this level", 90)
+            return
+        st.push_undo()
+        new_start = cycle_active_start(st.objects, delta)
+        st.center_on_cell(new_start["x"], new_start["y"])
+        was_open = st.props_open
+        st.selected = [new_start]
+        st.props_open = was_open
+        idx = next(i for i, o in enumerate(start_objects(st.objects))
+                   if o is new_start)
+        st.say(f"Start Pos {idx + 1}/{len(starts)} active "
+               f"(cell {new_start['x']}, {new_start['y']})", 120)
 
     def _start_link_on(self, obj):
         st = self.st
@@ -507,7 +537,7 @@ class EditorSession:
             st.say("Undo" if st.undo() else "Nothing to undo", 60)
         elif action == "redo":
             st.say("Redo" if st.redo() else "Nothing to redo", 60)
-        elif action in ("menu", "test", "test_cursor", "bot", "bot_menu", "y_bot",
+        elif action in ("menu", "test", "test_cursor", "bot", "bot_menu",
                         "save", "publish", "load", "export"):
             self.pending.append(action)
 
@@ -534,8 +564,6 @@ class EditorSession:
                 self.do_bot()
             elif action == "bot_menu":
                 self.do_bot_menu()
-            elif action == "y_bot":
-                self.do_y_bot()
             elif action == "save":
                 self.do_save()
             elif action == "publish":
@@ -623,8 +651,6 @@ class EditorSession:
             self.pending.append("bot_menu")
         elif key == pygame.K_t:
             self.pending.append("test_cursor" if shift else "test")
-        elif key == pygame.K_y:
-            self.pending.append("y_bot")
         elif key == pygame.K_s:
             self.pending.append("save")
         elif key == pygame.K_F2:
@@ -645,6 +671,8 @@ class EditorSession:
             dx = (key == pygame.K_RIGHT) - (key == pygame.K_LEFT)
             dy = (key == pygame.K_DOWN) - (key == pygame.K_UP)
             self.do("nudge", (dx, dy))
+        elif key in (pygame.K_1, pygame.K_2) and st.mode != MODE_BUILD:
+            self._cycle_start_pos(-1 if key == pygame.K_1 else 1)
         elif st.mode == MODE_BUILD and pygame.K_1 <= key <= pygame.K_9:
             items = st.palette_items()
             per_page, _cols = ui.palette_page_size()
@@ -771,8 +799,9 @@ class EditorSession:
         top = stack[-1] if stack else None
         if shift:
             if top is not None:
-                if top in st.selected:
-                    st.selected.remove(top)
+                idx = ops.index_by_id(st.selected, top)
+                if idx != -1:
+                    st.selected.pop(idx)
                 else:
                     st.selected.append(top)
                 st.say(f"{len(st.selected)} selected", 70)
@@ -784,15 +813,21 @@ class EditorSession:
             st.drag = ({"kind": "marquee", "start": pos, "add": False} if st.swipe
                        else {"kind": "pan", "anchor": pos, "cam": (st.cam_x, st.cam_y)})
             return
-        if top not in st.selected:
-            # Re-clicking the same cell cycles through a stack.
-            if (st.last_edit_cell == (gx, gy) and len(st.selected) == 1
-                    and st.selected[0] in stack):
-                top = stack[(stack.index(st.selected[0]) + 1) % len(stack)]
+        # Re-clicking the same cell cycles through a stack. This must be
+        # checked before the "already selected" short-circuit below: after
+        # the first click `top` (the stack's topmost hit) IS already the
+        # selection, so `top not in st.selected` would never be true again
+        # and the cycle could never advance past the first item.
+        cur_idx = ops.index_by_id(stack, st.selected[0]) if len(st.selected) == 1 else -1
+        if len(stack) > 1 and st.last_edit_cell == (gx, gy) and cur_idx != -1:
+            top = stack[(cur_idx + 1) % len(stack)]
+            st.selected = [top]
+            st.say(f"Stack {ops.index_by_id(stack, top) + 1}/{len(stack)} — click again to cycle", 100)
+        elif not ops.contains_id(st.selected, top):
             st.selected = [top]
             st.last_edit_cell = (gx, gy)
             if len(stack) > 1:
-                st.say(f"Stack {stack.index(top) + 1}/{len(stack)} — click again to cycle", 100)
+                st.say(f"Stack {ops.index_by_id(stack, top) + 1}/{len(stack)} — click again to cycle", 100)
         if st.rotate_drag:
             x0, y0, x1, y1 = ops.selection_bounds(st.selected)
             cx, cy = st.cell_to_screen((x0 + x1 + 1) / 2.0, (y0 + y1 + 1) / 2.0)

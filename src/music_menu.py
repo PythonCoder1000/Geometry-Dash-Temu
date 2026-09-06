@@ -100,6 +100,7 @@ def run_music_menu(screen, clock):
                 sys.exit()
             if ev.type == pygame.KEYDOWN:
                 if ev.key == pygame.K_ESCAPE:
+                    music.stop()
                     return
                 if ev.key == pygame.K_m:
                     music.toggle_mute()
@@ -229,7 +230,7 @@ def run_music_menu(screen, clock):
 
         # ---- Bot click SFX toggle ---------------------------------------
         # Plays a short tick (and draws a ring around the player) every
-        # time the autobot presses during a bot run. Default-on, off per
+        # time the bot presses during a bot run. Default-on, off per
         # user request — persisted in prefs so the choice survives restarts.
         bot_sfx_y = vol_y + 44
         txt(screen, "Bot click SFX",
@@ -273,6 +274,7 @@ def run_music_menu(screen, clock):
         b_back = btn(screen, "BACK", list_x + 600, ctrl_y, 90, 36,
                      C_DANGER, mpos, font_size=14)
         if click_pos and b_back.collidepoint(click_pos):
+            music.stop()
             return
 
         # ---- Add music (file-picker dialog) -----------------------------

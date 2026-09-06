@@ -164,6 +164,7 @@ _PLAY_HELP_GROUPS = [
         ("Space / ↑ / Click", "Jump or hold"),
         ("P", "Pause / resume"),
         ("R", "Retry from start"),
+        ("Q / E", "Previous / next Start Position (restarts there)"),
         ("Esc", "Back to menu (saves Best %)"),
     ]),
     ("Practice mode", [
@@ -190,8 +191,10 @@ def run_menu(screen, clock):
     (b_play, b_practice, b_edit, b_rate, b_quit,
      r_mute_music, r_mute_sfx, r_gear, r_auth, r_help) = (
         pygame.Rect(0, 0, 0, 0) for _ in range(10))
-    if music.is_enabled() and not music.is_playing():
-        music.play_menu_music()
+    # Music only plays during actual gameplay (play / practice / editor
+    # test / bot test) — the menu itself stays silent. Levels start their
+    # own track via PlaySession._start_music and stop it in _finish(), so
+    # nothing needs to be started (or stopped) here.
     guard = ClickGuard()
     _menu_t0 = pygame.time.get_ticks()
     while True:

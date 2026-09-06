@@ -52,6 +52,87 @@ def darker(c, a=50):
     return tuple(max(0, v - a) for v in c[:3])
 
 
+# ---------------------------------------------------------------------------
+# GD-style shape primitives
+#
+# Geometry Dash art is built from flat-shaded shapes carrying three cues:
+# a dark outer contour, a lighter inner bevel on the top-left, and a
+# darker one on the bottom-right. These helpers apply that treatment
+# consistently so objects (src/sprites.py) and the player icons
+# (src/player/draw.py) read as one art style instead of each renderer
+# inventing its own shading.
+# ---------------------------------------------------------------------------
+OUTLINE_DARKEN = 95      # how much darker than the fill a contour line is
+BEVEL_LIGHTEN = 60       # top-left inner bevel lift
+BEVEL_DARKEN = 45        # bottom-right inner bevel drop
+
+
+def outline_col(col, amount=OUTLINE_DARKEN):
+    """Contour colour for `col` — dark enough to read at 24 px."""
+    return darker(col, amount)
+
+
+def draw_outlined_poly(surf, pts, col, width=2, line_col=None):
+    """Flat polygon with a GD contour."""
+    pygame.draw.polygon(surf, col, pts)
+    pygame.draw.polygon(surf, line_col or outline_col(col), pts, width)
+
+
+def draw_bevel_rect(surf, rect, col, radius=0, outline=2, bevel=None,
+                    line_col=None):
+    """Panel with a dark contour and a two-tone inner bevel.
+
+    This is the workhorse for blocks, robot torsos, pads and portal
+    plates — anything that in GD reads as a solid slab with depth
+    rather than a flat ``pygame.draw.rect``.
+    """
+    bevel = bevel if bevel is not None else max(1, min(rect.w, rect.h) // 12)
+    pygame.draw.rect(surf, col, rect, border_radius=radius)
+    inner = rect.inflate(-outline * 2, -outline * 2)
+    if inner.w > bevel * 2 and inner.h > bevel * 2:
+        half = max(1, bevel // 2)
+        hi = lighter(col, BEVEL_LIGHTEN)
+        lo = darker(col, BEVEL_DARKEN)
+        pygame.draw.line(surf, hi, (inner.left + bevel, inner.top + half),
+                         (inner.right - bevel, inner.top + half), bevel)
+        pygame.draw.line(surf, hi, (inner.left + half, inner.top + bevel),
+                         (inner.left + half, inner.bottom - bevel), bevel)
+        pygame.draw.line(surf, lo, (inner.left + bevel, inner.bottom - half),
+                         (inner.right - bevel, inner.bottom - half), bevel)
+        pygame.draw.line(surf, lo, (inner.right - half, inner.top + bevel),
+                         (inner.right - half, inner.bottom - bevel), bevel)
+    if outline > 0:
+        pygame.draw.rect(surf, line_col or outline_col(col), rect, outline,
+                         border_radius=radius)
+
+
+def draw_bevel_circle(surf, center, r, col, outline=2, gloss=True,
+                      line_col=None):
+    """Sphere-ish disc: shaded crescent, contour ring and a gloss cap."""
+    cx, cy = int(center[0]), int(center[1])
+    r = int(r)
+    if r <= 1:
+        pygame.draw.circle(surf, col, (cx, cy), max(1, r))
+        return
+    pygame.draw.circle(surf, darker(col, BEVEL_DARKEN), (cx, cy), r)
+    off = max(1, r // 8)
+    pygame.draw.circle(surf, col, (cx - off, cy - off), r - off)
+    if gloss:
+        draw_gloss(surf, pygame.Rect(cx - r, cy - r, r * 2, r * 2))
+    if outline > 0:
+        pygame.draw.circle(surf, line_col or outline_col(col), (cx, cy), r,
+                           outline)
+
+
+def draw_gloss(surf, rect, alpha=120, width_frac=0.62, height_frac=0.34):
+    """Glossy highlight cap sitting in the upper part of `rect`."""
+    w = max(2, int(rect.w * width_frac))
+    h = max(2, int(rect.h * height_frac))
+    g = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.ellipse(g, (255, 255, 255, alpha), g.get_rect())
+    surf.blit(g, (rect.centerx - w // 2, rect.y + int(rect.h * 0.09)))
+
+
 def draw_cube_icon_glyph(surf, x, y, size, color, icon_index):
     """Draw the inner glyph of the player's cube — one per icon variant.
 
@@ -75,7 +156,9 @@ def draw_cube_icon_glyph(surf, x, y, size, color, icon_index):
     cx = x + size // 2
     cy = y + size // 2
     s = size
-    inset = darker(color, 50)
+    # Strong contrast: GD icon glyphs read as a near-black cut-out of
+    # the body, not a slightly darker tint.
+    inset = darker(color, 110)
     if icon_index == 1:  # Star
         pts = []
         for i in range(10):
@@ -120,7 +203,10 @@ def draw_cube_icon_glyph(surf, x, y, size, color, icon_index):
         ]
         pygame.draw.polygon(surf, inset, pts)
     else:  # 0 / Classic / fallback
-        pygame.draw.rect(surf, inset, (cx - 7, cy - 7, 14, 14), border_radius=2)
+        # Proportional so the glyph survives supersampled player renders.
+        half = max(2, int(s * 0.16))
+        pygame.draw.rect(surf, inset, (cx - half, cy - half, half * 2, half * 2),
+                         border_radius=max(1, s // 20))
 
 
 def lerp_col(a, b, t):

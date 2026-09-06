@@ -44,6 +44,9 @@ PAD_FORCE = -18.0
 BALL_FLIP_FORCE = 10.0
 DASH_SPEED = 16.0
 DASH_TIME = 9
+# A dash now runs until something stops it (an S Block, a wall, death),
+# so the per-tick countdown is seeded with a value it can never reach.
+DASH_TIMER_INFINITE = 10 ** 9
 WAVE_ANGLE = 45.0
 PLAYER_START_GX = 3
 UFO_JUMP_FORCE = -13.5
@@ -53,15 +56,26 @@ SPIDER_TELEPORT_RANGE = 6  # cells (legacy; teleports are now unbounded)
 ROBOT_THRUST = 1.45
 ROBOT_FLIGHT_SECONDS = 1.5
 
+# Mini icon (size == MINI_PLAYER_SIZE): matches GD's slightly floatier mini
+# feel. Gravity/continuous-force terms are scaled down a touch (values <1
+# mean "less pull"); instantaneous jump/flip impulses are scaled down a
+# touch too; wave pitches its nose more steeply and ramps vy a bit faster.
+MINI_GRAVITY_SCALE = 0.92
+MINI_JUMP_SCALE = 0.94
+MINI_WAVE_ANGLE_SCALE = 1.3
+MINI_WAVE_VY_SCALE = 1.15
+
+# Player trail: solid (no fade) while on screen; samples further behind
+# the player than this (world px) are dropped so the list doesn't grow
+# without bound over a long run.
+TRAIL_MAX_DISTANCE = WIDTH * 3
+
 # Orb / pad strength multipliers relative to JUMP_FORCE / PAD_FORCE.
 # Mirrors GD: pink = small, yellow = medium, red = big.
 ORB_PINK_SCALE = 0.75
 ORB_RED_SCALE = 1.35
 PAD_PINK_SCALE = 0.75
 PAD_RED_SCALE = 1.35
-# Blue orb: gravity flip with a modest push in the new direction.
-BLUE_ORB_PUSH_SCALE = 0.45
-BLUE_PAD_PUSH_SCALE = 0.5
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -191,6 +205,8 @@ T_TIME_WARP = "time_warp"
 # Editor-only helpers (inert at play time).
 T_JUMP_PREDICTOR = "jump_predictor"
 T_BOT_CHECKPOINT = "bot_checkpoint"
+# Editor utility: stops an active dash on contact (invisible by default).
+T_DASH_STOP = "dash_stop"
 
 # ---------------------------------------------------------------------------
 # Logical type sets
@@ -381,6 +397,7 @@ C_FOLLOW_TRIGGER = (120, 220, 200)
 C_TIME_WARP = (200, 140, 255)
 C_JUMP_PREDICTOR = (255, 235, 120)
 C_BOT_CHECKPOINT = (120, 230, 255)
+C_DASH_STOP = (255, 255, 255)
 
 # Mode colours keyed by mode string (HUD, state panel).
 MODE_COLORS = {
