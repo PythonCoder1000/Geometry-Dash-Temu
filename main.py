@@ -72,8 +72,6 @@ def main():
     sfx.init()
     gamepad.init()
 
-    from src.prefs import set as _pset
-    _pset("signed_in_username", "Christian Jin")
 
     state = "menu"
     while state != "quit":

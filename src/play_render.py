@@ -345,10 +345,11 @@ def render_best_run_ghost(screen, overlay_scratch, clear_color, best_run,
 
 def render_player_and_particles(screen, player, particles, death_timer,
                                  bot_click_flash, cam_x, cam_y,
-                                 shake_x, shake_y):
-    """The live player sprite + bot-click ring flash, then all particles."""
+                                 shake_x, shake_y, alpha=None):
+    """The live player sprite + bot-click ring flash, then all particles.
+    ``alpha`` interpolates the player between physics ticks."""
     if player.alive and death_timer == 0:
-        player.draw(screen, cam_x + shake_x, cam_y + shake_y)
+        player.draw(screen, cam_x + shake_x, cam_y + shake_y, alpha)
         if bot_click_flash > 0:
             t = 1.0 - (bot_click_flash / 12.0)
             radius = int(26 + 28 * t)

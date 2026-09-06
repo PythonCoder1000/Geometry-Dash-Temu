@@ -286,6 +286,13 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.mirror_hitbox_trace.append(
             (self.x, m.y, int(m.size), float(m.angle)))
 
+    def set_x(self, x):
+        """Teleport horizontally (test-from-cursor spawn) keeping the
+        frame-start and interpolation bookkeeping consistent."""
+        self.x = float(x)
+        self._x_at_frame_start = self.x
+        self.prev_x = self.x
+
     def render_pose(self, alpha=None):
         """``(x, y, angle)`` for drawing, interpolated between the last
         two physics ticks when ``alpha`` (0..1) is given."""

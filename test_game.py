@@ -698,47 +698,34 @@ try:
     check("settings.DEFAULTS has fps_cap", "fps_cap" in _settings_mod.DEFAULTS)
     check("settings.DEFAULTS has fullscreen",
           "fullscreen" in _settings_mod.DEFAULTS)
-    # Render rate is now locked to GAME_RATE (120). The options list
-    # collapses to that single value; the cycle / set helpers are
-    # no-ops; the getter always returns the locked value regardless
-    # of what's persisted in prefs.
+    # The render FPS cap is a real setting again (physics is fixed at
+    # PHYSICS_RATE and the play loop interpolates between ticks).
     check("FPS_CAP_OPTIONS contains GAME_RATE",
           _settings_mod.GAME_RATE in _settings_mod.FPS_CAP_OPTIONS)
-    check("FPS_CAP_OPTIONS is locked to a single value",
-          len(_settings_mod.FPS_CAP_OPTIONS) == 1)
-
-    # Defaults returned when nothing persisted yet.
-    check("get_fps_cap returns GAME_RATE",
+    check("FPS_CAP_OPTIONS offers several caps",
+          len(_settings_mod.FPS_CAP_OPTIONS) >= 3)
+    check("get_fps_cap defaults to GAME_RATE",
           _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     check("get_fullscreen default False",
           _settings_mod.get_fullscreen() is False)
-
-    # set is a no-op now — locked value never changes.
     _settings_mod.set_fps_cap(60)
-    check("set_fps_cap is a no-op (locked)",
-          _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
+    check("set_fps_cap persists a whitelisted value",
+          _settings_mod.get_fps_cap() == 60)
     _settings_mod.set_fps_cap(0)
-    check("set_fps_cap(0) does not unlock the rate",
-          _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
-
-    # Defensive: corrupt prefs values are ignored — the locked value
-    # is hardcoded so they can't take effect.
+    check("set_fps_cap(0) = uncapped is allowed",
+          _settings_mod.get_fps_cap() == 0)
     _prefs_mod.set("fps_cap", "garbage")
-    check("garbage fps_cap ignored (locked)",
+    check("garbage fps_cap falls back to default",
           _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     _prefs_mod.set("fps_cap", -10)
-    check("negative fps_cap ignored (locked)",
+    check("negative fps_cap falls back to default",
           _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     _prefs_mod.set("fps_cap", 99999)
-    check("absurdly large fps_cap ignored (locked)",
+    check("non-whitelisted fps_cap falls back to default",
           _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     _prefs_mod.set("fps_cap", _settings_mod.GAME_RATE)  # restore baseline
-
-    # TPS lock — same value as fps_cap, single source of truth.
-    check("get_tps == GAME_RATE",
-          _settings_mod.get_tps() == _settings_mod.GAME_RATE)
-    check("get_tps == get_fps_cap",
-          _settings_mod.get_tps() == _settings_mod.get_fps_cap())
+    check("get_tps is the fixed physics rate (60)",
+          _settings_mod.get_tps() == _settings_mod.PHYSICS_RATE == 60)
 
     # Volume coercion clamps to [0, 1].
     _settings_mod.set_music_vol(2.5)
@@ -758,24 +745,24 @@ try:
     check("toggle_fullscreen persists",
           _settings_mod.get_fullscreen() == after)
 
-    # cycle_fps_cap is locked — returns GAME_RATE without changing prefs.
+    # cycle_fps_cap walks the whitelist and persists.
+    _settings_mod.set_fps_cap(_settings_mod.FPS_CAP_OPTIONS[0])
     actual = _settings_mod.cycle_fps_cap()
-    check("cycle_fps_cap returns GAME_RATE (locked)",
-          actual == _settings_mod.GAME_RATE)
-
-    # fps_cap_label always shows the locked value.
-    check("fps_cap_label includes 'locked'",
-          "locked" in _settings_mod.fps_cap_label())
+    check("cycle_fps_cap advances to the next option",
+          actual == _settings_mod.FPS_CAP_OPTIONS[1]
+          and _settings_mod.get_fps_cap() == actual)
+    check("fps_cap_label(0) reads Uncapped",
+          "Uncapped" in _settings_mod.fps_cap_label(0))
     check("fps_cap_label(GAME_RATE) shows the rate",
           str(_settings_mod.GAME_RATE) in
           _settings_mod.fps_cap_label(_settings_mod.GAME_RATE))
 
     # reset_to_defaults wipes all keys back to baseline.
-    _settings_mod.set_fps_cap(144)  # no-op — locked
+    _settings_mod.set_fps_cap(144)
     _settings_mod.set_fullscreen(True)
     _settings_mod.set_music_vol(0.1)
     _settings_mod.reset_to_defaults()
-    check("reset keeps fps_cap at GAME_RATE",
+    check("reset returns fps_cap to GAME_RATE",
           _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     check("reset returns fullscreen to default",
           _settings_mod.get_fullscreen() ==
@@ -1646,7 +1633,7 @@ section("Editor test-mode music wiring")
 import inspect
 from src import play as _play_mod
 from src import editor as _editor_mod
-_play_src = inspect.getsource(_play_mod.run_play)
+_play_src = inspect.getsource(_play_mod)
 from src import play_render as _play_render_mod
 _play_render_src = inspect.getsource(_play_render_mod)
 # The four music gates inside run_play used to read `level_music and not
@@ -1657,7 +1644,7 @@ check("run_play music gates dropped 'not editor_test'",
 # A grep-style sanity check that the music start/stop calls still exist —
 # we don't want a "fix" that just removes music handling entirely.
 check("run_play still starts level music",
-      "music.play_file(level_music)" in _play_src)
+      "music.play_file(self.level_music" in _play_src)
 check("run_play still stops level music on death",
       "music.stop()" in _play_src)
 # The win-fade call lives in play_render.render_win_overlay now (moved
@@ -1852,19 +1839,20 @@ check("run_play accepts out_hitboxes parameter",
 check("out_hitboxes defaults to None (opt-in)",
       _play_sig.parameters["out_hitboxes"].default is None)
 
-_play_src2 = inspect.getsource(_play_mod.run_play)
+_play_src2 = inspect.getsource(_play_mod.PlaySession)
 # Recording is driven by the Player now: run_play hands the buffer to
 # `player.hitbox_trace` and the player appends (x, y, size) at every
 # collision-check point — each physics substep + teleport brackets —
 # so the overlay shows *every* check position, not just one per frame.
-check("run_play wires player.hitbox_trace = current_hitboxes",
-      "player.hitbox_trace = current_hitboxes" in _play_src2)
-check("run_play commits the buffer on _full_reset",
-      "out_hitboxes[:] = current_hitboxes" in _play_src2)
-check("run_play also commits the buffer on _stop_music_and_return",
-      _play_src2.count("out_hitboxes[:] = current_hitboxes") >= 2)
-check("run_play clears the in-place buffer on reset (not reassigned)",
-      "current_hitboxes.clear()" in _play_src2)
+check("PlaySession wires player.hitbox_trace = current_hitboxes",
+      "self.player.hitbox_trace = self.current_hitboxes" in _play_src2)
+check("PlaySession commits the buffer through _commit_hitboxes",
+      "self.out_hitboxes[:] = self.current_hitboxes" in _play_src2)
+check("PlaySession commits on reset AND on exit",
+      "self._commit_hitboxes()" in inspect.getsource(_play_mod.PlaySession.reset_attempt)
+      and "self._commit_hitboxes()" in inspect.getsource(_play_mod.PlaySession._finish))
+check("PlaySession clears the in-place buffer on reset (not reassigned)",
+      "self.current_hitboxes.clear()" in _play_src2)
 
 # Player side: recorder helper exists and stamps once per logical frame
 # (60 Hz). Per-substep sampling was reverted because dense traces were

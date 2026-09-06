@@ -1,32 +1,23 @@
-"""Runtime user-settable knobs — thin typed layer over `prefs`.
+"""Runtime user-settable knobs: a thin typed layer over :mod:`prefs`.
 
-These are the things exposed by the in-game Settings menu. Storing them all
-here gives every consumer (the main loop, editor, audio modules) a single
-authoritative place to read from, and keeps the keys/defaults in one spot
-so the rest of the codebase doesn't have to remember "is it 60 or 144?".
+Everything exposed by the in-game Settings menu lives here so every
+consumer (main loop, editor, audio) reads one authoritative place.
+Level progress and similar mechanics stay in :mod:`levels`.
 
-Anything more game-mechanical (level progress, best times, etc.) stays in
-`levels.py` — this module is strictly for player preferences.
+Timing: physics always ticks at :data:`PHYSICS_RATE` (60 Hz); the
+render FPS cap is a free setting because the play loop interpolates
+between physics ticks (see :mod:`play`).
 """
 
 from . import prefs
-from .constants import FPS as DEFAULT_FPS
 
-# ---------------------------------------------------------------------------
-# Defaults — also serve as the "Reset to defaults" target.
-# ---------------------------------------------------------------------------
-# Single locked rate that drives both render FPS and simulation TPS. Was
-# previously two independent knobs (a 30 Hz monitor could run physics at
-# 240 Hz, etc.) but the cycle UI was too easy to leave in a misaligned
-# state. The locked value is exposed through both ``get_fps_cap`` and
-# ``get_tps`` so existing callsites keep working — they always see the
-# same number, so the render loop emits exactly one physics tick per
-# rendered frame.
+PHYSICS_RATE = 60
+# Kept as the default FPS cap for backwards compatibility with callers
+# that import it.
 GAME_RATE = 120
 
 DEFAULTS = {
     "fps_cap": GAME_RATE,
-    "tps": GAME_RATE,
     "fullscreen": False,
     "music_vol": 0.5,         # 0.0..1.0
     "sfx_vol": 0.5,           # 0.0..1.0
@@ -36,17 +27,12 @@ DEFAULTS = {
     "player_icon_index": 0,   # index into constants.PLAYER_ICONS
 }
 
-# Both options lists collapse to the single locked value — the cycle
-# helpers below stay no-ops, so the menu's "FPS cap" button still
-# clicks but the value never changes. Tests that probe the option
-# list still see a non-empty whitelist.
-FPS_CAP_OPTIONS = [GAME_RATE]
-TPS_OPTIONS = [GAME_RATE]
+# 0 = uncapped (pygame's clock.tick(0) never sleeps).
+FPS_CAP_OPTIONS = [60, 120, 144, 240, 0]
 
 
 # ---------------------------------------------------------------------------
-# Typed accessors. Defensive: corrupted/missing prefs always fall back to the
-# default rather than throwing or returning None.
+# Coercion helpers: corrupted prefs always fall back to the default.
 # ---------------------------------------------------------------------------
 
 def _coerce_float_01(v, default):
@@ -54,11 +40,7 @@ def _coerce_float_01(v, default):
         f = float(v)
     except (TypeError, ValueError):
         return default
-    if f < 0.0:
-        return 0.0
-    if f > 1.0:
-        return 1.0
-    return f
+    return min(1.0, max(0.0, f))
 
 
 def _coerce_int(v, default):
@@ -76,53 +58,46 @@ def _coerce_bool(v, default):
     return bool(v)
 
 
-def get_fps_cap():
-    """Return the locked render-rate cap to pass to ``clock.tick()``.
+# ---------------------------------------------------------------------------
+# Frame rate
+# ---------------------------------------------------------------------------
 
-    Was a free knob; now hard-locked to ``GAME_RATE`` so render FPS and
-    simulation TPS always stay in lockstep — a 30 Hz render loop driving
-    a 240 Hz physics tick was a footgun nobody actually wanted.
-    """
-    return GAME_RATE
+def get_fps_cap():
+    """Render FPS cap for ``clock.tick()``; only whitelisted values count."""
+    val = _coerce_int(prefs.get("fps_cap", DEFAULTS["fps_cap"]),
+                      DEFAULTS["fps_cap"])
+    return val if val in FPS_CAP_OPTIONS else DEFAULTS["fps_cap"]
 
 
 def set_fps_cap(value):
-    """No-op kept for backward compat — the render rate is locked. Old
-    callsites that flip the FPS cap simply do nothing now."""
-    return
+    val = _coerce_int(value, DEFAULTS["fps_cap"])
+    if val not in FPS_CAP_OPTIONS:
+        val = DEFAULTS["fps_cap"]
+    prefs.set("fps_cap", val)
 
 
 def cycle_fps_cap():
-    """No-op cycle — the render rate is locked at ``GAME_RATE``. Returns
-    the locked value so the UI still gets something to display."""
-    return GAME_RATE
+    """Advance to the next option and return it."""
+    cur = get_fps_cap()
+    idx = FPS_CAP_OPTIONS.index(cur)
+    new = FPS_CAP_OPTIONS[(idx + 1) % len(FPS_CAP_OPTIONS)]
+    set_fps_cap(new)
+    return new
 
 
 def fps_cap_label(cap=None):
-    """Human-friendly label for the locked render rate."""
-    return f"{GAME_RATE} (locked)"
+    cap = get_fps_cap() if cap is None else cap
+    return "Uncapped" if cap == 0 else f"{cap} FPS"
 
 
 def get_tps():
-    """Return the locked simulation tick rate. Always equals the render
-    rate so the sim accumulator emits exactly one tick per rendered
-    frame and there is no mismatch between visible motion and physics.
-    """
-    return GAME_RATE
+    """Physics ticks per second (fixed)."""
+    return PHYSICS_RATE
 
 
-def set_tps(value):
-    """No-op — the tick rate is locked to ``GAME_RATE``."""
-    return
-
-
-def cycle_tps():
-    return GAME_RATE
-
-
-def tps_label(tps=None):
-    return f"{GAME_RATE} (locked)"
-
+# ---------------------------------------------------------------------------
+# Display / audio
+# ---------------------------------------------------------------------------
 
 def get_fullscreen():
     return _coerce_bool(prefs.get("fullscreen", DEFAULTS["fullscreen"]),
@@ -140,8 +115,6 @@ def toggle_fullscreen():
 
 
 def get_music_vol():
-    # music.py owns the live volume but the persistence key matches so the
-    # two stay aligned. Returning prefs gives the menu a snapshot to show.
     return _coerce_float_01(prefs.get("music_vol", DEFAULTS["music_vol"]),
                             DEFAULTS["music_vol"])
 
@@ -163,51 +136,45 @@ def set_music_vol(value):
 
 
 def set_sfx_vol(value):
-    """Persist the SFX volume. Applied at next play() call (per-sound vol)."""
     v = _coerce_float_01(value, DEFAULTS["sfx_vol"])
     prefs.set("sfx_vol", v)
 
 
+# ---------------------------------------------------------------------------
+# Player cosmetics
+# ---------------------------------------------------------------------------
+
+def _get_index(key):
+    val = _coerce_int(prefs.get(key, DEFAULTS[key]), DEFAULTS[key])
+    # Not clamped to the palette length: Player applies the modulo, so
+    # the prefs file stays valid if the palette grows or shrinks.
+    return DEFAULTS[key] if val < 0 else val
+
+
+def _set_index(key, value):
+    val = _coerce_int(value, DEFAULTS[key])
+    prefs.set(key, DEFAULTS[key] if val < 0 else val)
+
+
 def get_player_color_index():
-    """Return the persistent starting color index for the player."""
-    raw = prefs.get("player_color_index", DEFAULTS["player_color_index"])
-    val = _coerce_int(raw, DEFAULTS["player_color_index"])
-    if val < 0:
-        return DEFAULTS["player_color_index"]
-    # Don't clamp by len(PLAYER_COLORS) here — Player applies the modulo so
-    # it always picks a real color. This keeps the prefs file forward-
-    # compatible if the palette later grows or shrinks.
-    return val
+    return _get_index("player_color_index")
 
 
 def set_player_color_index(value):
-    val = _coerce_int(value, DEFAULTS["player_color_index"])
-    if val < 0:
-        val = DEFAULTS["player_color_index"]
-    prefs.set("player_color_index", val)
+    _set_index("player_color_index", value)
 
 
 def get_player_icon_index():
-    """Return the persistent player icon (cube glyph) index."""
-    raw = prefs.get("player_icon_index", DEFAULTS["player_icon_index"])
-    val = _coerce_int(raw, DEFAULTS["player_icon_index"])
-    if val < 0:
-        return DEFAULTS["player_icon_index"]
-    return val
+    return _get_index("player_icon_index")
 
 
 def set_player_icon_index(value):
-    val = _coerce_int(value, DEFAULTS["player_icon_index"])
-    if val < 0:
-        val = DEFAULTS["player_icon_index"]
-    prefs.set("player_icon_index", val)
+    _set_index("player_icon_index", value)
 
 
 def reset_to_defaults():
-    """Restore every key managed here to its default value."""
     for k, v in DEFAULTS.items():
         prefs.set(k, v)
-    # Push live audio values too so the change is audible right away.
     try:
         from . import music
         music.set_volume(DEFAULTS["music_vol"])
