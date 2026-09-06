@@ -341,6 +341,8 @@ class DrawMixin:
         ps = self._draw_player_surface()
         if size != PLAYER_SIZE:
             ps = pygame.transform.smoothscale(ps, (size, size))
+        if self.grav == -1:
+            ps = pygame.transform.flip(ps, False, True)
         rot = pygame.transform.rotate(ps, angle) if angle else ps
         surf.blit(rot, rot.get_rect(center=(sx + size // 2, sy + size // 2)))
         m = self.mirror
@@ -359,7 +361,8 @@ class DrawMixin:
             burning=m.mode == MODE_ROBOT and m.flight_budget > 0 and m.vy < 0)
         if msize != PLAYER_SIZE:
             msurf = pygame.transform.smoothscale(msurf, (msize, msize))
-        msurf = pygame.transform.flip(msurf, False, True)
+        if m.grav == -1:
+            msurf = pygame.transform.flip(msurf, False, True)
         if not m.alive:
             msurf.set_alpha(90)
         mrot = pygame.transform.rotate(msurf, mangle) if mangle else msurf
