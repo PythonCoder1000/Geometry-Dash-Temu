@@ -33,7 +33,7 @@ from src.constants import (
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     SOLID_TYPES, HAZARD_TYPES, ORB_TYPES, PAD_TYPES,
-    DIFFICULTIES, LEVEL_FORMAT_VERSION, LEVELS_DIR,
+    DIFFICULTIES, LEVEL_FORMAT_VERSION, LEVELS_DIR, BLUE_ORB_PUSH_SCALE,
 )
 from src.graphics import (
     normalize_rotation, cell_rect, slab_rect, spike_hitboxes, saw_hitbox,
@@ -88,8 +88,8 @@ check("T_COIN is a string", isinstance(T_COIN, str))
 check("T_GREEN_ORB in ORB_TYPES", T_GREEN_ORB in ORB_TYPES)
 check("T_BLUE_PAD in PAD_TYPES", T_BLUE_PAD in PAD_TYPES)
 check("MODE_SPIDER is 'spider'", MODE_SPIDER == "spider")
-check("SPEED_VALUES has 4 entries",
-      len(SPEED_VALUES) == 4 and T_SPEED_NORMAL in SPEED_VALUES)
+check("SPEED_VALUES has 5 entries",
+      len(SPEED_VALUES) == 5 and T_SPEED_NORMAL in SPEED_VALUES)
 check("DIFFICULTIES list covers Easy through Extreme Demon",
       "Easy" in DIFFICULTIES
       and "Easy Demon" in DIFFICULTIES
@@ -319,7 +319,8 @@ p = Player(objs)
 for _ in range(22):
     p.update(False, False)
 p.update(True, True)
-check("Green orb activation flips vy", p.vy < 0)
+check("Green orb flips gravity and launches in the new direction",
+      p.grav == -1 and p.vy > 0)
 
 
 # ---------------------------------------------------------------------------
@@ -1628,10 +1629,10 @@ _grav_before = _bp.grav
 _bp.activate_blue_orb()
 check("Blue orb flips gravity", _bp.grav == -_grav_before)
 check("Blue orb imparts a launch impulse (nonzero vy)", _bp.vy != 0.0)
-check("Blue orb launch matches new gravity direction",
-      _bp.vy == _bp.params.jump_force * _bp.grav)
-check("Blue orb launch magnitude matches a yellow-orb jump",
-      abs(_bp.vy) == abs(_bp.params.jump_force))
+check("Blue orb push matches new gravity direction",
+      _bp.vy == _bp.params.jump_force * BLUE_ORB_PUSH_SCALE * _bp.grav)
+check("Blue orb push is weaker than a yellow-orb jump (GD: flip only)",
+      abs(_bp.vy) < abs(_bp.params.jump_force))
 
 
 # ---------------------------------------------------------------------------
@@ -1749,13 +1750,17 @@ section("Wave / ship line trail")
 from src import player as _player_mod
 from src.constants import MODE_WAVE as _MW, MODE_SHIP as _MSh, MODE_BALL as _MB
 
-_draw_src = inspect.getsource(_player_mod.Player.draw)
-check("Player.draw branches on MODE_WAVE/MODE_SHIP for line trail",
-      "MODE_WAVE, MODE_SHIP" in _draw_src and "len(self.trail)" in _draw_src)
+from src.player import draw as _player_draw_mod
+_draw_src = inspect.getsource(_player_draw_mod.draw_trail)
+check("Line-trail modes include wave and ship",
+      _MW in _player_draw_mod._LINE_TRAIL_MODES
+      and _MSh in _player_draw_mod._LINE_TRAIL_MODES
+      and _MB not in _player_draw_mod._LINE_TRAIL_MODES)
 check("Line trail uses pygame.draw.line with thickness",
-      "pygame.draw.line" in _draw_src and "trail_thickness" in _draw_src)
+      "pygame.draw.line" in _draw_src and "thickness" in _draw_src)
 check("Line trail uses a single SRCALPHA surface for alpha blending",
-      "SRCALPHA" in _draw_src and "line_surf" in _draw_src)
+      "SRCALPHA" in inspect.getsource(_player_draw_mod._line_surface)
+      and "line_surf" in _draw_src)
 
 # Behavioural smoke test: drawing wave + ship trails does not crash, and
 # the ghost-sprite branch is no longer taken for wave (the ghost-sprite
@@ -2029,7 +2034,7 @@ check("Player.reset clears mirror_passed to empty set",
 
 # CR2 #6: sprite cache is LRU, not FIFO. Fill past max, then assert the
 # oldest *inserted* key was evicted only if it was the least-recently-used.
-from src.graphics import _OBJECT_CACHE, _OBJECT_CACHE_MAX, _load_or_render
+from src.sprites import _OBJECT_CACHE, _OBJECT_CACHE_MAX, _load_or_render
 _OBJECT_CACHE.clear()
 # Prime entry (key A).
 _load_or_render(T_BLOCK, 44, 0)
@@ -2372,7 +2377,7 @@ finally:
 # ---------------------------------------------------------------------------
 section("Static hitbox cache")
 
-from src.graphics import spike_hitboxes as _sh, _spike_base_rotated
+from src.geometry import spike_hitboxes as _sh, _spike_base_rotated
 _sh_1 = _sh(10, 5, 0, False)
 _sh_2 = _sh(10, 5, 0, False)
 check("spike_hitboxes returns fresh list each call (no shared mutation)",

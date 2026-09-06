@@ -1,0 +1,499 @@
+"""Collision: spatial index, block / slope resolution, hazard OBB tests.
+
+Every routine takes a ``body`` argument (the :class:`Player` itself for
+the main body, a :class:`MirrorBody` for the dual mirror).  Both bodies
+share the player's ``x``; everything else is read from the body.
+"""
+
+import math
+
+from ..constants import (
+    CELL, PLAYER_SIZE, SOLID_HITBOX_FRACTION,
+    T_BLOCK, T_SLAB, T_SLOPE, T_START, T_SPIKE, T_HALF_SPIKE, T_SAW,
+    SOLID_TYPES,
+)
+from ..geometry import (
+    cell_rect, slab_rect, spike_hitboxes, saw_hitbox, obj_scale,
+)
+
+# Object types the interaction pass never reacts to.
+_NON_TRIGGER_TYPES = frozenset(SOLID_TYPES | {T_START, T_SLOPE})
+
+# Per-object caches that depend on the object's pose.
+_POSE_CACHE_KEYS = ("_srect", "_caabb", "_saw_aabb", "_sphb_aabbs")
+
+
+def is_non_trigger(o):
+    return o["t"] in _NON_TRIGGER_TYPES
+
+
+def invalidate_pose_caches(o):
+    """Drop cached AABBs after an object's x / y / r / scale changed."""
+    for k in _POSE_CACHE_KEYS:
+        if k in o:
+            del o[k]
+
+
+# ---------------------------------------------------------------------------
+# Oriented bounding box helpers (rotated outer hitbox vs axis-aligned rect)
+# ---------------------------------------------------------------------------
+
+def obb_corners(x, y, size, angle_deg, scale=1.0):
+    """Corners of a square of side ``size * scale`` centred in the
+    ``(x, y, size)`` box, rotated ``angle_deg`` (screen-space clockwise)."""
+    rad = -angle_deg * 0.017453292519943295
+    cs = math.cos(rad)
+    sn = math.sin(rad)
+    cx = x + size * 0.5
+    cy = y + size * 0.5
+    h = size * 0.5 * scale
+    return [(cx + ox * cs - oy * sn, cy + ox * sn + oy * cs)
+            for ox, oy in ((-h, -h), (h, -h), (h, h), (-h, h))]
+
+
+def _project(axis_x, axis_y, points):
+    pmin = pmax = points[0][0] * axis_x + points[0][1] * axis_y
+    for px, py in points[1:]:
+        v = px * axis_x + py * axis_y
+        if v < pmin:
+            pmin = v
+        elif v > pmax:
+            pmax = v
+    return pmin, pmax
+
+
+def obb_aabb_overlap(corners, left, top, right, bottom):
+    """Separating-axis test between a rotated square and an AABB."""
+    xs = [c[0] for c in corners]
+    if max(xs) < left or min(xs) > right:
+        return False
+    ys = [c[1] for c in corners]
+    if max(ys) < top or min(ys) > bottom:
+        return False
+    ex = corners[1][0] - corners[0][0]
+    ey = corners[1][1] - corners[0][1]
+    ln = (ex * ex + ey * ey) ** 0.5
+    if ln == 0.0:
+        return True
+    nx1, ny1 = ex / ln, ey / ln
+    aabb = ((left, top), (right, top), (right, bottom), (left, bottom))
+    for nx, ny in ((nx1, ny1), (-ny1, nx1)):
+        a0, a1 = _project(nx, ny, corners)
+        b0, b1 = _project(nx, ny, aabb)
+        if a1 < b0 or a0 > b1:
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Mixin
+# ---------------------------------------------------------------------------
+
+class CollisionMixin:
+    __slots__ = ()
+
+    # ---- spatial index ---------------------------------------------------
+    def _rebuild_spatial_index(self):
+        """(Re)build the full and trigger-only ``(gx, gy) -> [obj]`` maps."""
+        self._spatial_index = {}
+        self._trigger_index = {}
+        for o in self.objects:
+            cell = (o["x"], o["y"])
+            o["_cell"] = cell
+            self._spatial_index.setdefault(cell, []).append(o)
+            if not is_non_trigger(o):
+                self._trigger_index.setdefault(cell, []).append(o)
+        self._nearby_cache_key = None
+        self._nearby_trigger_cache_key = None
+
+    def _spatial_rebucket(self, obj):
+        """Move ``obj`` between buckets after its cell changed."""
+        old = obj.get("_cell")
+        new = (obj["x"], obj["y"])
+        if old == new:
+            return
+        self._nearby_cache_key = None
+        self._nearby_trigger_cache_key = None
+        indexes = [self._spatial_index]
+        if not is_non_trigger(obj):
+            indexes.append(self._trigger_index)
+        for index in indexes:
+            if old is not None:
+                bucket = index.get(old)
+                if bucket is not None:
+                    for i, o in enumerate(bucket):
+                        if o is obj:
+                            bucket.pop(i)
+                            break
+                    if not bucket:
+                        index.pop(old, None)
+            index.setdefault(new, []).append(obj)
+        obj["_cell"] = new
+
+    def nearby_for_rect(self, rect, extra=2):
+        return self._nearby_for_aabb(rect.left, rect.top, rect.right,
+                                     rect.bottom, extra)
+
+    def _nearby_for_aabb(self, left_px, top_px, right_px, bottom_px, extra=2):
+        """Objects in the cells around a pixel box.  Bot-only objects are
+        phantom unless ``self._bot_visibility`` is set."""
+        left = left_px // CELL - extra
+        right = right_px // CELL + extra
+        top = top_px // CELL - extra
+        bottom = bottom_px // CELL + extra
+        bot_vis = self._bot_visibility
+        key = (left, top, right, bottom, extra, bot_vis)
+        if key == self._nearby_cache_key:
+            return self._nearby_cache_result
+        out = []
+        index = self._spatial_index
+        for gx in range(left, right + 1):
+            for gy in range(top, bottom + 1):
+                bucket = index.get((gx, gy))
+                if bucket:
+                    out.extend(bucket)
+        if not bot_vis and out:
+            for o in out:
+                if o.get("_bot_only"):
+                    out = [o for o in out if not o.get("_bot_only")]
+                    break
+        self._nearby_cache_key = key
+        self._nearby_cache_result = out
+        return out
+
+    def _nearby_triggers_for_aabb(self, left_px, top_px, right_px,
+                                  bottom_px, extra=2):
+        left = left_px // CELL - extra
+        right = right_px // CELL + extra
+        top = top_px // CELL - extra
+        bottom = bottom_px // CELL + extra
+        bot_vis = self._bot_visibility
+        key = (left, top, right, bottom, extra, bot_vis)
+        if key == self._nearby_trigger_cache_key:
+            return self._nearby_trigger_cache_result
+        out = []
+        index = self._trigger_index
+        for gx in range(left, right + 1):
+            for gy in range(top, bottom + 1):
+                bucket = index.get((gx, gy))
+                if bucket:
+                    out.extend(bucket)
+        if not bot_vis:
+            out = [o for o in out if not o.get("_bot_only")]
+        self._nearby_trigger_cache_key = key
+        self._nearby_trigger_cache_result = out
+        return out
+
+    # ---- solid rects -----------------------------------------------------
+    def _solid_rect(self, o):
+        """``(left, top, right, bottom)`` int bounds for a block / slab, or
+        ``None`` for anything else (slopes are handled diagonally)."""
+        cached = o.get("_srect")
+        if cached is not None:
+            return cached
+        t = o["t"]
+        if t == T_BLOCK:
+            r = cell_rect(o["x"], o["y"], obj_scale(o))
+        elif t == T_SLAB:
+            r = slab_rect(o["x"], o["y"], o.get("r", 0), obj_scale(o))
+        else:
+            return None
+        aabb = (r.left, r.top, r.right, r.bottom)
+        o["_srect"] = aabb
+        return aabb
+
+    _invalidate_solid_rect = staticmethod(invalidate_pose_caches)
+
+    @staticmethod
+    def _inner_bounds(x, y, size):
+        inner = max(2, int(size * SOLID_HITBOX_FRACTION))
+        cx = round(x) + size // 2
+        cy = round(y) + size // 2
+        left = cx - inner // 2
+        top = cy - inner // 2
+        return left, top, left + inner, top + inner
+
+    # ---- block resolution ------------------------------------------------
+    def _resolve_x_collision(self, b, dx_step):
+        """Kill the body if its inner hitbox is inside a block after the
+        x step (walls are always lethal).  Returns True on death."""
+        size = b.size
+        px = round(self.x)
+        py = round(b.y)
+        il, it, ir, ib = self._inner_bounds(self.x, b.y, size)
+        solid_rect = self._solid_rect
+        for o in self._nearby_for_aabb(px, py, px + size, py + size):
+            br = o.get("_srect") or solid_rect(o)
+            if br is None:
+                continue
+            bl, bt, brr, bb = br
+            if il < brr and ir > bl and it < bb and ib > bt:
+                if dx_step > 0:
+                    self.x = bl - size
+                elif dx_step < 0:
+                    self.x = brr
+                self._kill(b, "Crashed into a wall")
+                return True
+        return False
+
+    def _resolve_y_collision(self, b, dy_step):
+        """Snap the body's outer rect onto the block surface its inner
+        hitbox just entered.  Landing sets ``on_ground``."""
+        size = b.size
+        px = round(self.x)
+        py = round(b.y)
+        il, it, ir, ib = self._inner_bounds(self.x, b.y, size)
+        hits = []
+        solid_rect = self._solid_rect
+        for o in self._nearby_for_aabb(px, py, px + size, py + size):
+            br = o.get("_srect") or solid_rect(o)
+            if br is None:
+                continue
+            bl, bt, brr, bb = br
+            if il < brr and ir > bl and it < bb and ib > bt:
+                hits.append(br)
+        if not hits:
+            return
+        if len(hits) > 1:
+            hits.sort(key=(lambda r: r[1]) if dy_step > 0 else (lambda r: -r[1]))
+        for bl, bt, brr, bb in hits:
+            if not (il < brr and ir > bl and it < bb and ib > bt):
+                continue
+            landing = (dy_step >= 0) if b.grav == 1 else (dy_step <= 0)
+            if (b.grav == 1) == landing:
+                b.y = bt - size  # feet on top (grav 1) / head hits top (grav -1 rising)
+            else:
+                b.y = bb
+            b.vy = 0.0
+            if landing:
+                b.on_ground = True
+            il, it, ir, ib = self._inner_bounds(self.x, b.y, size)
+
+    def _inner_in_block_dies(self, b):
+        """Belt-and-braces wall death for the rare case a teleport / pad
+        shoved the inner hitbox into a block without a normal resolve."""
+        if b.on_ground:
+            return False
+        size = b.size
+        px = round(self.x)
+        py = round(b.y)
+        il, it, ir, ib = self._inner_bounds(self.x, b.y, size)
+        solid_rect = self._solid_rect
+        for o in self._nearby_for_aabb(px, py, px + size, py + size):
+            br = o.get("_srect") or solid_rect(o)
+            if br is None:
+                continue
+            bl, bt, brr, bb = br
+            if il < brr and ir > bl and it < bb and ib > bt:
+                self._kill(b, "Crashed into a wall")
+                return True
+        return False
+
+    def _check_ground_adjacency(self, b):
+        """Sticky grounding: if the outer rect's gravity-facing edge is in
+        contact with a block, snap to it and zero vy."""
+        if not b.alive:
+            return
+        size = b.size
+        gap = max(2, int(size * (1.0 - SOLID_HITBOX_FRACTION) * 0.5))
+        px = round(self.x)
+        py = round(b.y)
+        p_top = py + size - 1 if b.grav == 1 else py - gap
+        p_bottom = p_top + gap + 1
+        solid_rect = self._solid_rect
+        for o in self._nearby_for_aabb(px, p_top, px + size, p_bottom):
+            br = o.get("_srect") or solid_rect(o)
+            if br is None:
+                continue
+            bl, bt, brr, bb = br
+            if px < brr and px + size > bl and p_top < bb and p_bottom > bt:
+                b.on_ground = True
+                if b.grav == 1 and b.vy >= 0:
+                    b.y = bt - size
+                    b.vy = 0.0
+                elif b.grav == -1 and b.vy <= 0:
+                    b.y = bb
+                    b.vy = 0.0
+                return
+
+    # ---- slopes ----------------------------------------------------------
+    @staticmethod
+    def _slope_orientation(o):
+        """``r // 90`` mod 4: 0 = / floor, 1 = \\ floor, 2 = \\ ceiling,
+        3 = / ceiling."""
+        try:
+            r = float(o.get("r", 0))
+        except (TypeError, ValueError):
+            r = 0.0
+        return int(round(r / 90.0)) % 4
+
+    def _slope_surface_y(self, o, player_left, player_right):
+        cell_left = o["x"] * CELL
+        cell_right = cell_left + CELL
+        px_l = max(player_left, cell_left)
+        px_r = min(player_right, cell_right)
+        if px_l > px_r:
+            return None
+        cell_top = o["y"] * CELL
+        r = self._slope_orientation(o)
+        x = px_r if r in (0, 3) else px_l
+        t = min(1.0, max(0.0, (x - cell_left) / CELL))
+        if r in (0, 2):
+            surface_y = cell_top + (1.0 - t) * CELL
+        else:
+            surface_y = cell_top + t * CELL
+        return surface_y, r >= 2
+
+    def _resolve_slopes(self, b):
+        """Snap the body onto the most constraining nearby slope surface."""
+        if not self._has_slopes:
+            return
+        size = b.size
+        px = round(self.x)
+        py = round(b.y)
+        left = float(self.x)
+        right = float(self.x + size)
+        best_floor = None
+        best_ceiling = None
+        for o in self._nearby_for_aabb(px, py, px + size, py + size):
+            if o["t"] != T_SLOPE:
+                continue
+            res = self._slope_surface_y(o, left, right)
+            if res is None:
+                continue
+            surface_y, is_ceiling = res
+            if not is_ceiling:
+                if best_floor is None or surface_y < best_floor:
+                    best_floor = surface_y
+            elif best_ceiling is None or surface_y > best_ceiling:
+                best_ceiling = surface_y
+        if best_floor is not None:
+            bottom = b.y + size
+            if best_floor < bottom <= best_floor + CELL + 4:
+                b.y = best_floor - size
+                if b.vy * b.grav > 0:
+                    b.vy = 0.0
+                if b.grav == 1:
+                    b.on_ground = True
+        if best_ceiling is not None:
+            if best_ceiling - CELL - 4 <= b.y < best_ceiling:
+                b.y = best_ceiling
+                if b.vy * b.grav > 0:
+                    b.vy = 0.0
+                if b.grav == -1:
+                    b.on_ground = True
+
+    # ---- hazards ---------------------------------------------------------
+    @staticmethod
+    def _spike_aabbs(o):
+        sphbs = o.get("_sphb_aabbs")
+        if sphbs is None:
+            sphbs = [(r.left, r.top, r.right, r.bottom) for r in
+                     spike_hitboxes(o["x"], o["y"], o.get("r", 0),
+                                    o["t"] == T_HALF_SPIKE, obj_scale(o))]
+            o["_sphb_aabbs"] = sphbs
+        return sphbs
+
+    @staticmethod
+    def _saw_aabb(o):
+        saabb = o.get("_saw_aabb")
+        if saabb is None:
+            r = saw_hitbox(o["x"], o["y"], obj_scale(o))
+            saabb = (r.left, r.top, r.right, r.bottom)
+            o["_saw_aabb"] = saabb
+        return saabb
+
+    def _hazard_hit(self, o, hz, corners):
+        """True if hazard ``o`` overlaps the hazard box ``hz``
+        (``(l, t, r, b)``), refined by the rotated outer OBB when given."""
+        t = o["t"]
+        if t in (T_SPIKE, T_HALF_SPIKE):
+            aabbs = self._spike_aabbs(o)
+        elif t == T_SAW:
+            aabbs = (self._saw_aabb(o),)
+        else:
+            return False
+        hl, ht, hr, hb = hz
+        for sl, st, sr, sb in aabbs:
+            if not (hl < sr and hr > sl and ht < sb and hb > st):
+                continue
+            if corners is not None and not obb_aabb_overlap(
+                    corners, sl, st, sr, sb):
+                continue
+            return True
+        return False
+
+    def _swept_hazard_death(self, b, x0, y0, x1, y1):
+        """Kill ``b`` if the swept box between two poses crosses a hazard
+        (used by instantaneous teleports)."""
+        size = b.size
+        shrink = max(2, int(6 * size / PLAYER_SIZE))
+        l = min(round(x0), round(x1)) + shrink
+        t = min(round(y0), round(y1)) + shrink
+        r = max(round(x0), round(x1)) + size - shrink
+        bt = max(round(y0), round(y1)) + size - shrink
+        for o in self._nearby_for_aabb(l - 3, t - 3, r + 3, bt + 3, 2):
+            if self._hazard_hit(o, (l, t, r, bt), None):
+                reason = ("Teleported into a saw" if o["t"] == T_SAW
+                          else "Teleported into a spike")
+                self._kill(b, reason)
+                return True
+        return False
+
+    # ---- spider teleport target search ----------------------------------
+    def _find_spider_surface(self, b, direction):
+        """Nearest block surface from body ``b`` in ``direction``.
+        Returns ``(new_x, new_y)`` or ``None``."""
+        dx, dy = direction
+        size = b.size
+        pl = round(self.x)
+        pr = pl + size
+        pt = round(b.y)
+        pb = pt + size
+        best = None
+        solid_rect = self._solid_rect
+        if dy != 0 and dx == 0:
+            lc = pl // CELL - 1
+            rc = (pr - 1) // CELL + 1
+            for (gx, _gy), bucket in self._spatial_index.items():
+                if gx < lc or gx > rc:
+                    continue
+                for o in bucket:
+                    br = solid_rect(o)
+                    if br is None:
+                        continue
+                    bl, bt, brr, bb = br
+                    if not (bl < pr and brr > pl):
+                        continue
+                    if dy < 0 and bb <= pt:
+                        d = pt - bb
+                        if best is None or d < best[0]:
+                            best = (d, self.x, float(bb))
+                    elif dy > 0 and bt >= pb:
+                        d = bt - pb
+                        if best is None or d < best[0]:
+                            best = (d, self.x, float(bt - size))
+        elif dx != 0 and dy == 0:
+            tc = pt // CELL - 1
+            bc = (pb - 1) // CELL + 1
+            for (_gx, gy), bucket in self._spatial_index.items():
+                if gy < tc or gy > bc:
+                    continue
+                for o in bucket:
+                    br = solid_rect(o)
+                    if br is None:
+                        continue
+                    bl, bt, brr, bb = br
+                    if not (bt < pb and bb > pt):
+                        continue
+                    if dx > 0 and bl >= pr:
+                        d = bl - pr
+                        if best is None or d < best[0]:
+                            best = (d, float(bl - size), b.y)
+                    elif dx < 0 and brr <= pl:
+                        d = pl - brr
+                        if best is None or d < best[0]:
+                            best = (d, float(brr), b.y)
+        if best is None:
+            return None
+        return best[1], best[2]

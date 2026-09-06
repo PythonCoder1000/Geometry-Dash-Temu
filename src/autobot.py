@@ -50,9 +50,8 @@ from .constants import (
 # everything else is a solid block / slab / slope or T_START. Building
 # a parallel "trigger-only" spatial grid alongside the full grid means
 # the interaction loop iterates 2-5× fewer objects on block-heavy levels.
-_NON_TRIGGER_TYPES = SOLID_TYPES | {T_START, T_SLOPE}
 
-from .player import Player
+from .player import Player, _NON_TRIGGER_TYPES
 from . import sfx
 
 
@@ -78,8 +77,8 @@ class SnapVals(NamedTuple):
     target_cam_y: float
     bg_preset: int
     color_index: int
-    grav_flip_grace: int
-    wall_frames: int
+    dash_flip_on_end: bool
+    hold_consumed: bool
     mirror_input_buffer: int
     size: int
     dash_vx: float
@@ -276,7 +275,7 @@ _SNAP_KEYS = [
     'x', 'y', 'vy', 'on_ground', 'alive', 'won', 'angle', 'grav',
     'frame', 'mode', 'move_speed', 'dash_timer', 'input_buffer',
     'teleport_cooldown', 'target_cam_y', 'bg_preset',
-    'color_index', '_grav_flip_grace', '_wall_frames',
+    'color_index', '_dash_flip_on_end', '_hold_consumed',
     'mirror_input_buffer', 'size',
 ]
 
@@ -294,11 +293,11 @@ def _snap(player):
         player.won, player.angle, player.grav, player.frame, player.mode,
         player.move_speed, player.dash_timer, player.input_buffer,
         player.teleport_cooldown, player.target_cam_y, player.bg_preset,
-        player.color_index, player._grav_flip_grace, player._wall_frames,
+        player.color_index, player._dash_flip_on_end, player._hold_consumed,
         player.mirror_input_buffer, player.size,
         player.dash_vx, player.dash_vy,
         player.flight_budget,
-        player._robot_thrust_disabled,
+        player.thrust_disabled,
     )
     passed = frozenset(player.passed)
     anims = player.move_animations
@@ -380,7 +379,7 @@ def _restore(player, snap):
      player.won, player.angle, player.grav, player.frame, player.mode,
      player.move_speed, player.dash_timer, player.input_buffer,
      player.teleport_cooldown, player.target_cam_y, player.bg_preset,
-     player.color_index, player._grav_flip_grace, player._wall_frames,
+     player.color_index, player._dash_flip_on_end, player._hold_consumed,
      player.mirror_input_buffer, player.size) = tuple(vals)[:21]
     if len(vals) >= 23:
         player.dash_vx = vals[21]
@@ -393,9 +392,9 @@ def _restore(player, snap):
     else:
         player.flight_budget = int(player.params.robot_flight_seconds * 60)
     if len(vals) >= 25:
-        player._robot_thrust_disabled = bool(vals[24])
+        player.thrust_disabled = bool(vals[24])
     else:
-        player._robot_thrust_disabled = False
+        player.thrust_disabled = False
     player.passed = set(passed)
     player.mirror_passed = set(mirror_passed)
     player.coins_collected = set(coins)
@@ -1460,10 +1459,10 @@ class AutoBot:
                     probe.dash_timer, probe.input_buffer,
                     probe.teleport_cooldown, probe.target_cam_y,
                     probe.bg_preset, probe.color_index,
-                    probe._grav_flip_grace, probe._wall_frames,
+                    probe._dash_flip_on_end, probe._hold_consumed,
                     probe.mirror_input_buffer, probe.size,
                     probe.dash_vx, probe.dash_vy,
-                    probe.flight_budget, probe._robot_thrust_disabled,
+                    probe.flight_budget, probe.thrust_disabled,
                 )
                 if trial_sig == target_sig:
                     accepted = cand
