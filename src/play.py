@@ -6,27 +6,22 @@ legitimate win — bumps the level's ``verified`` / ``best_progress`` /
 ``coins_collected`` metadata so the playlist can mark it verified.
 """
 
-import bisect
-import math
 import sys
 
 import pygame
 
 from .constants import (
     WIDTH, HEIGHT, CELL, FPS, PLAYER_START_GX,
-    C_DARK, C_PLAYER, C_GRAY, C_WHITE, C_BTN, C_BG_TOP, C_BG_BOT,
-    C_COIN, C_SUCCESS, C_PUBLISH, C_DANGER, C_DASH_ORB,
+    C_PLAYER, C_BG_TOP, C_BG_BOT, C_PUBLISH, C_DASH_ORB,
     DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES,
-    T_TELEPORT_ORB, T_COIN, T_END, T_ORB, T_DASH_ORB, T_BLACK_ORB,
+    T_COIN, T_ORB, T_DASH_ORB, T_BLACK_ORB,
     T_BLUE_ORB, T_GREEN_ORB, T_SPIDER_ORB, T_RED_ORB, T_PINK_ORB,
     T_GRAV_UP, T_GRAV_DOWN,
     T_TIME_WARP, SPEED_VALUES,
 )
 from .graphics import (
-    draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
-    update_shake, apply_shake, shake_offset, lighter, darker,
-    speaker_icon, icon_button, draw_end_wall,
-    obj_scale,
+    make_rect, make_stars, make_mountains,
+    update_shake, apply_shake, shake_offset,
 )
 from . import settings
 from . import gamepad
@@ -37,6 +32,14 @@ from .input_guard import ClickGuard
 from .particles import Particles
 from .player import Player
 from .levels import update_meta
+from .play_render import (
+    render_world, render_hint_overlay, render_predicted_path,
+    render_ghost_paths, render_death_hitbox_marker, render_best_run_ghost,
+    render_player_and_particles, render_checkpoint_markers,
+    render_death_reason, render_slowmo_vignette, render_pulse_flash,
+    render_hud, render_debug_overlay, render_state_hud,
+    render_pause_overlay, render_win_overlay,
+)
 
 
 # Keys / cells that, when added to player.passed during an update(),
@@ -1166,371 +1169,53 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
                 bg_bot[i] += (target_bot[i] - bg_bot[i]) * 0.06
 
         update_shake()
-        cur_top = tuple(int(c) for c in bg_top)
-        cur_bot = tuple(int(c) for c in bg_bot)
         shake_x, shake_y = shake_offset
-        draw_bg(screen, cam_x + shake_x, stars, mountains,
-                cam_y=cam_y + shake_y, bg_top=cur_top, bg_bot=cur_bot)
-        left_gx = int(cam_x // CELL) - 1
-        right_gx = left_gx + WIDTH // CELL + 3
-        # The bisect slice keys on each object's ORIGINAL x (stable across
-        # move triggers), so give it a generous margin — objects that have
-        # been displaced far from their origin by a move trigger should
-        # still fall inside the slice. Per-object `_fx` is tested below.
-        slice_margin = 200
-        lo = left_gx - slice_margin
-        hi = right_gx + slice_margin
-        for layer, xs in ((_deco_layer, _deco_xs), (_main_layer, _main_xs)):
-            i = bisect.bisect_left(xs, lo)
-            j = bisect.bisect_right(xs, hi)
-            for k in range(i, j):
-                o = layer[k]
-                ox = o.get("_fx", o["x"])
-                oy = o.get("_fy", o["y"])
-                if not (left_gx - 1 <= ox <= right_gx + 1):
-                    continue
-                # Skip collected coins so they disappear on pickup.
-                if o["t"] == T_COIN and o.get("coin_id", 0) in player.coins_collected:
-                    continue
-                if o["t"] == T_END:
-                    # Win line is an infinite-height wall, not a 50x50 sprite.
-                    draw_end_wall(screen, ox * CELL - cam_x + shake_x,
-                                  oy * CELL - cam_y + shake_y, CELL, pulse)
-                    continue
-                # Invisible objects: every behavior still runs (player.py
-                # reads by type, not visibility) but the sprite is
-                # skipped so authors can hide blocks, orbs, hazards, etc.
-                # behind scale-based teleport gauntlets and other
-                # hidden-path tricks.
-                if o.get("invisible"):
-                    continue
-                draw_obj(screen, o["t"], ox * CELL - cam_x + shake_x,
-                         oy * CELL - cam_y + shake_y, CELL, pulse, o.get("r", 0),
-                         o if o["t"] in (T_TELEPORT_ORB, T_SPIDER_ORB) else None,
-                         scale=obj_scale(o))
-                # Bot-only object marker: a translucent purple X
-                # overlay so the level author can see at a glance
-                # that this hazard is phantom (won't kill the live
-                # player) but is part of the Y bot's reality. The
-                # collision filter in player.py already excludes
-                # ``_bot_only`` objects from the live tick, so this
-                # is purely a visual tag.
-                if o.get("_bot_only"):
-                    bx = int(ox * CELL - cam_x + shake_x)
-                    by = int(oy * CELL - cam_y + shake_y)
-                    pygame.draw.line(screen, (180, 100, 230),
-                                     (bx + 6, by + 6),
-                                     (bx + CELL - 6, by + CELL - 6), 2)
-                    pygame.draw.line(screen, (180, 100, 230),
-                                     (bx + CELL - 6, by + 6),
-                                     (bx + 6, by + CELL - 6), 2)
+        render_world(screen, cam_x, cam_y, shake_x, shake_y, stars, mountains,
+                     bg_top, bg_bot, pulse, _deco_layer, _deco_xs,
+                     _main_layer, _main_xs, player.coins_collected)
         # Hint path overlay: when the player has toggled hint mode on, draw
         # the autobot's solved waypoints as a translucent dotted line so
         # they can preview the optimal route. Drawn BEFORE the per-run
         # ghost so the live ghost (player's own best) sits on top.
-        if hint_visible and hint_path:
-            hint_surf = _overlay_scratch
-            hint_surf.fill(_CLEAR)
-            prev_pt = None
-            for wx, wy in hint_path:
-                sx = int(wx - cam_x - shake_x)
-                sy = int(wy - cam_y - shake_y)
-                if -40 < sx < WIDTH + 40 and -200 < sy < HEIGHT + 200:
-                    # Tinted dot per waypoint — orange so it visually reads
-                    # as "guidance" without blending into the player trail.
-                    pygame.draw.circle(hint_surf, (255, 200, 80, 120),
-                                       (sx, sy), 4)
-                    if prev_pt is not None:
-                        pygame.draw.line(hint_surf, (255, 200, 80, 70),
-                                         prev_pt, (sx, sy), 2)
-                    prev_pt = (sx, sy)
-                else:
-                    prev_pt = None
-            # Mirror path (when the level enters dual): blue so the user can
-            # tell the two bodies apart at a glance.
-            if hint_mirror_path:
-                prev_pt = None
-                for wx, wy in hint_mirror_path:
-                    sx = int(wx - cam_x - shake_x)
-                    sy = int(wy - cam_y - shake_y)
-                    if -40 < sx < WIDTH + 40 and -200 < sy < HEIGHT + 200:
-                        pygame.draw.circle(hint_surf, (90, 170, 255, 120),
-                                           (sx, sy), 4)
-                        if prev_pt is not None:
-                            pygame.draw.line(hint_surf, (90, 170, 255, 70),
-                                             prev_pt, (sx, sy), 2)
-                        prev_pt = (sx, sy)
-                    else:
-                        prev_pt = None
-            screen.blit(hint_surf, (0, 0))
+        render_hint_overlay(screen, _overlay_scratch, _CLEAR, hint_visible,
+                            hint_path, hint_mirror_path, cam_x, cam_y,
+                            shake_x, shake_y)
         # Pathfinder predicted-path overlay (Y bot): draw the bot's
         # planned (x, y) sequence as a forward-fading green line that
         # starts at the player's current x and extends a few seconds
         # into the future. Persists across the whole attempt — every
         # frame slices a fresh forward window via bisect.
-        if pred_path_sorted:
-            _pp_player_x = player.x + player.size / 2
-            # Window: a few seconds ahead at base speed (≈ 5 px/frame
-            # × 60 fps = 300 px/sec → 900 px ≈ 3 s of preview).
-            _pp_window = 900.0
-            i_lo = bisect.bisect_left(pred_path_xs, _pp_player_x)
-            i_hi = bisect.bisect_right(
-                pred_path_xs, _pp_player_x + _pp_window)
-            if i_hi - i_lo >= 2:
-                pred_surf = _overlay_scratch
-                pred_surf.fill(_CLEAR)
-                slice_pts = pred_path_sorted[i_lo:i_hi]
-                span = max(1.0, _pp_window)
-                prev_pt = None
-                for wx, wy in slice_pts:
-                    sx = int(wx - cam_x - shake_x)
-                    sy = int(wy - cam_y - shake_y)
-                    if -40 < sx < WIDTH + 40 and -200 < sy < HEIGHT + 200:
-                        # Alpha decays linearly with distance ahead.
-                        d = max(0.0, wx - _pp_player_x)
-                        a = max(40, int(220 * (1.0 - d / span)))
-                        if prev_pt is not None:
-                            pygame.draw.line(pred_surf,
-                                             (90, 255, 150, a),
-                                             prev_pt, (sx, sy), 3)
-                        prev_pt = (sx, sy)
-                    else:
-                        prev_pt = None
-                screen.blit(pred_surf, (0, 0))
+        render_predicted_path(screen, _overlay_scratch, _CLEAR,
+                              pred_path_sorted, pred_path_xs,
+                              player.x, player.size, cam_x, cam_y,
+                              shake_x, shake_y)
         # Y-bot ghost overlay: render the click and no-click probe
         # trajectories as translucent lines so the viewer can compare
-        # the bot's actual decisions against both candidates. End
-        # markers (red box for death, gold flag for win) sit at each
-        # line's tail. Two schemas are supported: a static
-        # ``waypoints`` list (fixed spawn-to-end), or a per-frame
-        # ``frames`` list indexed by the current ``bot_frame`` so
-        # the lines update live as the playback advances.
-        if ghost_paths:
-            gp_surf = _overlay_scratch
-            gp_surf.fill(_CLEAR)
-            # The bot's NEXT action — the one whose probe rollouts the
-            # ghost lines visualize. For precomputed playback,
-            # ``bot_frame`` indexes the next input to consume; for
-            # the LIVE bot the controller exposes its just-decided
-            # forecast on ``last_forecast`` and we read which branch
-            # it picked from there.
-            next_idx = bot_frame
-            cur_held = False
-            if (playback_inputs is not None
-                    and 0 <= next_idx < len(playback_inputs)):
-                cur_held = bool(playback_inputs[next_idx][0])
-            elif bot_controller is not None:
-                live_fc = getattr(bot_controller, "last_forecast", None)
-                if live_fc:
-                    cur_held = (live_fc.get("chosen") == "click")
-            for gp in ghost_paths:
-                # Three schemas:
-                #   * static "waypoints": one fixed trajectory.
-                #   * precomputed "frames": indexed by bot_frame.
-                #   * live "live=True, branch=...": pulls from the
-                #     bot_controller's just-decided forecast.
-                live = gp.get("live", False)
-                frames = gp.get("frames")
-                if live and bot_controller is not None:
-                    fc = getattr(bot_controller, "last_forecast", None)
-                    if not fc:
-                        continue
-                    branch_key = gp.get("branch", "click")
-                    fr = fc.get(branch_key) or {}
-                    wps = fr.get("wp") or []
-                    death = fr.get("death")
-                    won_flag = fr.get("won", False)
-                    chosen_when = gp.get("chosen_when")
-                    is_chosen = (
-                        (chosen_when == "click" and cur_held)
-                        or (chosen_when == "noclick" and not cur_held))
-                elif frames is not None:
-                    if not frames:
-                        continue
-                    idx = next_idx
-                    if idx >= len(frames):
-                        idx = len(frames) - 1
-                    if idx < 0:
-                        idx = 0
-                    fr = frames[idx]
-                    wps = fr.get("wp") or []
-                    death = fr.get("death")
-                    won_flag = fr.get("won", False)
-                    chosen_when = gp.get("chosen_when")
-                    is_chosen = (
-                        (chosen_when == "click" and cur_held)
-                        or (chosen_when == "noclick" and not cur_held))
-                else:
-                    wps = gp.get("waypoints") or []
-                    death = gp.get("death")
-                    won_flag = gp.get("won", False)
-                    is_chosen = False
-                if len(wps) < 2:
-                    continue
-                col = gp.get("color", (200, 200, 200))
-                # Tint the line red when this branch's rollout died —
-                # without this, an off-screen death (the death
-                # position is past the camera's right edge) made the
-                # line look fine and the user couldn't tell why the
-                # bot picked the other branch. The red tint blends
-                # with the branch's base color so the user can still
-                # tell the click line from the no-click line, but
-                # there's an unmistakable "this branch is doomed"
-                # signal even when the actual death marker is off-
-                # screen.
-                if death is not None:
-                    col = (max(40, min(255, (col[0] + 240) // 2)),
-                           max(40, min(255, (col[1] + 70) // 2)),
-                           max(40, min(255, (col[2] + 70) // 2)))
-                # Brighten the actively-chosen branch so the user can
-                # see at a glance which one the bot picked this frame.
-                line_alpha = 220 if is_chosen else 110
-                line_w = 3 if is_chosen else 2
-                rgba = (col[0], col[1], col[2], line_alpha)
-                prev_pt = None
-                for wx, wy in wps:
-                    sx = int(wx - cam_x - shake_x)
-                    sy = int(wy - cam_y - shake_y)
-                    if -60 < sx < WIDTH + 60 and -200 < sy < HEIGHT + 200:
-                        if prev_pt is not None:
-                            pygame.draw.line(gp_surf, rgba,
-                                             prev_pt, (sx, sy), line_w)
-                        prev_pt = (sx, sy)
-                    else:
-                        prev_pt = None
-                # End-of-line marker.
-                if death is not None or won_flag:
-                    end_x, end_y = wps[-1]
-                    sz = int(death["size"]) if death else PLAYER_SIZE
-                    if death:
-                        # Last hitbox before death — use the death's own
-                        # x/y (corner of the player rect at the moment
-                        # of death) so it lines up with the actual
-                        # collision pose, not the last sampled centre.
-                        bx = int(death["x"] - cam_x - shake_x)
-                        by = int(death["y"] - cam_y - shake_y)
-                    else:
-                        # Win marker centred on the last waypoint.
-                        bx = int(end_x - cam_x - shake_x) - sz // 2
-                        by = int(end_y - cam_y - shake_y) - sz // 2
-                    rect = pygame.Rect(bx, by, sz, sz)
-                    if death:
-                        # Red death box.
-                        pygame.draw.rect(gp_surf, (255, 70, 70, 110), rect)
-                        pygame.draw.rect(gp_surf, (255, 110, 110, 240),
-                                         rect, 2)
-                    else:
-                        # Gold win flag.
-                        pygame.draw.rect(gp_surf, (255, 220, 80, 90),
-                                         rect)
-                        pygame.draw.rect(gp_surf, (255, 240, 130, 240),
-                                         rect, 2)
-            # Legend in the top-left corner so the viewer knows which
-            # colour means what. ``txt`` is module-level imported; do
-            # not re-import here or Python promotes it to a local
-            # for the whole function and the un-conditional uses
-            # later (progress %, restart hint, pole-flag indices)
-            # raise UnboundLocalError when ``ghost_paths`` is None.
-            legend_x = 16
-            legend_y = 16
-            for gp in ghost_paths:
-                col = gp.get("color", (200, 200, 200))
-                pygame.draw.rect(gp_surf, (col[0], col[1], col[2], 220),
-                                 (legend_x, legend_y, 18, 4))
-                txt(gp_surf, gp.get("label", ""),
-                    legend_x + 24, legend_y - 6,
-                    13, (220, 230, 240), shadow=True)
-                legend_y += 18
-            screen.blit(gp_surf, (0, 0))
+        # the bot's actual decisions against both candidates.
+        render_ghost_paths(screen, _overlay_scratch, _CLEAR, ghost_paths,
+                          bot_frame, playback_inputs, bot_controller,
+                          cam_x, cam_y, shake_x, shake_y)
         # Death hitbox marker (Y bot): on death, freeze a translucent
         # red rect at the player's death position so the viewer can
         # see exactly where the plan failed. Only drawn while
         # death_timer > 0 so a fresh attempt doesn't show stale marks.
-        if predicted_path and _death_hitbox is not None and death_timer > 0:
-            dh_x, dh_y, dh_size, dh_angle, dh_reason = _death_hitbox
-            dh_surf = _overlay_scratch
-            dh_surf.fill(_CLEAR)
-            sx = int(dh_x - cam_x - shake_x)
-            sy = int(dh_y - cam_y - shake_y)
-            # Rect outline + half-fill in red so it reads as a fault marker
-            # rather than yet another player ghost.
-            rect = pygame.Rect(sx, sy, int(dh_size), int(dh_size))
-            pygame.draw.rect(dh_surf, (255, 60, 60, 90), rect)
-            pygame.draw.rect(dh_surf, (255, 100, 100, 220), rect, 2)
-            screen.blit(dh_surf, (0, 0))
+        render_death_hitbox_marker(screen, _overlay_scratch, _CLEAR,
+                                   predicted_path, _death_hitbox,
+                                   death_timer, cam_x, cam_y,
+                                   shake_x, shake_y)
         # Ghost overlay: draw a fading trail of the best prior run so the
         # player can see where they previously got further.
-        if best_run:
-            ghost_surf = _overlay_scratch
-            ghost_surf.fill(_CLEAR)
-            # Find the segment near current time +/- some window so the ghost
-            # "runs alongside" rather than rendering the entire track.
-            window = 120  # frames before and after
-            lo = attempt_frames - window
-            hi = attempt_frames + window
-            for gf, gx, gy in best_run:
-                if gf < lo or gf > hi:
-                    continue
-                sx = int(gx - cam_x - shake_x)
-                sy = int(gy - cam_y - shake_y)
-                if -30 < sx < WIDTH + 30 and -30 < sy < HEIGHT + 30:
-                    # Alpha fades with distance from current frame.
-                    dist = abs(gf - attempt_frames)
-                    a = max(0, int(110 * (1.0 - dist / window)))
-                    pygame.draw.circle(ghost_surf, (200, 200, 255, a),
-                                       (sx + 22, sy + 22), 10)
-            screen.blit(ghost_surf, (0, 0))
-        if player.alive and death_timer == 0:
-            player.draw(screen, cam_x + shake_x, cam_y + shake_y)
-            if bot_click_flash > 0:
-                t = 1.0 - (bot_click_flash / 12.0)
-                radius = int(26 + 28 * t)
-                alpha = int(220 * (1.0 - t))
-                # Center on the player's visual midpoint, which shrinks
-                # with `player.size` in mini mode — a fixed +22 offset
-                # placed the ring 10 px off-center for mini cubes.
-                cx = int(player.x - cam_x - shake_x + player.size / 2)
-                cy = int(player.y - cam_y - shake_y + player.size / 2)
-                ring_side = radius * 2 + 8
-                ring_surf = pygame.Surface((ring_side, ring_side),
-                                            pygame.SRCALPHA)
-                pygame.draw.circle(ring_surf, (255, 200, 80, alpha),
-                                   (radius + 4, radius + 4), radius, 3)
-                screen.blit(ring_surf, (cx - radius - 4, cy - radius - 4))
-        particles.draw(screen, cam_x + shake_x, cam_y + shake_y)
+        render_best_run_ghost(screen, _overlay_scratch, _CLEAR, best_run,
+                              attempt_frames, cam_x, cam_y, shake_x, shake_y)
+        render_player_and_particles(screen, player, particles, death_timer,
+                                    bot_click_flash, cam_x, cam_y,
+                                    shake_x, shake_y)
 
         # Checkpoint markers — little flag drawn at every saved spot.
         # Only in practice mode (that's the only mode that saves them)
         # and before the player wins, so the win card isn't cluttered.
-        if practice_mode and player.checkpoints and not player.won:
-            _pulse_t = (pulse % 60) / 60.0
-            _glow = int(90 + 40 * math.sin(_pulse_t * math.tau))
-            for _i, _cp in enumerate(player.checkpoints):
-                fx = int(_cp["x"] - cam_x - shake_x)
-                fy = int(_cp["y"] - cam_y - shake_y)
-                # Cull off-screen markers cheaply.
-                if fx < -40 or fx > WIDTH + 40:
-                    continue
-                # Flag pole.
-                pole_top = fy - 28
-                pole_bot = fy + 44
-                pygame.draw.line(screen, (230, 230, 240),
-                                 (fx + 8, pole_top), (fx + 8, pole_bot), 2)
-                # Triangular flag.
-                flag_pts = [(fx + 8, pole_top),
-                            (fx + 30, pole_top + 8),
-                            (fx + 8, pole_top + 16)]
-                pygame.draw.polygon(screen, (90, 220, 140), flag_pts)
-                pygame.draw.polygon(screen, (20, 100, 50), flag_pts, 2)
-                # Soft pulsing halo around the flag so it reads as
-                # "interactive" rather than part of the level art.
-                halo = pygame.Surface((44, 44), pygame.SRCALPHA)
-                pygame.draw.circle(halo, (120, 255, 160, _glow),
-                                   (22, 22), 22)
-                screen.blit(halo, (fx - 14, pole_top - 6))
-                # Number label on the flag (1-indexed).
-                txt(screen, str(_i + 1), fx + 14, pole_top + 4, 11,
-                    (20, 40, 20), center=True)
+        render_checkpoint_markers(screen, practice_mode, player, pulse,
+                                  cam_x, cam_y, shake_x, shake_y)
 
         # (Red full-screen death flash removed — the slow-mo vignette,
         # explosion particles, camera shake and "Hit a spike" readout
@@ -1540,35 +1225,15 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         # Death reason readout — shows shortly after death so the
         # player gets a short explanation of what killed them ("Hit a
         # spike", "Fell off the screen", etc.) before the next attempt.
-        if death_timer > 0 and getattr(player, "death_reason", ""):
-            fade = min(1.0, (45 - death_timer) / 12.0)
-            alpha = int(230 * max(0.0, fade))
-            _reason = player.death_reason
-            _rtxt = f"☠  {_reason}"
-            reason_surf = pygame.Surface((WIDTH, 46), pygame.SRCALPHA)
-            reason_surf.fill((0, 0, 0, int(140 * fade)))
-            screen.blit(reason_surf, (0, HEIGHT // 2 + 60))
-            txt(screen, _rtxt, WIDTH // 2, HEIGHT // 2 + 82,
-                22, (255, 220, 220), True, shadow=True)
+        render_death_reason(screen, death_timer, player)
 
         # Slow-mo vignette: bordered darkening when death_slowmo_timer is active.
-        if death_slowmo_timer > 0:
-            alpha = int(120 * (death_slowmo_timer / 30.0))
-            if alpha > 0:
-                border = 120
-                dark = (0, 0, 0, alpha)
-                _overlay_scratch.fill(_CLEAR)
-                _overlay_scratch.fill(dark, (0, 0, WIDTH, border))
-                _overlay_scratch.fill(dark, (0, HEIGHT - border, WIDTH, border))
-                _overlay_scratch.fill(dark, (0, 0, border, HEIGHT))
-                _overlay_scratch.fill(dark, (WIDTH - border, 0, border, HEIGHT))
-                screen.blit(_overlay_scratch, (0, 0))
+        render_slowmo_vignette(screen, _overlay_scratch, _CLEAR,
+                               death_slowmo_timer)
 
         # Pulse trigger: brief screen-tinted flash modulated by BPM.
         pulse_amp = player.pulse_intensity()
-        if pulse_amp > 0.01:
-            _overlay_scratch.fill((255, 240, 255, int(60 * pulse_amp)))
-            screen.blit(_overlay_scratch, (0, 0))
+        render_pulse_flash(screen, _overlay_scratch, pulse_amp)
         if death_flash_timer > 0:
             death_flash_timer -= 1
         # (Checkpoint green flash removed — the in-world flag markers
@@ -1576,232 +1241,22 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         # player's surroundings at the moment the save happens.)
 
         # ---- HUD ----------------------------------------------------------
-        # Progress bar — spans most of the screen width, taller so the bar
-        # carries visual weight. Every 10% has a subtle tick for structure.
-        progress = max(0.0, min(1.0, player.x / max_x))
-        bar_x = 50
-        bar_y = 10
-        bar_h = 12
-        bw = WIDTH - 2 * bar_x
-        if progress < 0.5:
-            bar_color = (255, int(255 * (progress / 0.5)), 0)
-        else:
-            bar_color = (int(255 * (1 - (progress - 0.5) / 0.5)), 255, 0)
-        pygame.draw.rect(screen, C_DARK, (bar_x, bar_y, bw, bar_h),
-                         border_radius=4)
-        pygame.draw.rect(screen, bar_color,
-                         (bar_x, bar_y, max(1, int(bw * progress)), bar_h),
-                         border_radius=4)
-        for pct in range(10, 100, 10):
-            tx = bar_x + int(bw * pct / 100)
-            pygame.draw.rect(screen, (0, 0, 0, 80),
-                             (tx, bar_y + 2, 1, bar_h - 4))
-        progress_percent = int(progress * 100)
-        txt(screen, f"{progress_percent}%",
-            bar_x + int(bw * progress) + 10, bar_y - 4, 14,
-            C_GRAY, shadow=True)
-
-        # Attempt / time stack sits BELOW the progress bar, clearly
-        # separated so nothing visually collides with the coin HUD.
-        hud_text_y = bar_y + bar_h + 10
-        txt(screen, f"Attempt {attempts}", 20, hud_text_y, 17, C_GRAY,
-            shadow=True)
-        cur_time_s = attempt_frames / 60.0
-        timer_label = f"Time {int(cur_time_s // 60):d}:{cur_time_s % 60:05.2f}"
-        txt(screen, timer_label, 20, hud_text_y + 20, 14, C_GRAY, shadow=True)
-        prev_best_time = int((meta or {}).get("best_time_frames", 0)) if meta else 0
-        cps_baseline_y = hud_text_y + 38
-        if prev_best_time > 0:
-            best_s = prev_best_time / 60.0
-            best_label = f"Best {int(best_s // 60):d}:{best_s % 60:05.2f}"
-            txt(screen, best_label, 20, hud_text_y + 38, 13, C_SUCCESS,
-                shadow=True)
-            cps_baseline_y = hud_text_y + 56
-        # Bot CPS / press tally — surfaced in the top-left HUD so the
-        # viewer can monitor the bot's input cadence at a glance,
-        # independent of any speed/test labels in the corner. The
-        # rolling window pops samples older than 1 second so the CPS
-        # number reads as instantaneous, not session average.
-        if is_sim_run:
-            cps_cutoff = attempt_frames - 60
-            while bot_press_frames and bot_press_frames[0] < cps_cutoff:
-                bot_press_frames.pop(0)
-            cps_now = len(bot_press_frames)
-            txt(screen, f"CPS {cps_now}  ·  {bot_press_total} presses",
-                20, cps_baseline_y, 13, (255, 220, 160), shadow=True)
-            if manual_takeover and player.alive and not player.won:
-                grace_left = max(
-                    0, MANUAL_TAKEOVER_GRACE - takeover_idle_frames)
-                txt(screen,
-                    f"TAKEOVER · {grace_left / 60.0:.1f}s",
-                    20, cps_baseline_y + 18, 13, (255, 120, 120),
-                    shadow=True)
-            elif is_sim_run and player.alive and not player.won:
-                txt(screen, "Press P to take over",
-                    20, cps_baseline_y + 18, 11, (160, 160, 160),
-                    shadow=True)
-        txt(screen, level_name, WIDTH // 2, 8, 15, C_WHITE, True, shadow=True)
-        txt(screen, f"{player.mode.title()} · {player.move_speed:.1f}x",
-            WIDTH - 170, 28, 14, C_GRAY, shadow=True)
-
-        # Coin HUD (top-right)
-        if total_coins > 0:
-            got = len(player.coins_collected)
-            coin_y = 52
-            for i in range(total_coins):
-                cx = WIDTH - 30 - (total_coins - 1 - i) * 28
-                filled = i < got
-                col = C_COIN if filled else darker(C_COIN, 120)
-                pygame.draw.circle(screen, darker(col, 40), (cx + 1, coin_y + 1), 10)
-                pygame.draw.circle(screen, col, (cx, coin_y), 10)
-                if filled:
-                    pygame.draw.circle(screen, lighter(C_COIN, 70), (cx, coin_y), 6, 2)
-            txt(screen, f"{got}/{total_coins}", WIDTH - 30 - total_coins * 28 - 8,
-                coin_y - 8, 14, C_WHITE, shadow=True)
-
-        if practice_mode:
-            # Stack the CP chip ABOVE the PRACTICE label so the two never
-            # collide horizontally — on narrow windows the centred
-            # PRACTICE text and the right-anchored chip used to share a
-            # row and risked overlap.
-            _cp_n = len(player.checkpoints)
-            _cp_label = (f"CP: {_cp_n}  ·  C drop · X pop" if _cp_n
-                         else "CP: 0  ·  press C to drop a checkpoint")
-            txt(screen, _cp_label, WIDTH - 140, HEIGHT - 46, 12,
-                (180, 220, 255) if _cp_n else C_GRAY, True, shadow=True)
-            txt(screen, "PRACTICE MODE", WIDTH // 2, HEIGHT - 22, 15, (0, 255, 0),
-                True, shadow=True)
-        # Hint-mode status: a subtle top-left line the player can ignore
-        # unless they've opted in by pressing H.
-        if hint_visible and hint_path:
-            badge = "HINT · autobot path"
-            if hint_status == "partial":
-                badge += " (partial)"
-            txt(screen, badge, 20, 78, 13, (255, 200, 80), shadow=True)
-        elif hint_path is not None and not hint_visible:
-            txt(screen, "HINT off — press H", 20, 78, 12, C_GRAY, shadow=True)
-        if editor_test or (practice_mode and
-                           test_speed_idx != len(test_speeds) - 1):
-            _speed_label = ("Test" if editor_test else "Practice")
-            txt(screen,
-                f"{_speed_label} {test_speeds[test_speed_idx]:.2f}x",
-                WIDTH - 110, 26, 15, C_GRAY, shadow=True)
-            if bot_controller is not None:
-                txt(screen, "BOT", WIDTH // 2 - 220, HEIGHT - 22, 18,
-                    (255, 180, 60), True, shadow=True)
-            elif playback_inputs is not None:
-                pb_pct = min(100, int(bot_frame / max(1, len(playback_inputs)) * 100))
-                txt(screen, f"PLAYBACK {pb_pct}%", WIDTH // 2 - 220, HEIGHT - 22,
-                    18, (100, 220, 255), True, shadow=True)
-            # Playback desync badge: red alert while current drift is
-            # above threshold, dimmer readout of peak drift otherwise
-            # so the user always knows whether the replay has drifted
-            # even once the trajectory has re-converged.
-            if playback_wp_sorted and playback_inputs is not None:
-                if desync_alert_timer > 0:
-                    txt(screen, "DRIFT — replay off-route",
-                        WIDTH // 2 + 40, HEIGHT - 42, 14, (255, 110, 110),
-                        True, shadow=True)
-                if desync_max_px > 2.0:
-                    txt(screen, f"peak drift {desync_max_px:.0f}px",
-                        WIDTH // 2 + 40, HEIGHT - 22, 12,
-                        (210, 180, 180), True, shadow=True)
-            txt(screen, "[/- slower  ]/= faster  0 reset", WIDTH // 2,
-                HEIGHT - 22, 15, C_GRAY, True, shadow=True)
+        render_hud(screen, player, max_x, attempts, attempt_frames, meta,
+                  is_sim_run, bot_press_frames, bot_press_total,
+                  manual_takeover, takeover_idle_frames,
+                  MANUAL_TAKEOVER_GRACE, level_name, total_coins,
+                  practice_mode, hint_visible, hint_path, hint_status,
+                  editor_test, test_speed_idx, test_speeds, bot_controller,
+                  playback_inputs, bot_frame, playback_wp_sorted,
+                  desync_alert_timer, desync_max_px)
 
         # ---- Debug overlay (F3) -------------------------------------------
         # If the level has a T_JUMP_PREDICTOR probe, F3 switches from the
         # generic debug HUD to the predictor's arc + summary instead —
         # the probe exists specifically to answer "does this click work?",
         # and stacking both readouts would just obscure the arc.
-        if show_debug:
-            from .jump_predictor import (
-                find_probe as _pred_find_probe, predict as _pred_predict,
-                draw_overlay as _pred_draw_overlay,
-                summary_text as _pred_summary_text,
-            )
-            _probe = _pred_find_probe(objects)
-        else:
-            _probe = None
-        if show_debug and _probe is not None:
-            _pred_result = _pred_predict(objects, _probe)
-            _pred_draw_overlay(
-                screen, _pred_result, cam_x, cam_y, zoom_level=1.0,
-                clip_rect=pygame.Rect(0, 0, WIDTH, HEIGHT),
-            )
-            # Summary panel replaces the normal debug readout.
-            _lines = [("JUMP PROBE", (255, 235, 120))]
-            for _ln in _pred_summary_text(_pred_result):
-                _lines.append((_ln, (210, 230, 255)))
-            dbg_w, dbg_h = 300, 16 * len(_lines) + 12
-            pad = pygame.Rect(WIDTH - dbg_w - 10, HEIGHT - dbg_h - 40,
-                              dbg_w, dbg_h)
-            bg = pygame.Surface((dbg_w, dbg_h), pygame.SRCALPHA)
-            bg.fill((0, 0, 0, 190))
-            screen.blit(bg, pad.topleft)
-            pygame.draw.rect(screen, (255, 235, 120), pad, 1,
-                             border_radius=2)
-            for i, (ln, col) in enumerate(_lines):
-                txt(screen, ln, pad.x + 8, pad.y + 6 + i * 16,
-                    12, col, shadow=True)
-        elif show_debug:
-            import time as _time_dbg
-            now = _time_dbg.perf_counter()
-            _dbg_frame_times.append(now)
-            # Keep only the last ~1 sec of timestamps for FPS calc.
-            cutoff = now - 1.0
-            while _dbg_frame_times and _dbg_frame_times[0] < cutoff:
-                _dbg_frame_times.pop(0)
-            _fps = (len(_dbg_frame_times) - 1) / max(
-                0.001, (_dbg_frame_times[-1] - _dbg_frame_times[0])
-                if len(_dbg_frame_times) > 1 else 0.001)
-            _frame_ms = (now - _dbg_frame_times[-2]) * 1000 \
-                if len(_dbg_frame_times) > 1 else 0.0
-            lines = [
-                (f"FPS {_fps:.1f}  ·  {_frame_ms:.1f}ms", None),
-                (f"pos ({player.x:.1f}, {player.y:.1f})", None),
-                (f"vy {player.vy:.2f}  grav {player.grav}", None),
-                (f"mode {player.mode}  speed {player.move_speed:.1f}x", None),
-                (f"on_ground {player.on_ground}  size {player.size}", None),
-                (f"grounded_frames {player.grounded_frames}", None),
-                (f"frame {player.frame}  attempts {attempts}", None),
-                (f"objects {len(objects)}", None),
-            ]
-            lj = player.last_jump
-            if lj is not None:
-                # Colour the readout so the user can eyeball frame-perfect
-                # jumps at a glance: green == perfect (landed + acted on
-                # the same frame), yellow == 1 frame late, red past that.
-                gf = lj["grounded_frames"]
-                if gf == 1:
-                    col = (120, 255, 140)
-                    tag = "PERFECT"
-                elif gf == 2:
-                    col = (255, 235, 120)
-                    tag = f"{gf - 1}f late"
-                else:
-                    col = (255, 160, 140)
-                    tag = f"{gf - 1}f late"
-                tap = "tap" if lj["fresh_press"] else "held"
-                ago = player.frame - lj["frame"]
-                lines.append((
-                    f"last {lj['kind']}: fr{lj['frame']} "
-                    f"gnd={gf} {tap} {tag} ({ago}f ago)",
-                    col,
-                ))
-            if player.mirror is not None:
-                mm = player.mirror
-                lines.append((f"mirror y {mm['y']:.1f} vy {mm['vy']:.2f} "
-                              f"grav {mm['grav']}", None))
-            dbg_w, dbg_h = 300, 14 * len(lines) + 12
-            pad = pygame.Rect(WIDTH - dbg_w - 10, HEIGHT - dbg_h - 40,
-                              dbg_w, dbg_h)
-            bg = pygame.Surface((dbg_w, dbg_h), pygame.SRCALPHA)
-            bg.fill((0, 0, 0, 180))
-            screen.blit(bg, pad.topleft)
-            for i, (ln, col) in enumerate(lines):
-                txt(screen, ln, pad.x + 8, pad.y + 6 + i * 14,
-                    11, col if col else (180, 240, 180))
+        render_debug_overlay(screen, show_debug, objects, cam_x, cam_y,
+                             player, attempts, _dbg_frame_times)
 
         # ---- Level-state HUD (toggle: I) ---------------------------------
         # Shows the player's CURRENT mode / speed / size / gravity / dual
@@ -1811,172 +1266,18 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         # most useful — manually re-creating "is this section dual at
         # 1.65x in mini wave?" by reading triggers off the screen is
         # what this overlay exists to avoid.
-        if show_state:
-            from .constants import (
-                MODE_CUBE as _MC, MODE_SHIP as _MS, MODE_BALL as _MB,
-                MODE_WAVE as _MW, MODE_UFO as _MU, MODE_SPIDER as _MSP,
-                MODE_SWING as _MSW, MODE_ROBOT as _MR,
-                MINI_PLAYER_SIZE as _MINI,
-                C_MODE_CUBE as _C_CUBE,
-            )
-            from .constants import (C_MODE_SHIP as _C_SHIP,
-                                    C_MODE_BALL as _C_BALL,
-                                    C_MODE_WAVE as _C_WAVE,
-                                    C_MODE_UFO as _C_UFO,
-                                    C_MODE_SPIDER as _C_SPIDER,
-                                    C_MODE_SWING as _C_SWING,
-                                    C_MODE_ROBOT as _C_ROBOT)
-            _MODE_LABELS = {
-                _MC: "Cube", _MS: "Ship", _MB: "Ball", _MW: "Wave",
-                _MU: "UFO", _MSP: "Spider", _MSW: "Swing", _MR: "Robot",
-            }
-            _MODE_COLORS = {
-                _MC: _C_CUBE, _MS: _C_SHIP, _MB: _C_BALL, _MW: _C_WAVE,
-                _MU: _C_UFO, _MSP: _C_SPIDER, _MSW: _C_SWING,
-                _MR: _C_ROBOT,
-            }
-            mode_label = _MODE_LABELS.get(player.mode, str(player.mode))
-            mode_col = _MODE_COLORS.get(player.mode, (200, 220, 240))
-            base_speed = float(player.params.base_move_speed)
-            # Speed multiplier relative to the level's base speed —
-            # what a level author thinks of as "1.0x / 1.35x / 1.65x".
-            speed_mult = (player.move_speed / base_speed
-                          if base_speed > 0 else 1.0)
-            size_label = ("Mini" if int(player.size) == int(_MINI)
-                          else "Normal")
-            grav_label = "Flipped" if player.grav < 0 else "Normal"
-            dual_label = "ON" if player.mirror is not None else "off"
-            tw = float(getattr(player, "time_warp", 1.0))
-            # Highlight non-default values so the user can scan the panel
-            # and immediately spot what's NOT vanilla here.
-            _NEUTRAL = (210, 220, 235)
-            _ACCENT = (255, 220, 120)
-            speed_col = _NEUTRAL if abs(speed_mult - 1.0) < 0.01 else _ACCENT
-            size_col = _NEUTRAL if size_label == "Normal" else _ACCENT
-            grav_col = _NEUTRAL if grav_label == "Normal" else _ACCENT
-            dual_col = _NEUTRAL if player.mirror is None else _ACCENT
-            tw_col = _NEUTRAL if abs(tw - 1.0) < 0.01 else _ACCENT
-            cell_x = int(player.x // CELL)
-            state_lines = [
-                ("Mode",     mode_label,                     mode_col),
-                ("Speed",    f"{speed_mult:.2f}x",           speed_col),
-                ("Size",     size_label,                     size_col),
-                ("Gravity",  grav_label,                     grav_col),
-                ("Dual",     dual_label,                     dual_col),
-                ("Time",     f"{tw:.2f}x",                   tw_col),
-                ("Pos",      f"x={player.x:.0f} (cell {cell_x})",
-                             _NEUTRAL),
-            ]
-            sw, sh = 220, 14 * len(state_lines) + 30
-            sx0 = WIDTH - sw - 10
-            sy0 = 10
-            sbg = pygame.Surface((sw, sh), pygame.SRCALPHA)
-            sbg.fill((0, 0, 0, 180))
-            screen.blit(sbg, (sx0, sy0))
-            pygame.draw.rect(screen, (90, 110, 140),
-                             pygame.Rect(sx0, sy0, sw, sh), 1,
-                             border_radius=2)
-            txt(screen, "LEVEL STATE  [I]", sx0 + 10, sy0 + 6, 11,
-                (180, 200, 230), shadow=True)
-            for i, (label, value, col) in enumerate(state_lines):
-                row_y = sy0 + 24 + i * 14
-                txt(screen, label, sx0 + 10, row_y, 12,
-                    (160, 175, 200))
-                txt(screen, value, sx0 + 78, row_y, 12, col,
-                    shadow=True)
+        render_state_hud(screen, show_state, player)
 
         # ---- Pause overlay ------------------------------------------------
-        if paused:
-            ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            ov.fill((0, 0, 0, 180))
-            screen.blit(ov, (0, 0))
-            txt(screen, "PAUSED", WIDTH // 2, HEIGHT // 2 - 140, 56, C_PLAYER, True)
-            # Status sub-line: show attempt count + current % so the pause
-            # menu is informative, not just a cover (QoL B5).
-            _pct = int(max(0.0, min(1.0, player.x / max_x)) * 100)
-            txt(screen, f"Attempt {attempts}  ·  {_pct}%",
-                WIDTH // 2, HEIGHT // 2 - 100, 16, C_GRAY, True)
-            btn(screen, "Resume", pause_menu_buttons["resume"].centerx,
-                pause_menu_buttons["resume"].centery, 220, 48, C_BTN, mpos)
-            btn(screen, "Restart", pause_menu_buttons["restart"].centerx,
-                pause_menu_buttons["restart"].centery, 220, 48, C_BTN, mpos)
-            practice_label = "Practice: ON" if practice_mode else "Practice: OFF"
-            practice_col = C_SUCCESS if practice_mode else C_BTN
-            btn(screen, practice_label, pause_menu_buttons["practice_toggle"].centerx,
-                pause_menu_buttons["practice_toggle"].centery, 220, 48, practice_col, mpos)
-            btn(screen, "Settings", pause_menu_buttons["settings"].centerx,
-                pause_menu_buttons["settings"].centery, 220, 48,
-                (80, 100, 160), mpos)
-            btn(screen, "Main Menu", pause_menu_buttons["menu"].centerx,
-                pause_menu_buttons["menu"].centery, 220, 48, C_DANGER, mpos)
-            # Mute toggles — bottom row, centered below menu button
-            r_mute_music = icon_button(
-                screen, speaker_icon(22, music.is_muted()),
-                WIDTH // 2 - 30, HEIGHT // 2 + 220, 44, 44, C_BTN, mpos,
-                active=music.is_muted(),
-            )
-            r_mute_sfx = icon_button(
-                screen, speaker_icon(20, sfx.is_muted()),
-                WIDTH // 2 + 30, HEIGHT // 2 + 220, 44, 44, (80, 60, 140), mpos,
-                active=sfx.is_muted(),
-            )
-            txt(screen, "Music", r_mute_music.centerx, r_mute_music.bottom + 4,
-                11, C_GRAY, True)
-            txt(screen, "SFX", r_mute_sfx.centerx, r_mute_sfx.bottom + 4, 11,
-                C_GRAY, True)
-            txt(screen, "M: mute music  ·  N: mute SFX  ·  H: toggle hint path",
-                WIDTH // 2, HEIGHT // 2 + 280, 13, C_GRAY, True)
-        else:
-            # Prevent stale pause-overlay rects from catching clicks outside pause.
-            r_mute_music = pygame.Rect(0, 0, 0, 0)
-            r_mute_sfx = pygame.Rect(0, 0, 0, 0)
+        r_mute_music, r_mute_sfx = render_pause_overlay(
+            screen, paused, mpos, attempts, player, max_x, practice_mode,
+            pause_menu_buttons)
 
         # ---- Win overlay --------------------------------------------------
-        if player.won:
-            if not win_sfx_played:
-                sfx.play("win", 0.6)
-                win_sfx_played = True
-                if level_music:
-                    music.fadeout(1500)
-                _persist_win()
-            ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            ov.fill((0, 0, 0, 160))
-            screen.blit(ov, (0, 0))
-            txt(screen, "LEVEL COMPLETE!", WIDTH // 2, HEIGHT // 2 - 110, 54,
-                C_PLAYER, True)
-            # Stats panel: attempts, deaths, time, best time, coins.
-            cur_time_s_win = attempt_frames / 60.0
-            cur_time_str = (f"{int(cur_time_s_win // 60):d}:"
-                            f"{cur_time_s_win % 60:05.2f}")
-            best_t_frames = int((meta or {}).get("best_time_frames", 0)) if meta else 0
-            best_str = "—"
-            if best_t_frames > 0:
-                bts = best_t_frames / 60.0
-                best_str = f"{int(bts // 60):d}:{bts % 60:05.2f}"
-            row_y = HEIGHT // 2 - 50
-            txt(screen, f"Attempts: {attempts}", WIDTH // 2 - 130, row_y, 20,
-                C_WHITE, True)
-            txt(screen, f"Deaths: {deaths_this_session}", WIDTH // 2 + 130, row_y,
-                20, C_DANGER, True)
-            txt(screen, f"Time: {cur_time_str}", WIDTH // 2 - 130, row_y + 28, 20,
-                C_WHITE, True)
-            txt(screen, f"Best: {best_str}", WIDTH // 2 + 130, row_y + 28, 20,
-                C_SUCCESS, True)
-            if total_coins > 0:
-                coins = len(player.coins_collected)
-                colour = C_COIN if coins == total_coins else C_GRAY
-                txt(screen, f"Coins: {coins} / {total_coins}", WIDTH // 2,
-                    row_y + 60, 22, colour, True)
-            if meta_persisted:
-                txt(screen, "Verified!", WIDTH // 2, row_y + 90, 18,
-                    C_SUCCESS, True)
-            elif is_sim_run:
-                txt(screen, "(Bot run -- not verified)", WIDTH // 2,
-                    row_y + 90, 16, C_GRAY, True)
-            btn(screen, "Menu", rc_menu.centerx, rc_menu.centery, rc_menu.w,
-                rc_menu.h, C_BTN, mpos)
-            btn(screen, "Replay", rc_replay.centerx, rc_replay.centery,
-                rc_replay.w, rc_replay.h, C_SUCCESS, mpos)
+        win_sfx_played = render_win_overlay(
+            screen, player, mpos, win_sfx_played, level_music, meta,
+            attempts, deaths_this_session, attempt_frames, total_coins,
+            meta_persisted, is_sim_run, rc_menu, rc_replay, _persist_win)
 
         pygame.display.flip()
         # clock.tick sleeps to cap at fps_cap and returns the ms that

@@ -885,7 +885,11 @@ class Player:
         self.input_buffer = 0
 
     def activate_blue_orb(self):
+        """Blue orb: flip gravity and launch in the new gravity direction,
+        same strength as a yellow orb (matches the blue pad's kick instead
+        of leaving the player with zero vertical velocity)."""
         self.grav *= -1
+        self.vy = self.params.jump_force * self.grav
         self.on_ground = False
         self.input_buffer = 0
 
@@ -2624,6 +2628,7 @@ class Player:
                     m["vy"] = self.params.jump_force * 0.5 * m["grav"]
                 elif t == T_BLUE_ORB:
                     m["grav"] *= -1
+                    m["vy"] = self.params.jump_force * m["grav"]
                 elif t == T_GREEN_ORB:
                     m["vy"] = self.params.jump_force * m["grav"]
                 elif t == T_BLACK_ORB:

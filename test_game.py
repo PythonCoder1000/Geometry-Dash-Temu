@@ -1618,6 +1618,21 @@ check("Single click activates main player's orb",
 check("Same click also activates mirror's orb",
       _mirror_jumped)
 
+section("Blue orb behavior")
+# Blue orb must flip gravity AND give a launch impulse in the new gravity
+# direction (matching the blue pad and every other orb type) — it used to
+# only flip gravity with zero vy, leaving the player with no pop at all.
+_bp = Player(make_flat_level())
+_bp.vy = 0.0
+_grav_before = _bp.grav
+_bp.activate_blue_orb()
+check("Blue orb flips gravity", _bp.grav == -_grav_before)
+check("Blue orb imparts a launch impulse (nonzero vy)", _bp.vy != 0.0)
+check("Blue orb launch matches new gravity direction",
+      _bp.vy == _bp.params.jump_force * _bp.grav)
+check("Blue orb launch magnitude matches a yellow-orb jump",
+      abs(_bp.vy) == abs(_bp.params.jump_force))
+
 
 # ---------------------------------------------------------------------------
 # Editor test-mode music wiring
@@ -1631,6 +1646,8 @@ import inspect
 from src import play as _play_mod
 from src import editor as _editor_mod
 _play_src = inspect.getsource(_play_mod.run_play)
+from src import play_render as _play_render_mod
+_play_render_src = inspect.getsource(_play_render_mod)
 # The four music gates inside run_play used to read `level_music and not
 # editor_test`, which silenced editor-test runs even when the editor passed
 # a track. They should now gate on level_music alone.
@@ -1642,8 +1659,10 @@ check("run_play still starts level music",
       "music.play_file(level_music)" in _play_src)
 check("run_play still stops level music on death",
       "music.stop()" in _play_src)
+# The win-fade call lives in play_render.render_win_overlay now (moved
+# out of run_play as part of the play-loop render extraction).
 check("run_play still fades music on win",
-      "music.fadeout(" in _play_src)
+      "music.fadeout(" in _play_render_src)
 
 # The editor's Test button should pass level_music through. Bot/playback
 # calls below it should NOT pass level_music — they're intentionally silent.
@@ -1968,7 +1987,7 @@ check("editor edit panel exposes invisible_toggle for solids",
 check("editor click handler toggles invisible on selected blocks",
       '"invisible_toggle"' in _editor_src2)
 check("play.py skips draw_obj when o.get('invisible')",
-      'if o.get("invisible")' in inspect.getsource(_play_mod))
+      'if o.get("invisible")' in inspect.getsource(_play_render_mod))
 
 
 # ---------------------------------------------------------------------------
