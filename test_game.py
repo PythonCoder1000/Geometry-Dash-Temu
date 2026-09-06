@@ -1887,9 +1887,15 @@ check("editor passes out_hitboxes=last_run_hitboxes to run_play",
       _editor_src2.count("out_hitboxes=last_run_hitboxes") >= 4)
 check("editor clears last_run_hitboxes before each run",
       "last_run_hitboxes.clear()" in _editor_src2)
+# The overlay itself lives in editor_render.render_hitbox_overlay now (moved
+# out of _run_editor_impl as part of the editor render extraction); the
+# editor still owns the toggle state that gates it.
+from src import editor_render as _editor_render_mod
+_editor_render_src = inspect.getsource(_editor_render_mod)
 check("editor draws the hitbox overlay layer when toggle is on",
       "show_hitboxes and last_run_hitboxes" in _editor_src2
-      and "hb_layer" in _editor_src2)
+      and "hb_layer" in _editor_render_src
+      and "render_hitbox_overlay(" in _editor_src2)
 
 # Behavioural smoke: simulate a short run with out_hitboxes wired up.
 # We don't actually call run_play (it owns the event loop) — instead

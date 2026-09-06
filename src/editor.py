@@ -4,12 +4,12 @@ import pygame
 
 from .constants import (
     WIDTH, HEIGHT, CELL, FPS,
-    C_GRID, C_WHITE, C_GRAY, C_PLAYER, C_BTN, C_DANGER, C_DARK,
-    C_PUBLISH, C_SUCCESS,
-    PALETTE_CATEGORIES, TYPE_NAMES, TYPE_TIPS, ALL_TYPES, BG_PRESETS,
-    T_BLOCK, T_SLAB, T_SLOPE, T_START, T_TELEPORT_ORB, T_CAMERA_TRIGGER,
+    C_GRID, C_WHITE, C_GRAY, C_BTN, C_DANGER, C_DARK,
+    C_SUCCESS,
+    PALETTE_CATEGORIES, TYPE_NAMES, ALL_TYPES, BG_PRESETS,
+    T_BLOCK, T_START, T_TELEPORT_ORB, T_CAMERA_TRIGGER,
     T_BG_TRIGGER, T_DASH_ORB, T_SPIDER_ORB,
-    T_MOVE_TRIGGER, T_SAW, T_COLOR_TRIGGER, T_COIN, T_END, T_MODE_DUAL,
+    T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_COIN, T_MODE_DUAL,
     T_FOLLOW_TRIGGER,
     T_TIME_WARP, T_JUMP_PREDICTOR, MODE_PORTAL_TYPES,
     DEFAULT_MOVE_CURVE, MOVE_CURVE_SPEED_MAX,
@@ -17,10 +17,8 @@ from .constants import (
     SOLID_TYPES,
 )
 from .graphics import (
-    draw_bg, draw_obj, txt, btn, make_rect, make_stars, make_mountains,
+    draw_obj, txt, make_rect, make_stars, make_mountains,
     lighter, darker, normalize_rotation,
-    speaker_icon, icon_button, draw_end_wall,
-    spike_hitboxes, saw_hitbox, cell_rect, slab_rect, slope_polygon,
     obj_scale,
 )
 
@@ -139,13 +137,6 @@ from . import music
 from . import sfx
 from . import settings
 from .input_guard import ClickGuard
-
-
-# Reusable fullscreen SRCALPHA scratch for the hitbox overlay — allocated on
-# first use and retained across editor sessions so repeated toggles don't
-# allocate a new WIDTH*HEIGHT surface each frame. Stored as a single-slot
-# list to keep the lazy-init pattern readable.
-_hb_scratch = [None]
 
 
 def _export_level_png(objects, level_name, cell_px=10):
@@ -1497,6 +1488,15 @@ def _draw_palette(screen, mpos, active_cat, selected_type, tool, pulse,
     return hovered_item_type
 
 
+# Imported down here (not at the top) because `editor_tools` pulls the
+# object-manipulation helpers defined above out of this module. Same mid-file
+# import convention the rest of this file already uses. Bind the module rather
+# than its names so the import still resolves if `editor_tools` is what gets
+# imported first and this cycle runs the other way round.
+from . import editor_tools
+from . import editor_render
+
+
 def run_editor(screen, clock, preload_filename=None):
     """Editor entry point. Wraps the real implementation in a global
     try/except so a crash inside the editor doesn't kill the
@@ -1822,6 +1822,51 @@ def _run_editor_impl(screen, clock, preload_filename=None):
     def screen_to_cell(mx, my):
         effective_cell = int(CELL * zoom_level)
         return int((mx + cam_x) // effective_cell), int((my + cam_y) // effective_cell)
+
+    def apply_click_result(res):
+        """Adopt whichever editor locals a canvas-click handler changed.
+
+        Tool handlers in `editor_tools` can't rebind our locals, so they
+        return a ToolClickResult whose untouched fields are KEEP.
+        """
+        nonlocal selected_objs, last_edit_cell, last_brush_cell
+        nonlocal current_group_id, pending_link
+        nonlocal drag_mode, drag_start_screen, drag_rubber_shift
+        nonlocal drag_anchor_cell, drag_positions, drag_moved
+        nonlocal bot_exact_inputs, bot_mirror_waypoints
+        nonlocal snippet_stamp, snippet_stamp_name, msg, msg_timer
+        if res.selected_objs is not editor_tools.KEEP:
+            selected_objs = res.selected_objs
+        if res.last_edit_cell is not editor_tools.KEEP:
+            last_edit_cell = res.last_edit_cell
+        if res.last_brush_cell is not editor_tools.KEEP:
+            last_brush_cell = res.last_brush_cell
+        if res.current_group_id is not editor_tools.KEEP:
+            current_group_id = res.current_group_id
+        if res.pending_link is not editor_tools.KEEP:
+            pending_link = res.pending_link
+        if res.drag_mode is not editor_tools.KEEP:
+            drag_mode = res.drag_mode
+        if res.drag_start_screen is not editor_tools.KEEP:
+            drag_start_screen = res.drag_start_screen
+        if res.drag_rubber_shift is not editor_tools.KEEP:
+            drag_rubber_shift = res.drag_rubber_shift
+        if res.drag_anchor_cell is not editor_tools.KEEP:
+            drag_anchor_cell = res.drag_anchor_cell
+        if res.drag_positions is not editor_tools.KEEP:
+            drag_positions = res.drag_positions
+        if res.drag_moved is not editor_tools.KEEP:
+            drag_moved = res.drag_moved
+        if res.bot_exact_inputs is not editor_tools.KEEP:
+            bot_exact_inputs = res.bot_exact_inputs
+        if res.bot_mirror_waypoints is not editor_tools.KEEP:
+            bot_mirror_waypoints = res.bot_mirror_waypoints
+        if res.snippet_stamp is not editor_tools.KEEP:
+            snippet_stamp = res.snippet_stamp
+        if res.snippet_stamp_name is not editor_tools.KEEP:
+            snippet_stamp_name = res.snippet_stamp_name
+        if res.message is not editor_tools.KEEP:
+            msg, msg_timer = res.message
 
     # Click-through guard: ignore mouse state until the user releases the
     # entry click and presses again. Reset on every transition into / out of
@@ -2603,102 +2648,27 @@ def _run_editor_impl(screen, clock, preload_filename=None):
                     else:
                         gx, gy = screen_to_cell(mx, my)
                         if snippet_stamp is not None:
-                            # Drop a fresh-id clone of the stamp anchored at the
-                            # cursor cell. Stamp stays armed so the user can
-                            # place multiple copies; Esc cancels. Shift drops
-                            # then disarms — handy for "place once and continue".
-                            push_undo()
-                            new_objs = _clone_objects(
-                                snippet_stamp, (gx, gy), objects
-                            )
-                            objects.extend(new_objs)
-                            selected_objs = list(new_objs)
-                            last_edit_cell = None
-                            shift_drop = bool(
-                                pygame.key.get_mods() & pygame.KMOD_SHIFT
-                            )
-                            stamp_label = snippet_stamp_name
-                            if shift_drop:
-                                snippet_stamp = None
-                                snippet_stamp_name = ""
-                                msg = (
-                                    f"Stamped {stamp_label} ({len(new_objs)} obj)"
-                                )
-                            else:
-                                msg = (
-                                    f"Stamped {stamp_label} ({len(new_objs)} obj)"
-                                    " — click to repeat, Esc to cancel"
-                                )
-                            msg_timer = 120
-                        elif tool == TOOL_ERASE:
-                            push_undo()
-                            _erase_at(objects, gx, gy)
-                        elif tool == TOOL_GROUP:
-                            pending_link, m = _link_click(objects, gx, gy, pending_link)
-                            msg, msg_timer = m, 110
-                        elif tool == TOOL_EDIT:
-                            shift_held = bool(pygame.key.get_mods() & pygame.KMOD_SHIFT)
-                            stack = objects_at_cell(objects, gx, gy)
-                            top = stack[-1] if stack else None
-                            if shift_held and top:
-                                if top in selected_objs:
-                                    selected_objs.remove(top)
-                                else:
-                                    selected_objs.append(top)
-                                last_edit_cell = None
-                                msg, msg_timer = f"{len(selected_objs)} selected", 70
-                            elif shift_held:
-                                drag_mode = "rubber"
-                                drag_start_screen = (mx, my)
-                                drag_rubber_shift = True
-                            elif top and top in selected_objs and len(selected_objs) > 1:
-                                drag_mode = "move"
-                                drag_anchor_cell = (gx, gy)
-                                drag_positions = {id(o): (o["x"], o["y"]) for o in selected_objs}
-                                drag_moved = False
-                                last_edit_cell = None
-                            elif top:
-                                if (last_edit_cell == (gx, gy) and len(selected_objs) == 1
-                                        and selected_objs[0] in stack):
-                                    idx = (stack.index(selected_objs[0]) + 1) % len(stack)
-                                    selected_objs = [stack[idx]]
-                                else:
-                                    selected_objs = [top]
-                                last_edit_cell = (gx, gy)
-                                drag_mode = "move"
-                                drag_anchor_cell = (gx, gy)
-                                drag_positions = {id(o): (o["x"], o["y"]) for o in selected_objs}
-                                drag_moved = False
-                                if len(stack) > 1:
-                                    msg, msg_timer = f"Stack {stack.index(selected_objs[0])+1}/{len(stack)} — click again to cycle", 120
-                            else:
-                                selected_objs = []
-                                last_edit_cell = None
-                                drag_mode = "rubber"
-                                drag_start_screen = (mx, my)
-                                drag_rubber_shift = False
-                        elif tool == TOOL_BOT_PATH:
-                            world_x = (mx + cam_x) / zoom_level
-                            world_y = (my + cam_y) / zoom_level
-                            bot_waypoints.append((world_x, world_y))
-                            # Manual editing invalidates the autobot pairing.
-                            bot_exact_inputs = None
-                            bot_mirror_waypoints = []
-                            msg, msg_timer = f"Bot path: {len(bot_waypoints)} pts (K=run, R-click=undo)", 90
+                            # An armed snippet stamp pre-empts whatever tool
+                            # is selected.
+                            apply_click_result(editor_tools.stamp_click(
+                                objects=objects, gx=gx, gy=gy,
+                                snippet_stamp=snippet_stamp,
+                                snippet_stamp_name=snippet_stamp_name,
+                                push_undo=push_undo))
                         else:
-                            push_undo()
-                            gid = (current_group_id
-                                   if selected_type == T_TELEPORT_ORB else 0)
-                            _place_object(objects, gx, gy, selected_type,
-                                          current_rotation, gid)
-                            # Mark this cell as already stamped so the
-                            # held-mouse loop later in the same frame
-                            # doesn't re-stamp it (one click was
-                            # producing two objects since same-type
-                            # stacking was opened up).
-                            last_brush_cell = (gx, gy)
-                            if selected_type == T_TELEPORT_ORB:
-                                current_group_id = next_group_id(objects)
+                            apply_click_result(
+                                editor_tools.TOOL_HANDLERS[tool]["on_click"](
+                                    objects=objects, gx=gx, gy=gy, mx=mx, my=my,
+                                    cam_x=cam_x, cam_y=cam_y,
+                                    zoom_level=zoom_level,
+                                    selected_type=selected_type,
+                                    current_rotation=current_rotation,
+                                    current_group_id=current_group_id,
+                                    selected_objs=selected_objs,
+                                    last_edit_cell=last_edit_cell,
+                                    pending_link=pending_link,
+                                    bot_waypoints=bot_waypoints,
+                                    push_undo=push_undo))
                 elif ev.button == 3:
                     handled_curve = False
                     if (tool == TOOL_EDIT and len(selected_objs) == 1
@@ -2850,22 +2820,17 @@ def _run_editor_impl(screen, clock, preload_filename=None):
                 dirty = True; unsaved_changes = True
         if in_canvas and not over_panel and (mb[0] or mb[2]) and tool != TOOL_BOT_PATH:
             gx, gy = screen_to_cell(mx, my)
-            if mb[0] and tool == TOOL_BRUSH:
-                # Skip if we already stamped this cell on the current
-                # mouse-hold — drag-to-paint still flows across cells
-                # because the cell key changes each grid step, but
-                # holding still on one cell stops re-stamping after
-                # the first frame.
-                if (gx, gy) != last_brush_cell:
-                    gid = (current_group_id
-                           if selected_type == T_TELEPORT_ORB else 0)
-                    _place_object(objects, gx, gy, selected_type,
-                                  current_rotation, gid)
-                    last_brush_cell = (gx, gy)
+            hold = editor_tools.TOOL_HANDLERS[tool].get("on_hold") if mb[0] else None
+            if hold is not None:
+                hold_res = hold(objects=objects, gx=gx, gy=gy,
+                                selected_type=selected_type,
+                                current_rotation=current_rotation,
+                                current_group_id=current_group_id,
+                                last_brush_cell=last_brush_cell)
+                if hold_res.last_brush_cell is not editor_tools.KEEP:
+                    last_brush_cell = hold_res.last_brush_cell
+                if hold_res.changed:
                     dirty = True; unsaved_changes = True
-            elif mb[0] and tool == TOOL_ERASE:
-                _erase_at(objects, gx, gy)
-                dirty = True; unsaved_changes = True
             elif mb[2]:
                 _erase_at(objects, gx, gy)
                 dirty = True; unsaved_changes = True
@@ -3213,438 +3178,33 @@ def _run_editor_impl(screen, clock, preload_filename=None):
                         f"Bot path ready ({status}) — "
                         f"{len(bot_waypoints)} waypoints"
                     ), 200
-        draw_bg(screen, cam_x, stars, mountains)
-        if show_grid:
-            effective_cell = int(CELL * zoom_level)
-            grid_surf = _get_grid_surface(effective_cell)
-            # Offset-and-clip blit: the grid surface is slightly larger than
-            # the viewport so any sub-cell scroll offset still covers the
-            # visible region. set_clip confines output to the grid band.
-            ox = int(-cam_x % effective_cell) - effective_cell
-            oy = int(-cam_y % effective_cell) - effective_cell
-            prev_clip = screen.get_clip()
-            screen.set_clip(pygame.Rect(0, TOP_H, WIDTH, BAR_Y - TOP_H))
-            screen.blit(grid_surf, (ox, TOP_H + oy))
-            screen.set_clip(prev_clip)
         effective_cell = int(CELL * zoom_level)
-        left_gx = int(cam_x // effective_cell) - 1
-        right_gx = left_gx + WIDTH // effective_cell + 3
-        top_gy = int(cam_y // effective_cell) - 1
-        bot_gy = top_gy + HEIGHT // effective_cell + 3
-        # Hitbox-only view: skip sprite blits entirely so the canvas is a
-        # clean schematic of collision rects. Start/End still render so the
-        # author knows where the level begins/ends.
-        if not show_hitboxes:
-            for o in objects:
-                if left_gx <= o["x"] <= right_gx and top_gy <= o["y"] <= bot_gy:
-                    if o["t"] == T_END:
-                        # Win line is an infinite-height wall, not a 50x50 sprite.
-                        draw_end_wall(screen,
-                                      o["x"] * effective_cell - cam_x,
-                                      o["y"] * effective_cell - cam_y,
-                                      effective_cell, pulse)
-                        continue
-                    meta = o if o["t"] in (T_TELEPORT_ORB, T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER, T_SPIDER_ORB) else None
-                    sx_e = o["x"] * effective_cell - cam_x
-                    sy_e = o["y"] * effective_cell - cam_y
-                    draw_obj(screen, o["t"], sx_e, sy_e,
-                             effective_cell, pulse, o.get("r", 0), meta,
-                             scale=obj_scale(o))
-                    # Invisible flag: sprite still draws in the editor so
-                    # the author can select / reposition it, but we dim
-                    # it and outline it to signal "won't render in play".
-                    if o.get("invisible"):
-                        dim_rect = pygame.Rect(sx_e, sy_e,
-                                               effective_cell, effective_cell)
-                        dim = pygame.Surface(
-                            (effective_cell, effective_cell), pygame.SRCALPHA)
-                        dim.fill((0, 0, 0, 140))
-                        screen.blit(dim, dim_rect)
-                        pygame.draw.rect(screen, (200, 200, 255), dim_rect, 1)
-                    # Bot-only flag: phantom hazard. Visible in editor
-                    # for placement, marked with a purple X so the
-                    # author can tell at a glance that this object
-                    # only exists for the Y bot's lookahead.
-                    if o.get("_bot_only"):
-                        bx = int(sx_e)
-                        by = int(sy_e)
-                        cs = int(effective_cell)
-                        pygame.draw.line(screen, (180, 100, 230),
-                                         (bx + 6, by + 6),
-                                         (bx + cs - 6, by + cs - 6), 2)
-                        pygame.draw.line(screen, (180, 100, 230),
-                                         (bx + cs - 6, by + 6),
-                                         (bx + 6, by + cs - 6), 2)
-        else:
-            # Even in hitbox mode, keep a faint start-line / end-wall so the
-            # level bounds are legible.
-            for o in objects:
-                if (left_gx <= o["x"] <= right_gx and top_gy <= o["y"] <= bot_gy
-                        and o["t"] == T_END):
-                    draw_end_wall(screen,
-                                  o["x"] * effective_cell - cam_x,
-                                  o["y"] * effective_cell - cam_y,
-                                  effective_cell, pulse)
-        for o in objects:
-            if o["t"] != T_MOVE_TRIGGER:
-                continue
-            # Collect all target oids (multi or single)
-            oids = o.get("target_oids", [])
-            if not oids:
-                single = o.get("target_oid", 0)
-                if single:
-                    oids = [single]
-            if not oids:
-                continue
-            sxl = o["x"] * effective_cell - cam_x + effective_cell // 2
-            syl = o["y"] * effective_cell - cam_y + effective_cell // 2
-            for t_oid in oids:
-                target = next((x for x in objects if x.get("oid") == t_oid), None)
-                if not target:
-                    continue
-                txl = target["x"] * effective_cell - cam_x + effective_cell // 2
-                tyl = target["y"] * effective_cell - cam_y + effective_cell // 2
-                pygame.draw.line(screen, (200, 150, 255), (sxl, syl), (txl, tyl), 1)
-            # Draw destination marker using first target as reference
-            first_target = next((x for x in objects if x.get("oid") == oids[0]), None)
-            if first_target:
-                exl = o.get("tx", first_target["x"]) * effective_cell - cam_x + effective_cell // 2
-                eyl = o.get("ty", first_target["y"]) * effective_cell - cam_y + effective_cell // 2
-                txl = first_target["x"] * effective_cell - cam_x + effective_cell // 2
-                tyl = first_target["y"] * effective_cell - cam_y + effective_cell // 2
-                pygame.draw.line(screen, (255, 200, 100), (txl, tyl), (exl, eyl), 1)
-                pygame.draw.circle(screen, (255, 200, 100), (exl, eyl), 6, 1)
-        # Jump-predictor overlay: if a probe is placed, run a headless
-        # sim from its cell and overlay the resulting arc. Runs each
-        # frame (well under 1ms even on a 300-object level) so the arc
-        # updates live as the user nudges / edits nearby geometry.
-        from .jump_predictor import (
-            find_probe as _find_probe, predict as _predict,
-            draw_overlay as _draw_pred_overlay,
-        )
-        _probe = _find_probe(objects)
-        if _probe is not None:
-            _pred_result = _predict(objects, _probe)
-            _draw_pred_overlay(
-                screen, _pred_result, cam_x, cam_y, zoom_level,
-                clip_rect=pygame.Rect(0, TOP_H, WIDTH, BAR_Y - TOP_H),
-                show_hitbox=bool(_probe.get("show_hitbox")),
-            )
-            # Floating one-liner anchored above the probe cell so the
-            # status stays readable even when the arc flies off-screen.
-            if _pred_result is not None:
-                _eff = int(CELL * zoom_level)
-                _sx = int(_probe["x"] * _eff - cam_x + _eff / 2)
-                _sy = int(_probe["y"] * _eff - cam_y - 6)
-                if _pred_result["hit"]:
-                    _label = (f"{_pred_result['mode']} · "
-                              f"f{_pred_result['hit'][3]} HIT: "
-                              f"{_pred_result['hit'][2]}")
-                    _col = (255, 120, 120)
-                elif _pred_result["landing"]:
-                    _label = (f"{_pred_result['mode']} · "
-                              f"f{_pred_result['landing'][2]} LAND")
-                    _col = (140, 255, 170)
-                else:
-                    _label = f"{_pred_result['mode']} · open"
-                    _col = (255, 210, 120)
-                if TOP_H < _sy < BAR_Y:
-                    txt(screen, _label, _sx, _sy, 12, _col, True, shadow=True)
-        else:
-            _pred_result = None
-        # Hitbox playback overlay: draw the player's recorded rects from
-        # the most recent run on top of the level. Frames are layered with
-        # alpha so dense passes (a long ship hover) read as a single thick
-        # band while quick traversals stay legible. Drawn here so palette /
-        # bot path / selection rings render on top.
+        editor_render.render_canvas(screen, objects, cam_x, cam_y, zoom_level,
+                                    pulse, stars, mountains, show_grid,
+                                    show_hitboxes)
+        editor_render.render_jump_predictor(screen, objects, cam_x, cam_y,
+                                            zoom_level)
         if show_hitboxes:
-            from .constants import (PLAYER_SIZE as _HB_PSZ, T_SPIKE,
-                                    T_HALF_SPIKE, T_SAW, T_SLOPE,
-                                    SOLID_HITBOX_FRACTION)
-            import math as _hb_math
-            if _hb_scratch[0] is None:
-                _hb_scratch[0] = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            hb_layer = _hb_scratch[0]
-            hb_layer.fill((0, 0, 0, 0))
-            world_left = cam_x / zoom_level - 60
-            world_right = (cam_x + WIDTH) / zoom_level + 60
-            world_top = cam_y / zoom_level - 60
-            world_bot = (cam_y + HEIGHT) / zoom_level + 60
-
-            def _draw_obb(layer, hx, hy, hsz, hangle, outer_col, inner_col):
-                # OUTER rect rotates with the cube — kills on hazards
-                # (spike / saw). Drawn as a rotated polygon outline.
-                # INNER rect is axis-aligned regardless of ``hangle`` —
-                # kills on solid blocks / slabs. Drawn as a plain AABB
-                # outline so the overlay shows exactly the kill rule
-                # split: the rotated polygon is the "spike kills you"
-                # volume, the upright square is the "wall kills you"
-                # volume.
-                cx = hx + hsz / 2.0
-                cy = hy + hsz / 2.0
-                rad = -_hb_math.radians(hangle)
-                cs = _hb_math.cos(rad)
-                sn = _hb_math.sin(rad)
-                half = hsz / 2.0
-
-                outer_pts = []
-                for ox, oy in ((-half, -half), (half, -half),
-                               (half, half), (-half, half)):
-                    wx = cx + ox * cs - oy * sn
-                    wy = cy + ox * sn + oy * cs
-                    outer_pts.append((int(wx * zoom_level - cam_x),
-                                      int(wy * zoom_level - cam_y)))
-                pygame.draw.polygon(layer, outer_col, outer_pts, 1)
-
-                inner_half = half * SOLID_HITBOX_FRACTION
-                ix = int((cx - inner_half) * zoom_level - cam_x)
-                iy = int((cy - inner_half) * zoom_level - cam_y)
-                iw = max(1, int(inner_half * 2 * zoom_level))
-                ih = max(1, int(inner_half * 2 * zoom_level))
-                pygame.draw.rect(layer, inner_col, (ix, iy, iw, ih), 1)
-
-            # Trace samples are 4-tuples (x, y, size, angle) at one per
-            # logical frame. Legacy 3-tuples (saved from older runs)
-            # default to angle 0 so we don't blow up reading them.
-            # Outer = green rotated (hazard-kill volume); inner = blue
-            # axis-aligned (block-kill volume). Alpha tuned low so a
-            # dense run doesn't bleed into a solid block — each sample
-            # reads as a discrete frame even when many overlap.
-            for sample in last_run_hitboxes:
-                hx, hy, hsz = sample[0], sample[1], sample[2]
-                hangle = sample[3] if len(sample) > 3 else 0.0
-                if (hx + hsz < world_left or hx > world_right
-                        or hy + hsz < world_top or hy > world_bot):
-                    continue
-                _draw_obb(hb_layer, hx, hy, hsz, hangle,
-                          (120, 255, 140, 70),   # outer green (hazard)
-                          (90, 160, 255, 90))    # inner blue (blocks)
-            # Mirror trace from the same attempt. Outer = cyan rotated,
-            # inner = blue axis-aligned (same rule split, just lighter
-            # so it visually separates from the main body's green).
-            for sample in last_run_mirror_hitboxes:
-                hx, hy, hsz = sample[0], sample[1], sample[2]
-                hangle = sample[3] if len(sample) > 3 else 0.0
-                if (hx + hsz < world_left or hx > world_right
-                        or hy + hsz < world_top or hy > world_bot):
-                    continue
-                _draw_obb(hb_layer, hx, hy, hsz, hangle,
-                          (120, 220, 255, 70),   # outer cyan (hazard)
-                          (90, 160, 255, 90))    # inner blue (blocks)
-            # Hazard + solid hitboxes so the author can see EXACTLY where
-            # kill zones and landable surfaces live — distinct from the
-            # rendered sprite art which has decorative margins.
-            eff_left_gx = int(cam_x / zoom_level) // CELL - 1
-            eff_right_gx = int((cam_x + WIDTH) / zoom_level) // CELL + 2
-            eff_top_gy = int(cam_y / zoom_level) // CELL - 1
-            eff_bot_gy = int((cam_y + HEIGHT) / zoom_level) // CELL + 2
-            for o in objects:
-                t = o["t"]
-                if t not in (T_SPIKE, T_HALF_SPIKE, T_SAW,
-                             T_BLOCK, T_SLAB, T_SLOPE):
-                    continue
-                gx = o["x"]
-                gy = o["y"]
-                if not (eff_left_gx <= gx <= eff_right_gx
-                        and eff_top_gy <= gy <= eff_bot_gy):
-                    continue
-                sc = obj_scale(o)
-                # Slopes are diagonal — drawn as a filled triangle
-                # rather than a rect. Skip the rect path entirely so
-                # the half of the cell that is empty doesn't read as
-                # solid in the overlay.
-                if t == T_SLOPE:
-                    pts = slope_polygon(gx, gy, o.get("r", 0), sc)
-                    spts = [(int(px * zoom_level - cam_x),
-                             int(py * zoom_level - cam_y))
-                            for px, py in pts]
-                    pygame.draw.polygon(
-                        hb_layer, (120, 180, 255, 50), spts)
-                    pygame.draw.polygon(
-                        hb_layer, (100, 160, 240, 220), spts, 1)
-                    continue
-                if t == T_SAW:
-                    rects = [saw_hitbox(gx, gy, sc)]
-                    fill = (255, 80, 80, 60)
-                    outline = (255, 60, 60, 220)
-                elif t in (T_SPIKE, T_HALF_SPIKE):
-                    rects = spike_hitboxes(gx, gy, o.get("r", 0),
-                                           half=(t == T_HALF_SPIKE),
-                                           scale=sc)
-                    fill = (255, 80, 80, 60)
-                    outline = (255, 60, 60, 220)
-                elif t == T_BLOCK:
-                    rects = [cell_rect(gx, gy, sc)]
-                    fill = (120, 180, 255, 50)
-                    outline = (100, 160, 240, 220)
-                else:  # T_SLAB
-                    rects = [slab_rect(gx, gy, o.get("r", 0), sc)]
-                    fill = (120, 180, 255, 50)
-                    outline = (100, 160, 240, 220)
-                for rr in rects:
-                    sx = int(rr.x * zoom_level - cam_x)
-                    sy = int(rr.y * zoom_level - cam_y)
-                    sw = max(1, int(rr.w * zoom_level))
-                    sh = max(1, int(rr.h * zoom_level))
-                    pygame.draw.rect(hb_layer, fill, (sx, sy, sw, sh))
-                    pygame.draw.rect(hb_layer, outline,
-                                     (sx, sy, sw, sh), 1)
-            screen.blit(hb_layer, (0, 0))
-        # Draw bot path waypoints
-        if bot_waypoints:
-            path_pts = []
-            for wx, wy in bot_waypoints:
-                sx = int(wx * zoom_level - cam_x)
-                sy = int(wy * zoom_level - cam_y)
-                path_pts.append((sx, sy))
-            if len(path_pts) >= 2:
-                pygame.draw.lines(screen, (255, 180, 60), False, path_pts, 2)
-            for i, pt in enumerate(path_pts):
-                is_end = (i == 0 or i == len(path_pts) - 1)
-                col = (255, 220, 100) if is_end else (255, 180, 60)
-                pygame.draw.circle(screen, col, pt, 5)
-                pygame.draw.circle(screen, (0, 0, 0), pt, 5, 1)
-        # Mirror path: drawn in blue to distinguish the dual body's route
-        # from the main yellow path. Only present when the autobot solved
-        # a level that enters dual mode.
-        if bot_mirror_waypoints:
-            mpath_pts = []
-            for wx, wy in bot_mirror_waypoints:
-                sx = int(wx * zoom_level - cam_x)
-                sy = int(wy * zoom_level - cam_y)
-                mpath_pts.append((sx, sy))
-            if len(mpath_pts) >= 2:
-                pygame.draw.lines(screen, (90, 170, 255), False, mpath_pts, 2)
-            for pt in mpath_pts:
-                pygame.draw.circle(screen, (90, 170, 255), pt, 4)
-                pygame.draw.circle(screen, (0, 0, 0), pt, 4, 1)
+            editor_render.render_hitbox_overlay(
+                screen, objects, cam_x, cam_y, zoom_level,
+                last_run_hitboxes, last_run_mirror_hitboxes)
+        editor_render.render_bot_paths(screen, bot_waypoints,
+                                       bot_mirror_waypoints,
+                                       cam_x, cam_y, zoom_level)
         if pending_link:
-            kind = pending_link.get("kind")
-            if kind == "teleport":
-                src = pending_link["first"]
-                col = (255, 220, 90)
-            elif kind == "move":
-                src = pending_link.get("target") or pending_link["trigger"]
-                col = (255, 180, 100)
-            else:
-                src = None
-                col = (255, 220, 90)
-            if src:
-                sxl = src["x"] * effective_cell - cam_x + effective_cell // 2
-                syl = src["y"] * effective_cell - cam_y + effective_cell // 2
-                pygame.draw.circle(screen, col, (sxl, syl), 26, 2)
-                if in_canvas:
-                    pygame.draw.line(screen, col, (sxl, syl), mpos, 1)
-            if kind == "move" and pending_link.get("target"):
-                tr = pending_link["trigger"]
-                trx = tr["x"] * effective_cell - cam_x + effective_cell // 2
-                trry = tr["y"] * effective_cell - cam_y + effective_cell // 2
-                pygame.draw.circle(screen, (200, 150, 255), (trx, trry), 26, 2)
-        for sobj in selected_objs:
-            sx_sel, sy_sel = obj_scale(sobj)
-            cell_w = max(1, int(effective_cell * sx_sel))
-            cell_h = max(1, int(effective_cell * sy_sel))
-            cx = sobj["x"] * effective_cell - cam_x + effective_cell // 2
-            cy = sobj["y"] * effective_cell - cam_y + effective_cell // 2
-            sxb = cx - cell_w // 2
-            syb = cy - cell_h // 2
-            pygame.draw.rect(screen, (120, 255, 140),
-                             (sxb, syb, cell_w, cell_h), 2)
-        if single_selected is not None:
-            sx_sel, sy_sel = obj_scale(single_selected)
-            cell_w = max(1, int(effective_cell * sx_sel))
-            cell_h = max(1, int(effective_cell * sy_sel))
-            cx = single_selected["x"] * effective_cell - cam_x + effective_cell // 2
-            cy = single_selected["y"] * effective_cell - cam_y + effective_cell // 2
-            sxb = cx - cell_w // 2
-            syb = cy - cell_h // 2
-            ring = pygame.Surface((cell_w + 12, cell_h + 12), pygame.SRCALPHA)
-            pygame.draw.rect(ring, (120, 255, 140, 110), ring.get_rect(), 3, border_radius=6)
-            screen.blit(ring, (sxb - 6, syb - 6))
-            if single_selected["t"] == T_CAMERA_TRIGGER:
-                target_y = single_selected.get("cy", single_selected["y"]) * effective_cell - cam_y + effective_cell // 2
-                pygame.draw.line(screen, (255, 225, 80),
-                                 (sxb + effective_cell // 2, syb + effective_cell // 2),
-                                 (sxb + effective_cell // 2, target_y), 2)
-                pygame.draw.line(screen, (255, 225, 80),
-                                 (0, target_y), (WIDTH, target_y), 1)
-            if single_selected["t"] == T_MODE_DUAL:
-                # Cyan ghost cube on the chosen spawn row so the user can
-                # see exactly where the mirror will appear.
-                spawn_row = single_selected.get("spawn_y", single_selected["y"])
-                spawn_y_top = spawn_row * effective_cell - cam_y
-                ghost = pygame.Rect(sxb, spawn_y_top, effective_cell, effective_cell)
-                ghost_layer = pygame.Surface((effective_cell, effective_cell),
-                                             pygame.SRCALPHA)
-                ghost_layer.fill((120, 220, 255, 90))
-                screen.blit(ghost_layer, ghost.topleft)
-                pygame.draw.rect(screen, (140, 230, 255), ghost, 2)
-                pygame.draw.line(screen, (140, 230, 255),
-                                 (sxb + effective_cell // 2,
-                                  syb + effective_cell // 2),
-                                 (sxb + effective_cell // 2,
-                                  spawn_y_top + effective_cell // 2), 2)
+            editor_render.render_pending_link(screen, pending_link,
+                                              effective_cell, cam_x, cam_y,
+                                              mpos, in_canvas)
+        editor_render.render_selection(screen, selected_objs, single_selected,
+                                       effective_cell, cam_x, cam_y)
         if drag_mode == "rubber" and mb[0]:
-            x0, y0 = drag_start_screen
-            x1, y1 = mpos
-            rr = pygame.Rect(min(x0, x1), min(y0, y1),
-                             abs(x1 - x0), abs(y1 - y0))
-            if rr.width > 0 and rr.height > 0:
-                fill = pygame.Surface((rr.w, rr.h), pygame.SRCALPHA)
-                fill.fill((120, 255, 140, 40))
-                screen.blit(fill, rr.topleft)
-                pygame.draw.rect(screen, (120, 255, 140), rr, 1)
+            editor_render.render_rubber_band(screen, drag_start_screen, mpos)
         if in_canvas and not over_panel:
             gx, gy = screen_to_cell(mx, my)
-            sx = gx * effective_cell - cam_x
-            sy = gy * effective_cell - cam_y
-            if snippet_stamp is not None:
-                # Translucent ghost of every stamp object, anchored to the
-                # cursor cell. Shows exactly where each piece will land.
-                stamp_xs = [o["x"] for o in snippet_stamp]
-                stamp_ys = [o["y"] for o in snippet_stamp]
-                min_sx = min(stamp_xs) if stamp_xs else 0
-                min_sy = min(stamp_ys) if stamp_ys else 0
-                max_sx = max(stamp_xs) if stamp_xs else 0
-                max_sy = max(stamp_ys) if stamp_ys else 0
-                for so in snippet_stamp:
-                    ox = so["x"] - min_sx
-                    oy = so["y"] - min_sy
-                    cx = (gx + ox) * effective_cell - cam_x
-                    cy = (gy + oy) * effective_cell - cam_y
-                    gs = pygame.Surface(
-                        (effective_cell, effective_cell), pygame.SRCALPHA
-                    )
-                    gs.set_alpha(140)
-                    draw_obj(gs, so["t"], 0, 0, effective_cell, pulse,
-                             so.get("r", 0),
-                             scale=obj_scale(so))
-                    screen.blit(gs, (cx, cy))
-                # Outline the bounding box so the user sees the footprint.
-                bw = (max_sx - min_sx + 1) * effective_cell
-                bh = (max_sy - min_sy + 1) * effective_cell
-                pygame.draw.rect(screen, (160, 220, 255),
-                                 (sx, sy, bw, bh), 1)
-            elif tool == TOOL_ERASE:
-                pygame.draw.rect(screen, (255, 80, 80), (sx, sy, effective_cell, effective_cell), 2)
-                pygame.draw.line(screen, (255, 80, 80), (sx + 8, sy + 8), (sx + effective_cell - 8, sy + effective_cell - 8), 2)
-                pygame.draw.line(screen, (255, 80, 80), (sx + effective_cell - 8, sy + 8), (sx + 8, sy + effective_cell - 8), 2)
-            elif tool == TOOL_GROUP:
-                pygame.draw.rect(screen, (200, 160, 255), (sx, sy, effective_cell, effective_cell), 2)
-            elif tool == TOOL_EDIT:
-                pygame.draw.rect(screen, (120, 255, 140), (sx, sy, effective_cell, effective_cell), 1)
-            elif tool == TOOL_BOT_PATH:
-                pygame.draw.circle(screen, (255, 180, 60), (mx, my), 6, 2)
-                if bot_waypoints:
-                    last_sx = int(bot_waypoints[-1][0] * zoom_level - cam_x)
-                    last_sy = int(bot_waypoints[-1][1] * zoom_level - cam_y)
-                    pygame.draw.line(screen, (255, 180, 60), (last_sx, last_sy), (mx, my), 1)
-            else:
-                gs = pygame.Surface((effective_cell, effective_cell), pygame.SRCALPHA)
-                gs.set_alpha(130)
-                draw_obj(gs, selected_type, 0, 0, effective_cell, pulse, current_rotation)
-                screen.blit(gs, (sx, sy))
-                pygame.draw.rect(screen, C_WHITE, (sx, sy, effective_cell, effective_cell), 1)
+            editor_render.render_tool_cursor(
+                screen, tool, gx, gy, effective_cell, mx, my,
+                cam_x, cam_y, zoom_level, pulse, selected_type,
+                current_rotation, bot_waypoints, snippet_stamp)
         if panel_visible:
             if single_selected is not None:
                 stack_idx = (panel_stack.index(single_selected)
@@ -3654,116 +3214,20 @@ def _run_editor_impl(screen, clock, preload_filename=None):
             else:
                 _draw_edit_panel(screen, list(selected_objs), mpos, pulse)
         hovered_item = _draw_palette(screen, mpos, active_cat, selected_type,
-                                     tool, pulse, tab_rects, item_rects, tool_rects)
-        if tool == TOOL_BRUSH:
-            sel_name = TYPE_NAMES.get(selected_type, "")
-        else:
-            sel_name = {TOOL_ERASE: "Eraser", TOOL_GROUP: "Group Tool",
-                        TOOL_EDIT: "Edit Tool", TOOL_BOT_PATH: "Bot Path"}[tool]
-        # Dark pill backdrop so these status labels remain readable no
-        # matter what the level background looks like (UI_AUDIT §11).
-        _pill_bg = pygame.Surface((170, 22), pygame.SRCALPHA)
-        _pill_bg.fill((0, 0, 0, 160))
-        screen.blit(_pill_bg, (4, TOP_H))
-        txt(screen, sel_name, 10, TOP_H + 2, 13, C_WHITE)
-        _rot_pill = pygame.Surface((80, 22), pygame.SRCALPHA)
-        _rot_pill.fill((0, 0, 0, 160))
-        screen.blit(_rot_pill, (176, TOP_H))
-        txt(screen, f"Rot {current_rotation}°", 180, TOP_H + 2, 13, C_GRAY)
-        if selected_type == T_TELEPORT_ORB and tool == TOOL_BRUSH:
-            _grp_pill = pygame.Surface((160, 22), pygame.SRCALPHA)
-            _grp_pill.fill((0, 0, 0, 160))
-            screen.blit(_grp_pill, (296, TOP_H))
-            txt(screen, f"Next group: {current_group_id}",
-                300, TOP_H + 2, 13, C_GRAY)
-        pygame.draw.rect(screen, (20, 18, 40), (0, BAR_Y, WIDTH, HEIGHT - BAR_Y))
-        pygame.draw.line(screen, C_GRID, (0, BAR_Y), (WIDTH, BAR_Y), 1)
-        btn(screen, "Save [S]", 70, BAR_Y + 27, 84, 38, C_BTN, mpos)
-        btn(screen, "Publish", 158, BAR_Y + 27, 84, 38, C_PUBLISH, mpos)
-        btn(screen, "Load [^L]", 246, BAR_Y + 27, 84, 38, C_BTN, mpos)
-        btn(screen, "Test [T]", 334, BAR_Y + 27, 84, 38, (40, 120, 80), mpos)
-        bot_label = (f"Bot [L] ({len(bot_waypoints)})"
-                     if bot_waypoints else "Bot [L]")
-        btn(screen, bot_label, 422, BAR_Y + 27, 84, 38, (180, 120, 30), mpos)
-        btn(screen, "Clear", 510, BAR_Y + 27, 70, 38, C_DANGER, mpos)
-        music_label = "Music" if level_music is None else "Music*"
-        btn(screen, music_label, 590, BAR_Y + 27, 84, 38, (80, 60, 140), mpos)
-        btn(screen, "Menu", 678, BAR_Y + 27, 84, 38, C_DANGER, mpos)
-        # Mute toggles (icon-only)
-        r_mute_music = icon_button(
-            screen, speaker_icon(18, music.is_muted()),
-            r_mute_music.centerx, r_mute_music.centery, 36, 36, C_BTN, mpos,
-            active=music.is_muted(),
-        )
-        r_mute_sfx = icon_button(
-            screen, speaker_icon(16, sfx.is_muted()),
-            r_mute_sfx.centerx, r_mute_sfx.centery, 36, 36, (80, 60, 140), mpos,
-            active=sfx.is_muted(),
-        )
+                                     tool, pulse, tab_rects, item_rects,
+                                     tool_rects)
+        editor_render.render_status_pills(screen, tool, selected_type,
+                                          current_rotation, current_group_id)
+        r_mute_music, r_mute_sfx = editor_render.render_toolbar(
+            screen, mpos, bot_waypoints, level_music,
+            r_mute_music, r_mute_sfx)
         gx_disp, gy_disp = screen_to_cell(mx, my)
-        txt(screen, f"Obj: {len(objects)} | Undo: {len(undo_stack)}", WIDTH - 230, BAR_Y + 6, 13, C_GRAY)
-        txt(screen, f"Cell: ({gx_disp}, {gy_disp})  Zoom: {zoom_level:.1f}x", WIDTH - 230, BAR_Y + 22, 13, C_GRAY)
-        status_chunks = [f"Level: {level_name}"]
-        if dirty:
-            status_chunks.append("● unsaved")
-        if snippet_stamp is not None:
-            status_chunks.append(f"⛶ {snippet_stamp_name}")
-        if show_hitboxes:
-            status_chunks.append(
-                f"⌗ Hitboxes ({len(last_run_hitboxes)})"
-                if last_run_hitboxes else "⌗ Hitboxes (no run yet)"
-            )
-        if level_meta:
-            if level_meta.get("verified"):
-                status_chunks.append("✓ Verified")
-            elif level_meta.get("published"):
-                status_chunks.append("◦ Published (unverified)")
-        txt(screen, " · ".join(status_chunks), WIDTH - 230, BAR_Y + 38, 12, C_GRAY)
-        # Autosave HUD indicator: a freshly-flashed "Auto-saved Xs ago" toast
-        # appears next to the title row whenever the snapshot was just written,
-        # then fades to a steady "Last autosave Xs ago" reading.
-        if last_autosave_secs is not None:
-            try:
-                import time as _time
-                ago = max(0, int(_time.time() - last_autosave_secs))
-            except Exception:
-                ago = 0
-            if ago < 60:
-                ago_str = f"{ago}s ago"
-            elif ago < 3600:
-                ago_str = f"{ago // 60}m ago"
-            else:
-                ago_str = f"{ago // 3600}h ago"
-            if autosave_toast_frames > 0:
-                col = (140, 230, 140)
-                label = f"Auto-saved {ago_str}"
-            else:
-                col = (130, 130, 150)
-                label = f"Last autosave {ago_str}"
-            txt(screen, label, WIDTH - 230, BAR_Y + 54, 11, col)
-        # One short hint line above the button row — the full list
-        # lives behind "?" / F1 / "/". Two-line variants intersected the
-        # button row and read as overlapping UI (UI_AUDIT §11).
-        txt(screen,
-            "Press ? for shortcuts  ·  Tab: categories  ·  1–9: pick",
-            WIDTH // 2, BAR_Y - 14, 11, C_GRAY, True)
-        if msg_timer > 0:
-            txt(screen, msg, WIDTH // 2, BAR_Y - 18, 18, C_PLAYER, True)
-        # ---- Palette hover tooltip ---------------------------------------
-        if hovered_item is not None:
-            name = TYPE_NAMES.get(hovered_item, "")
-            tip = TYPE_TIPS.get(hovered_item, "")
-            if name or tip:
-                tip_w = 260
-                tip_x = min(WIDTH - tip_w - 8, max(8, mx - tip_w // 2))
-                tip_y = TOP_H + 6
-                tip_h = 40 if tip else 22
-                rr = pygame.Rect(tip_x, tip_y, tip_w, tip_h)
-                pygame.draw.rect(screen, (10, 8, 24), rr, border_radius=6)
-                pygame.draw.rect(screen, (90, 110, 190), rr, 1, border_radius=6)
-                txt(screen, name, rr.x + 8, rr.y + 4, 14, C_WHITE)
-                if tip:
-                    txt(screen, tip, rr.x + 8, rr.y + 22, 11, C_GRAY)
+        editor_render.render_hud(
+            screen, objects, undo_stack, gx_disp, gy_disp, zoom_level,
+            level_name, level_meta, dirty, snippet_stamp, snippet_stamp_name,
+            show_hitboxes, last_run_hitboxes, last_autosave_secs,
+            autosave_toast_frames, msg, msg_timer)
+        editor_render.render_palette_tooltip(screen, hovered_item, mx)
         # Keyboard cheat sheet — toggled with `?` / F1 / `/`.
         if show_shortcuts:
             _draw_editor_cheat_sheet(screen)
