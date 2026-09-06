@@ -265,3 +265,6 @@ levels/_autosave_backups/
 # to the Lightsail backend pull published/verified levels from there.
 levels/*.json
 !levels/.gitkeep
+
+# Level PNG exports (Ctrl+E in the editor) — generated output.
+exports/

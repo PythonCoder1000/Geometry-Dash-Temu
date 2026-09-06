@@ -22,9 +22,8 @@ from src.constants import WIDTH, HEIGHT, ASSETS_DIR
 from src.editor import run_editor
 from src.levels import ensure_dirs, load_level_full
 from src import music, sfx, settings, gamepad
-from src.menus import (run_menu, run_select, run_settings, run_customize,
+from src.menus import (run_menu, run_select, run_settings,
                        run_editor_picker, run_rate_menu)
-from src.music_menu import run_music_menu
 from src.play import run_play
 
 

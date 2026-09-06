@@ -27,15 +27,15 @@ from ..constants import (
     MODE_SWING, MODE_ROBOT, MODE_FROM_TYPE, SPEED_VALUES, PLAYER_COLORS,
     PLAYER_ICONS,
     T_BLOCK, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW,
-    T_ORB, T_DASH_ORB, T_DASH_ORB_GRAV, T_TELEPORT_ORB, T_BLACK_ORB,
+    T_ORB, T_DASH_ORB_GRAV, T_TELEPORT_ORB, T_BLACK_ORB,
     T_BLUE_ORB, T_GREEN_ORB, T_SPIDER_ORB, T_RED_ORB, T_PINK_ORB,
-    T_PAD, T_PINK_PAD, T_RED_PAD, T_BLUE_PAD, T_SPIDER_PAD,
+    T_PINK_PAD, T_RED_PAD, T_BLUE_PAD, T_SPIDER_PAD,
     T_GRAV_UP, T_GRAV_DOWN, T_END, T_START, T_COIN,
     T_MODE_MINI, T_MODE_BIG, T_MODE_DUAL, T_MODE_SOLO,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
     PAD_TYPES, ORB_TYPES, DASH_ORB_TYPES,
-    COLLISION_SUBSTEP_PX, SOLID_HITBOX_FRACTION,
+    COLLISION_SUBSTEP_PX,
     ORB_PINK_SCALE, ORB_RED_SCALE, PAD_PINK_SCALE, PAD_RED_SCALE,
     BLUE_ORB_PUSH_SCALE, BLUE_PAD_PUSH_SCALE,
 )
@@ -44,7 +44,7 @@ from ..levels import get_group_id
 from ..physics import DEFAULT_PARAMS
 from .. import settings
 from .body import MirrorBody
-from .collision import CollisionMixin, obb_corners, obb_aabb_overlap
+from .collision import CollisionMixin, obb_corners
 from .triggers import TriggerMixin
 from .draw import DrawMixin
 
@@ -736,7 +736,6 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         ``passed``."""
         main = b is self
         body_passed = self.passed if main else self.mirror_passed
-        p = self.params
         tr_left, tr_top = trigger_rect.left, trigger_rect.top
         tr_right, tr_bottom = trigger_rect.right, trigger_rect.bottom
         hz = (hazard_rect.left, hazard_rect.top,

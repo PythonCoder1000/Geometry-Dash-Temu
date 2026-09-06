@@ -1652,21 +1652,18 @@ check("run_play still stops level music on death",
 check("run_play still fades music on win",
       "music.fadeout(" in _play_render_src)
 
-# The editor's Test button should pass level_music through. Bot/playback
-# calls below it should NOT pass level_music — they're intentionally silent.
-_editor_src = inspect.getsource(_editor_mod._run_editor_impl)
-# The Test-button block looks like: `if do_test:\n   run_play(...editor_test=True, level_music=level_music)`
-# We do a lenient substring check for the keyword arg in the do_test block.
-_test_block_start = _editor_src.find("if do_test:")
-_test_block_end = _editor_src.find("if do_bot:", _test_block_start)
-check("editor.py has a do_test block",
-      _test_block_start >= 0 and _test_block_end > _test_block_start)
-if _test_block_start >= 0 and _test_block_end > _test_block_start:
-    _test_block = _editor_src[_test_block_start:_test_block_end]
-    check("editor's Test button passes level_music to run_play",
-          "level_music=level_music" in _test_block)
-    check("editor's Test button still flags editor_test=True",
-          "editor_test=True" in _test_block)
+# The editor's Test button should pass level_music through: every run
+# (Test, Bot, Playback, Replay) goes through EditorSession._run which
+# forwards st.level_music, so one check covers all of them.
+from src.editor import session as _editor_session_mod
+_editor_src = inspect.getsource(_editor_session_mod.EditorSession)
+_run_src = inspect.getsource(_editor_session_mod.EditorSession._run)
+check("editor's shared _run passes level_music to run_play",
+      "level_music=st.level_music" in _run_src)
+check("editor's shared _run flags editor_test=True",
+      "editor_test=True" in _run_src)
+check("editor Test button goes through _run",
+      'self._run(" (Test)"' in inspect.getsource(_editor_session_mod.EditorSession.do_test))
 
 
 # ---------------------------------------------------------------------------
@@ -1798,31 +1795,15 @@ check("Ship trail draws without crash", _ship_drew)
 # fine, and the user wants the audio context.
 # ---------------------------------------------------------------------------
 section("Bot replay music wiring")
-_editor_src2 = inspect.getsource(_editor_mod._run_editor_impl)
-_bot_block_start = _editor_src2.find("if do_bot:")
-_bot_block_end = _editor_src2.find("if do_bot_menu:", _bot_block_start)
-check("editor.py has a do_bot block separate from do_bot_menu",
-      _bot_block_start >= 0 and _bot_block_end > _bot_block_start)
-if _bot_block_start >= 0 and _bot_block_end > _bot_block_start:
-    _bot_block = _editor_src2[_bot_block_start:_bot_block_end]
-    # All three sub-paths (Bot Exact, Bot, Playback) should pass level_music.
-    _music_kw_count = _bot_block.count("level_music=level_music")
-    check("All three do_bot sub-paths pass level_music to run_play",
-          _music_kw_count >= 3)
-
-# Bot menu Replay callback should also pass level_music.
-_replay_block_start = _editor_src2.find("def _replay_in_editor")
-# End-marker: any line that starts with `result = run_bot_menu` (the
-# indent level of run_bot_menu's call site varies as the editor grows,
-# so don't pin it to a specific number of leading spaces).
-_replay_block_end = _editor_src2.find("result = run_bot_menu",
-                                       _replay_block_start)
-check("editor's _replay_in_editor closure exists",
-      _replay_block_start >= 0 and _replay_block_end > _replay_block_start)
-if _replay_block_start >= 0 and _replay_block_end > _replay_block_start:
-    _replay_block = _editor_src2[_replay_block_start:_replay_block_end]
-    check("Bot menu Replay callback passes level_music",
-          "level_music=level_music" in _replay_block)
+_editor_src2 = _editor_src
+_bot_src = inspect.getsource(_editor_session_mod.EditorSession.do_bot)
+check("editor do_bot has Exact / path / playback sub-paths",
+      _bot_src.count("self._run(") >= 3)
+check("All do_bot sub-paths run through _run (so they get level_music)",
+      "run_play(" not in _bot_src)
+_menu_src = inspect.getsource(_editor_session_mod.EditorSession.do_bot_menu)
+check("Bot menu Replay callback goes through _run",
+      "def replay(inputs):" in _menu_src and "self._run(" in _menu_src)
 
 
 # ---------------------------------------------------------------------------
@@ -1869,25 +1850,24 @@ check("Player update() calls _record_hitbox once per frame",
       and "self._record_mirror_hitbox()" in _player_src)
 
 # Editor wiring: state, H toggle, run_play hand-off, draw overlay.
-check("editor declares last_run_hitboxes state",
-      "last_run_hitboxes = []" in _editor_src2)
-check("editor declares show_hitboxes default OFF",
-      "show_hitboxes = False" in _editor_src2)
-check("H key toggles show_hitboxes (boolean)",
-      "ev.key == pygame.K_h" in _editor_src2
-      and "show_hitboxes = not show_hitboxes" in _editor_src2)
-check("editor passes out_hitboxes=last_run_hitboxes to run_play",
-      _editor_src2.count("out_hitboxes=last_run_hitboxes") >= 4)
-check("editor clears last_run_hitboxes before each run",
-      "last_run_hitboxes.clear()" in _editor_src2)
-# The overlay itself lives in editor_render.render_hitbox_overlay now (moved
-# out of _run_editor_impl as part of the editor render extraction); the
-# editor still owns the toggle state that gates it.
-from src import editor_render as _editor_render_mod
+from src.editor import state as _editor_state_mod
+from src.editor import render as _editor_render_mod
+_editor_state_src = inspect.getsource(_editor_state_mod.EditorState)
 _editor_render_src = inspect.getsource(_editor_render_mod)
+check("editor declares last_run_hitboxes state",
+      "self.last_run_hitboxes = []" in _editor_state_src)
+check("editor declares show_hitboxes default OFF",
+      "self.show_hitboxes = False" in _editor_state_src)
+check("H key toggles show_hitboxes (boolean)",
+      "key == pygame.K_h" in _editor_src2
+      and "st.show_hitboxes = not st.show_hitboxes" in _editor_src2)
+check("editor passes out_hitboxes=last_run_hitboxes to run_play",
+      "out_hitboxes=st.last_run_hitboxes" in _run_src)
+check("editor clears last_run_hitboxes before each run",
+      "st.last_run_hitboxes.clear()" in _run_src)
 check("editor draws the hitbox overlay layer when toggle is on",
-      "show_hitboxes and last_run_hitboxes" in _editor_src2
-      and "hb_layer" in _editor_render_src
+      "if st.show_hitboxes:" in _editor_src2
+      and "def render_hitbox_overlay(" in _editor_render_src
       and "render_hitbox_overlay(" in _editor_src2)
 
 # Behavioural smoke: simulate a short run with out_hitboxes wired up.
@@ -1979,12 +1959,13 @@ check("invisible blocks still collide (player lands, stays alive)",
       _ip.alive and _ip.on_ground)
 
 # Editor wiring for the invisible toggle.
-_editor_full_src = inspect.getsource(_editor_mod)
-check("editor edit panel exposes invisible_toggle for solids",
-      'rects["invisible_toggle"]' in _editor_full_src
-      and 'SOLID_TYPES' in _editor_full_src)
-check("editor click handler toggles invisible on selected blocks",
-      '"invisible_toggle"' in _editor_src2)
+from src.editor import ui as _editor_ui_mod
+from src.editor import ops as _editor_ops_mod
+check("editor edit toolbar exposes the invisible toggle",
+      '"toggle_invisible"' in inspect.getsource(_editor_ui_mod))
+check("editor action handler toggles invisible on selected objects",
+      '"toggle_invisible"' in _editor_src2
+      and 'ops.toggle_flag(sel, "invisible")' in _editor_src2)
 check("play.py skips draw_obj when o.get('invisible')",
       'if o.get("invisible")' in inspect.getsource(_play_render_mod))
 
