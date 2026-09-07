@@ -269,3 +269,7 @@ levels/*.json
 # Level PNG exports (Ctrl+E in the editor) — generated output.
 exports/
 .claude/
+
+# Bot benchmark output (scripts/bench_bots.py) — generated, regeneratable.
+bench_output.txt
+bench_results.json
