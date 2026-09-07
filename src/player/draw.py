@@ -364,6 +364,9 @@ class DrawMixin:
         if m.grav == -1:
             msurf = pygame.transform.flip(msurf, False, True)
         if not m.alive:
+            # ``msurf`` may still be the shared _SPRITE_CACHE surface
+            # (when no scale/flip copied it) — never mutate that in place.
+            msurf = msurf.copy()
             msurf.set_alpha(90)
         mrot = pygame.transform.rotate(msurf, mangle) if mangle else msurf
         surf.blit(mrot, mrot.get_rect(

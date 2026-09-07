@@ -436,6 +436,17 @@ def is_playing():
         return False
 
 
+def get_pos_ms():
+    """Milliseconds since the current track's ``play()`` call — NOT
+    since the file's start (a ``start_sec`` seek isn't included), and
+    -1 if nothing is playing. Callers wanting absolute song position
+    must add their own seek offset."""
+    try:
+        return pygame.mixer.music.get_pos()
+    except Exception:
+        return -1
+
+
 def current_track_index():
     """Get the index of the currently playing track."""
     return _current_track

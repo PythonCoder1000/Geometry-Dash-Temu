@@ -30,6 +30,7 @@ from .constants import (
     T_BLOCK, T_SLAB, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_ORB, T_PINK_ORB, T_RED_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,
     T_DASH_ORB, T_DASH_ORB_GRAV, T_SPIDER_ORB, T_TELEPORT_ORB,
+    T_TELEPORT_PORTAL,
     T_PAD, T_PINK_PAD, T_RED_PAD, T_BLUE_PAD, T_SPIDER_PAD,
     T_GRAV_UP, T_GRAV_DOWN, T_END, T_START, T_COIN, T_CHECKPOINT,
     T_MODE_CUBE, T_MODE_SHIP, T_MODE_BALL, T_MODE_WAVE, T_MODE_UFO,
@@ -40,10 +41,12 @@ from .constants import (
     T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
+    T_BLACKOUT_TRIGGER,
     T_JUMP_PREDICTOR, T_BOT_CHECKPOINT, T_DASH_STOP,
     C_BLOCK, C_SLAB, C_SPIKE, C_SAW, C_ORB, C_PINK_ORB, C_RED_ORB,
     C_BLUE_ORB, C_GREEN_ORB, C_BLACK_ORB, C_DASH_ORB, C_DASH_ORB_GRAV,
-    C_SPIDER_ORB, C_TELEPORT_ORB, C_PAD, C_PINK_PAD, C_RED_PAD, C_BLUE_PAD,
+    C_SPIDER_ORB, C_TELEPORT_ORB, C_TELEPORT_PORTAL,
+    C_PAD, C_PINK_PAD, C_RED_PAD, C_BLUE_PAD,
     C_SPIDER_PAD, C_GPORTAL_UP, C_GPORTAL_DOWN, C_END, C_START, C_COIN,
     C_CHECKPOINT, C_MODE_CUBE, C_MODE_SHIP, C_MODE_BALL, C_MODE_WAVE,
     C_MODE_UFO, C_MODE_SPIDER, C_MODE_SWING, C_MODE_ROBOT, C_MODE_MINI,
@@ -51,6 +54,7 @@ from .constants import (
     C_SPEED_FAST, C_SPEED_FASTER, C_SPEED_FASTEST, C_DECO_CRYSTAL,
     C_DECO_PILLAR, C_DECO_GLOW, C_CAM_TRIGGER, C_BG_TRIGGER, C_MOVE_TRIGGER,
     C_COLOR_TRIGGER, C_PULSE_TRIGGER, C_ROTATE_TRIGGER, C_FOLLOW_TRIGGER,
+    C_BLACKOUT_TRIGGER,
     C_TIME_WARP, C_JUMP_PREDICTOR, C_BOT_CHECKPOINT, C_DASH_STOP,
 )
 
@@ -139,7 +143,11 @@ class Field:
             except ValueError:
                 i = 0
             return self.choices[(i + direction) % len(self.choices)]
-        return self.coerce(float(value) + direction * self.step)
+        try:
+            base = float(value)
+        except (TypeError, ValueError):
+            base = float(self.default) if isinstance(self.default, (int, float)) else 0.0
+        return self.coerce(base + direction * self.step)
 
 
 @dataclass(frozen=True)
@@ -263,6 +271,12 @@ _SPEC_LIST = [
                "opposite surface.", C_SPIDER_PAD, CAT_PADS,
                fields=(_F_DIR,)),
     # ---- Portals -----------------------------------------------------
+    ObjectSpec(T_TELEPORT_PORTAL, "Teleport Portal", "Link two with the "
+               "Group tool. Teleports instantly on touch — no click "
+               "needed.", C_TELEPORT_PORTAL, CAT_PORTALS, animated=True,
+               fields=(Field("group_id", "Group ID", "int", 0, 0, None,
+                             persist="always"),
+                       Field("dest", "Destination", "bool", False))),
     ObjectSpec(T_GRAV_UP, "Gravity Up Portal", "Sets gravity to up.",
                C_GPORTAL_UP, CAT_PORTALS, animated=True),
     ObjectSpec(T_GRAV_DOWN, "Gravity Down Portal", "Sets gravity to down.",
@@ -317,11 +331,15 @@ _SPEC_LIST = [
     # ---- Triggers ----------------------------------------------------
     ObjectSpec(T_CAMERA_TRIGGER, "Camera Trigger", "Pans the camera to the "
                "target row, freezes it in place (Static), or resumes "
-               "following the player (Follow).", C_CAM_TRIGGER, CAT_TRIGGERS,
+               "following the player (Follow). Pan eases smoothly over "
+               "Duration.", C_CAM_TRIGGER, CAT_TRIGGERS,
                fields=(Field("cam_mode", "Mode", "choice", "pan",
                              choices=("pan", "static", "follow"),
                              persist="always"),
                        Field("cy", "Target row", "int", 0, default_from="y",
+                             persist="always"),
+                       Field("duration", "Duration (s)", "float", 1.0, 0.0,
+                             10.0, step=0.1, decimals=2,
                              persist="always"),)),
     ObjectSpec(T_BG_TRIGGER, "BG Trigger", "Changes the background "
                "preset.", C_BG_TRIGGER, CAT_TRIGGERS,
@@ -335,9 +353,11 @@ _SPEC_LIST = [
                        Field("ty", "Dest y", "int", 0, default_from="y",
                              persist="always"),
                        Field("duration", "Duration (f)", "int", 30, 1, 600,
-                             step=5, persist="always"))),
-    ObjectSpec(T_COLOR_TRIGGER, "Color Trigger", "Cycles the player "
-               "colour.", C_COLOR_TRIGGER, CAT_TRIGGERS,
+                             step=5, persist="always"),
+                       Field("show_ghost", "Show ghost (editor)", "bool",
+                             False, persist="non_default"))),
+    ObjectSpec(T_COLOR_TRIGGER, "Color Trigger", "Sets the player "
+               "colour to the given palette index.", C_COLOR_TRIGGER, CAT_TRIGGERS,
                fields=(Field("col_idx", "Color index", "int", 0, 0,
                              len(PLAYER_COLORS) - 1, persist="always"),)),
     ObjectSpec(T_PULSE_TRIGGER, "Pulse Trigger", "Screen pulse at a BPM.",
@@ -370,6 +390,15 @@ _SPEC_LIST = [
                ">1 fast forward).", C_TIME_WARP, CAT_TRIGGERS,
                fields=(Field("factor", "Factor", "float", 1.0, 0.0, 10.0,
                              step=0.1, persist="always"),)),
+    ObjectSpec(T_BLACKOUT_TRIGGER, "Blackout Trigger", "Fades the whole "
+               "screen to solid black (or back to clear) — hides "
+               "everything, including the player and its trail.",
+               C_BLACKOUT_TRIGGER, CAT_TRIGGERS,
+               fields=(Field("state", "Go dark", "bool", True,
+                             persist="always"),
+                       Field("duration", "Duration (s)", "float", 1.0, 0.0,
+                             10.0, step=0.1, decimals=2,
+                             persist="always"),)),
     # ---- Misc --------------------------------------------------------
     ObjectSpec(T_START, "Start Pos", "Player spawn point. A level may hold "
                "several; the active one is where every attempt begins.",

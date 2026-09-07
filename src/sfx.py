@@ -208,11 +208,15 @@ def play(name, volume=0.5):
         snd.play()
 
 
-def set_enabled(val):
-    """Enable or disable SFX. Persists across sessions."""
+def set_enabled(val, persist=True):
+    """Enable or disable SFX. Persists across sessions unless ``persist``
+    is False (a transient, internal mute — e.g. muting for the duration
+    of a bot solve — that shouldn't survive a crash mid-toggle or write
+    to disk on every solve)."""
     global _enabled
     _enabled = bool(val)
-    prefs.set("sfx_muted", not _enabled)
+    if persist:
+        prefs.set("sfx_muted", not _enabled)
 
 
 def toggle():

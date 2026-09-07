@@ -21,14 +21,15 @@ import pygame
 from .constants import (
     LEVELS_DIR,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
-    T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,
+    T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_TELEPORT_PORTAL,
+    T_BLUE_ORB, T_GREEN_ORB, T_BLACK_ORB,
     T_PAD, T_BLUE_PAD, T_GRAV_UP, T_GRAV_DOWN, T_END, T_START, T_COIN,
     T_MODE_SHIP, T_MODE_BALL, T_MODE_CUBE, T_MODE_WAVE, T_MODE_UFO,
     T_MODE_SPIDER, T_MODE_MINI, T_MODE_BIG,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
-    T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
+    T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_BLACKOUT_TRIGGER,
 )
 
 
@@ -53,6 +54,7 @@ _TYPE_COLORS = {
     T_ORB: (255, 230, 60),
     T_DASH_ORB: (255, 100, 220),
     T_TELEPORT_ORB: (120, 240, 255),
+    T_TELEPORT_PORTAL: (255, 165, 60),
     T_BLUE_ORB: (80, 170, 255),
     T_GREEN_ORB: (110, 255, 130),
     T_BLACK_ORB: (200, 200, 220),
@@ -84,6 +86,7 @@ _TYPE_COLORS = {
     T_COLOR_TRIGGER: (255, 120, 200),
     T_PULSE_TRIGGER: (200, 200, 255),
     T_ROTATE_TRIGGER: (180, 180, 255),
+    T_BLACKOUT_TRIGGER: (60, 60, 65),
 }
 _DEFAULT_COLOR = (160, 160, 180)
 
@@ -113,7 +116,7 @@ def _bounds(objects):
     standard play strip (0..40, 0..15).
     """
     skip = {T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
-            T_PULSE_TRIGGER, T_ROTATE_TRIGGER}
+            T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_BLACKOUT_TRIGGER}
     xs, ys = [], []
     for o in objects:
         if o.get("t") in skip:
@@ -133,7 +136,11 @@ def render_thumbnail(objects, size=(THUMB_W, THUMB_H)):
     produce a valid placeholder surface.
     """
     w, h = size
-    surf = pygame.Surface((w, h)).convert()
+    # No .convert() here: it needs an active display mode, and this
+    # surface is fully repainted below (sky gradient + objects) so the
+    # unconverted pixel format costs nothing — headless callers (thumbnail
+    # batch regeneration, tests) must not crash for lack of a display.
+    surf = pygame.Surface((w, h))
     # Sky gradient (cheap row-by-row paint).
     for y in range(h):
         t = y / max(1, h - 1)
@@ -192,7 +199,7 @@ _Z_ORDER = {
     T_BLOCK: 0, T_SLAB: 0,
     T_SPIKE: 1, T_HALF_SPIKE: 1, T_SAW: 1,
     T_PAD: 2, T_BLUE_PAD: 2, T_GRAV_UP: 2, T_GRAV_DOWN: 2,
-    T_ORB: 3, T_DASH_ORB: 3, T_TELEPORT_ORB: 3,
+    T_ORB: 3, T_DASH_ORB: 3, T_TELEPORT_ORB: 3, T_TELEPORT_PORTAL: 3,
     T_BLUE_ORB: 3, T_GREEN_ORB: 3, T_BLACK_ORB: 3,
     T_COIN: 4,
     T_MODE_SHIP: 5, T_MODE_BALL: 5, T_MODE_CUBE: 5, T_MODE_WAVE: 5,
@@ -228,9 +235,15 @@ def load_thumbnail(level_filename):
     if not os.path.isfile(path):
         return None
     try:
-        return pygame.image.load(path).convert()
+        img = pygame.image.load(path)
     except (OSError, pygame.error):
         return None
+    try:
+        return img.convert()
+    except pygame.error:
+        # No display mode (headless caller) — the un-converted surface
+        # is still usable, just slower to blit.
+        return img
 
 
 def clear_thumbnail(level_filename):

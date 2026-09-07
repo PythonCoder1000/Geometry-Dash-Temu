@@ -16,13 +16,15 @@ import pygame
 from .constants import (
     ASSETS_DIR, CELL, _USER_DATA, TRIGGER_TYPES,
     C_WHITE, C_GRAY, C_BLOCK_H, C_BLOCK_D, C_SPIKE, C_SAW, C_ORB, C_DASH_ORB,
-    C_DASH_ORB_GRAV, C_TELEPORT_ORB, C_GREEN_ORB, C_SPIDER_ORB, C_RED_ORB,
+    C_DASH_ORB_GRAV, C_TELEPORT_ORB, C_TELEPORT_PORTAL,
+    C_GREEN_ORB, C_SPIDER_ORB, C_RED_ORB,
     C_PINK_ORB, C_PAD, C_PINK_PAD, C_RED_PAD, C_BLUE_PAD, C_SPIDER_PAD,
     C_GPORTAL_UP, C_GPORTAL_DOWN, C_END, C_PLAYER, C_DECO_CRYSTAL,
     C_DECO_PILLAR, C_DECO_GLOW, C_COIN, C_CHECKPOINT,
     SPEED_VALUES, MODE_FROM_TYPE,
     T_BLOCK, T_SLAB, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW, T_ORB, T_DASH_ORB,
-    T_DASH_ORB_GRAV, T_TELEPORT_ORB, T_BLACK_ORB, T_BLUE_ORB, T_GREEN_ORB,
+    T_DASH_ORB_GRAV, T_TELEPORT_ORB, T_TELEPORT_PORTAL,
+    T_BLACK_ORB, T_BLUE_ORB, T_GREEN_ORB,
     T_SPIDER_ORB, T_RED_ORB, T_PINK_ORB,
     T_PAD, T_PINK_PAD, T_RED_PAD, T_BLUE_PAD, T_SPIDER_PAD,
     T_GRAV_UP, T_GRAV_DOWN, T_END, T_START, T_COIN, T_CHECKPOINT,
@@ -32,6 +34,7 @@ from .constants import (
     T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
+    T_BLACKOUT_TRIGGER,
     T_JUMP_PREDICTOR, T_BOT_CHECKPOINT, T_DASH_STOP,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     T_SPEED_FASTEST,
@@ -498,6 +501,18 @@ def _render_teleport_orb(surf, s, frame_t, link_label=None):
                              (cx + 7, cy - 7), (cx - 7, cy + 7), 2)
         _render_orb_hq(surf, C_TELEPORT_ORB, s, frame_t, outline_only=True,
                        inner_icon=_icon)
+
+
+def _render_teleport_portal(surf, s, frame_t, link_label=None):
+    # Filled core (vs. the teleport orb's hollow ring) signals "automatic,
+    # no click needed" at a glance — same visual language as pad-vs-orb.
+    def _icon(surf, cx, cy, r):
+        pygame.draw.polygon(surf, C_WHITE,
+                            [(cx - 6, cy - 7), (cx + 3, cy - 7), (cx - 3, cy),
+                             (cx + 3, cy), (cx - 6, cy + 7), (cx + 6, cy)])
+    _render_orb_hq(surf, C_TELEPORT_PORTAL, s, frame_t,
+                   label=str(link_label) if link_label else None,
+                   inner_icon=None if link_label else _icon)
 
 
 def _render_black_orb(surf, s, frame_t):
@@ -1111,7 +1126,8 @@ def _render_trigger(surf, s, t):
     else:
         label = {T_BG_TRIGGER: "BG", T_MOVE_TRIGGER: "MV",
                  T_COLOR_TRIGGER: "CL", T_PULSE_TRIGGER: "PL",
-                 T_ROTATE_TRIGGER: "RT", T_FOLLOW_TRIGGER: "FL"}.get(t, "?")
+                 T_ROTATE_TRIGGER: "RT", T_FOLLOW_TRIGGER: "FL",
+                 T_BLACKOUT_TRIGGER: "BK"}.get(t, "?")
         txt(surf, label, cx, cy, max(10, s // 4), C_WHITE, True, shadow=True)
 
 
@@ -1134,6 +1150,7 @@ _DIRECT_RENDERERS = {
     T_DASH_ORB_GRAV: lambda s, b, f, v: _render_dash_orb(s, b, f,
                                                         C_DASH_ORB_GRAV),
     T_TELEPORT_ORB: lambda s, b, f, v: _render_teleport_orb(s, b, f, link_label=v),
+    T_TELEPORT_PORTAL: lambda s, b, f, v: _render_teleport_portal(s, b, f, link_label=v),
     T_BLACK_ORB:   lambda s, b, f, v: _render_black_orb(s, b, f),
     T_BLUE_ORB:    lambda s, b, f, v: _render_blue_orb(s, b, f),
     T_GREEN_ORB:   lambda s, b, f, v: _render_green_orb(s, b, f),
@@ -1262,7 +1279,7 @@ def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
         rot_visual = normalize_rotation(rot_visual)
     rot = rot_visual
     variant = None
-    if t == T_TELEPORT_ORB and meta is not None:
+    if t in (T_TELEPORT_ORB, T_TELEPORT_PORTAL) and meta is not None:
         # Pick a sprite variant per group_id so visually-distinct orb pairs
         # are easy to spot. Reads the legacy "link" field too for backwards
         # compat with levels saved before the rename.

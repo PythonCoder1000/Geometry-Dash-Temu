@@ -66,6 +66,9 @@ class PhysicsParams:
     jump_force: float = _JUMP_FORCE
     pad_force: float = _PAD_FORCE
     ball_flip_force: float = _BALL_FLIP_FORCE
+    # Kept only so old level ``meta.physics`` overrides still round-trip.
+    # A dash now moves at the player's current ``move_speed`` (so it can
+    # never desync from the music) instead of this fixed value.
     dash_speed: float = _DASH_SPEED
     dash_time: int = _DASH_TIME
     wave_angle: float = _WAVE_ANGLE
@@ -74,9 +77,9 @@ class PhysicsParams:
     spider_teleport_range: int = _SPIDER_TELEPORT_RANGE
     robot_thrust: float = _ROBOT_THRUST
     robot_flight_seconds: float = _ROBOT_FLIGHT_SECONDS
-    # GD's mini icon isn't just a smaller hitbox — gravity/impulses feel a
-    # touch floatier and wave pitches harder. Scoped to size < PLAYER_SIZE
-    # so normal-size play is untouched.
+    # GD's mini icon isn't just a smaller hitbox — it falls/rises faster
+    # (higher gravity) but jumps a touch weaker, and wave pitches harder.
+    # Scoped to size < PLAYER_SIZE so normal-size play is untouched.
     mini_gravity_scale: float = _MINI_GRAVITY_SCALE
     mini_jump_scale: float = _MINI_JUMP_SCALE
     mini_wave_angle_scale: float = _MINI_WAVE_ANGLE_SCALE

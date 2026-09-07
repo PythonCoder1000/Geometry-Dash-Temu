@@ -28,7 +28,8 @@ from .constants import (
     DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES,
     T_COIN, T_ORB, T_DASH_ORB, T_DASH_ORB_GRAV, T_BLACK_ORB,
     T_BLUE_ORB, T_GREEN_ORB, T_SPIDER_ORB, T_RED_ORB, T_PINK_ORB,
-    T_GRAV_UP, T_GRAV_DOWN, T_TIME_WARP, SPEED_VALUES,
+    T_GRAV_UP, T_GRAV_DOWN, T_TIME_WARP, SPEED_VALUES, T_END,
+    TELEPORT_LINK_TYPES,
 )
 from .graphics import (
     make_rect, make_stars, make_mountains,
@@ -43,14 +44,14 @@ from .input_guard import ClickGuard
 from .particles import Particles
 from .physics import PhysicsParams
 from .player import Player
-from .levels import update_meta
+from .levels import update_meta, get_group_id
 from .objects import cycle_active_start, start_objects
 from .play_render import (
     render_world, render_hint_overlay, render_predicted_path,
     render_ghost_paths, render_death_hitbox_marker, render_best_run_ghost,
     render_player_and_particles, render_checkpoint_markers,
     render_death_reason, render_slowmo_vignette, render_pulse_flash,
-    render_toast,
+    render_blackout, render_toast,
     render_hud, render_debug_overlay, render_state_hud,
     render_pause_overlay, render_win_overlay,
 )
@@ -85,12 +86,34 @@ _SFX_FOR_TYPE = {
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _real_time_to_x(objects, target_x, base_speed):
-    """Wall-clock seconds the player spends reaching ``target_x`` from
-    x=0, integrating across speed portals and time-warp triggers.
-    Used to seek the music when spawning mid-level."""
-    if target_x <= 0:
-        return 0.0
+def _teleport_x_map(objects):
+    """Teleport-orb/portal source x (px) -> paired destination x (px).
+
+    Mirrors :meth:`Player.activate_teleport`'s pairing rule (same
+    group id, prefer a member flagged ``dest``) without needing a live
+    Player/teleport index."""
+    groups = {}
+    for o in objects:
+        if o.get("t") in TELEPORT_LINK_TYPES:
+            gid = get_group_id(o)
+            if gid:
+                groups.setdefault(gid, []).append(o)
+    out = {}
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        for src in members:
+            others = [m for m in members if m is not src]
+            dests = [m for m in others if m.get("dest")]
+            dst = dests[0] if dests else others[0]
+            out[int(src["x"]) * CELL] = int(dst["x"]) * CELL
+    return out
+
+
+def _speed_warp_events(objects, base_speed):
+    """Sorted (x_px, value) event lists for speed portals and time-warp
+    triggers, plus lookup closures for "the value in effect at x" —
+    shared by :func:`real_time_to_x` and its inverse, :func:`x_at_time`."""
     base_speed = max(1.0, float(base_speed))
     speed_events = sorted(
         ((int(o["x"]) * CELL, float(SPEED_VALUES[o["t"]]))
@@ -100,28 +123,106 @@ def _real_time_to_x(objects, target_x, base_speed):
         ((int(o["x"]) * CELL, float(o.get("factor", 1.0)))
          for o in objects if o.get("t") == T_TIME_WARP),
         key=lambda e: e[0])
-    cur_speed = base_speed
-    cur_warp = 1.0
+
+    def speed_at(x):
+        v = base_speed
+        for ex, ev in speed_events:
+            if ex > x:
+                break
+            v = ev
+        return v
+
+    def warp_at(x):
+        v = 1.0
+        for ex, ev in warp_events:
+            if ex > x:
+                break
+            v = ev
+        return v
+
+    return speed_events, warp_events, speed_at, warp_at
+
+
+def real_time_to_x(objects, target_x, base_speed):
+    """Wall-clock seconds the player spends reaching ``target_x`` from
+    x=0, integrating across speed portals, time-warp triggers, and
+    teleport orbs/portals (an instantaneous relocation — no elapsed
+    time of its own, forward or backward). Used to seek the music when
+    spawning mid-level, and by the editor's music-preview tool.
+
+    Re-scans events from the (possibly non-monotonic, after a backward
+    teleport) current position each step rather than walking sorted
+    array indices, since a teleport can move ``cur_x`` in either
+    direction. Levels have too few trigger objects for this to matter
+    performance-wise, and it's only ever called on demand, not per
+    frame. A bounded step count guards against a pathological circular
+    teleport loop."""
+    if target_x <= 0:
+        return 0.0
+    speed_events, warp_events, speed_at, warp_at = _speed_warp_events(objects, base_speed)
+    teleports = _teleport_x_map(objects)
+
     cur_x = 0.0
     elapsed = 0.0
-    si = wi = 0
-    while cur_x < target_x:
-        next_speed_x = speed_events[si][0] if si < len(speed_events) else float("inf")
-        next_warp_x = warp_events[wi][0] if wi < len(warp_events) else float("inf")
-        next_event_x = min(next_speed_x, next_warp_x, target_x)
-        seg_len = max(0.0, next_event_x - cur_x)
+    guard = 0
+    while cur_x < target_x and guard < 4000:
+        guard += 1
+        cur_speed = speed_at(cur_x)
+        cur_warp = warp_at(cur_x)
+        next_x = target_x
+        for ex, _ in speed_events:
+            if cur_x < ex < next_x:
+                next_x = ex
+        for ex, _ in warp_events:
+            if cur_x < ex < next_x:
+                next_x = ex
+        teleport_here = None
+        for tx in teleports:
+            if cur_x < tx <= next_x:
+                next_x = tx
+                teleport_here = tx
         if cur_speed > 0 and cur_warp > 0:
-            elapsed += seg_len / (cur_speed * PHYSICS_RATE * cur_warp)
-        cur_x = next_event_x
-        if cur_x >= target_x:
-            break
-        if next_speed_x == cur_x:
-            cur_speed = speed_events[si][1]
-            si += 1
-        if next_warp_x == cur_x:
-            cur_warp = warp_events[wi][1]
-            wi += 1
+            elapsed += max(0.0, next_x - cur_x) / (cur_speed * PHYSICS_RATE * cur_warp)
+        cur_x = float(teleports[teleport_here]) if teleport_here is not None else next_x
     return elapsed
+
+
+def x_at_time(objects, target_t, base_speed):
+    """Inverse of :func:`real_time_to_x`: the x position (px) a player
+    would be at after ``target_t`` wall-clock seconds of playback,
+    integrating the same speed / warp / teleport events. Drives the
+    editor's live music-preview playhead."""
+    if target_t <= 0:
+        return 0.0
+    speed_events, warp_events, speed_at, warp_at = _speed_warp_events(objects, base_speed)
+    teleports = _teleport_x_map(objects)
+
+    cur_x = 0.0
+    elapsed = 0.0
+    guard = 0
+    while guard < 4000:
+        guard += 1
+        cur_speed = speed_at(cur_x)
+        cur_warp = warp_at(cur_x)
+        next_x = None
+        for ex, _ in speed_events:
+            if ex > cur_x and (next_x is None or ex < next_x):
+                next_x = ex
+        for ex, _ in warp_events:
+            if ex > cur_x and (next_x is None or ex < next_x):
+                next_x = ex
+        for tx in teleports:
+            if tx > cur_x and (next_x is None or tx < next_x):
+                next_x = tx
+        rate = cur_speed * PHYSICS_RATE * cur_warp
+        if next_x is None:
+            return cur_x + max(0.0, target_t - elapsed) * rate if rate > 0 else cur_x
+        seg_time = (next_x - cur_x) / rate if rate > 0 else float("inf")
+        if elapsed + seg_time >= target_t:
+            return cur_x + max(0.0, target_t - elapsed) * rate
+        elapsed += seg_time
+        cur_x = float(teleports[next_x]) if next_x in teleports else next_x
+    return cur_x
 
 
 def _total_coins(objects):
@@ -180,7 +281,7 @@ class PlaySession:
                  bot_controller=None, playback_inputs=None,
                  playback_waypoints=None, meta=None, level_path=None,
                  out_hitboxes=None, out_mirror_hitboxes=None, start_x=None,
-                 predicted_path=None, ghost_paths=None):
+                 predicted_path=None, ghost_paths=None, noclip=False):
         self.screen = screen
         self.clock = clock
         self.objects = [dict(o) for o in objects]
@@ -199,9 +300,16 @@ class PlaySession:
         self.ghost_paths = ghost_paths
 
         self.total_coins = _total_coins(self.objects)
-        self.max_x = max((o["x"] for o in self.objects), default=10) * CELL + CELL
+        # Progress is measured against the finish line the player actually
+        # has to cross, not whatever object happens to sit furthest right
+        # (a stray decoration past the end wall used to make 100% unreachable).
+        end_xs = [o["x"] for o in self.objects if o["t"] == T_END]
+        rightmost_gx = (min(end_xs) if end_xs
+                        else max((o["x"] for o in self.objects), default=10))
+        self.max_x = rightmost_gx * CELL + CELL
         self.player = Player(self.objects, params=PhysicsParams.from_meta(meta))
         self.player.practice_mode = practice_mode
+        self.player.noclip = noclip
         self.is_sim_run = bot_controller is not None or playback_inputs is not None
         self.can_persist = (not editor_test and not self.is_sim_run
                             and level_path is not None)
@@ -278,6 +386,10 @@ class PlaySession:
         self.cam_x = 0.0
         self.cam_y = 0.0
         self.prev_cam_y = 0.0
+        self._cam_pan_target = 0.0
+        self._cam_pan_start = 0.0
+        self._cam_pan_timer = 0
+        self._cam_pan_len = 1
         self.bg_top = [float(c) for c in C_BG_TOP]
         self.bg_bot = [float(c) for c in C_BG_BOT]
         self._init_attempt_state()
@@ -317,8 +429,8 @@ class PlaySession:
         if spawn_x <= default_x + 1.0:
             return 0.0
         base = float(self.player.params.base_move_speed)
-        return max(0.0, _real_time_to_x(self.objects, spawn_x, base)
-                   - _real_time_to_x(self.objects, default_x, base))
+        return max(0.0, real_time_to_x(self.objects, spawn_x, base)
+                   - real_time_to_x(self.objects, default_x, base))
 
     def _start_music(self):
         if self.level_music:
@@ -364,8 +476,15 @@ class PlaySession:
         self.cam_x = self.player.x - CAMERA_LEAD_PX
         self.cam_y = 0.0
         self.prev_cam_y = 0.0
+        self._cam_pan_target = 0.0
+        self._cam_pan_start = 0.0
+        self._cam_pan_timer = 0
+        self._cam_pan_len = 1
         self.bg_top[:] = [float(c) for c in C_BG_TOP]
         self.bg_bot[:] = [float(c) for c in C_BG_BOT]
+        # Recompute: the spawn point may have changed (Q/E start-position
+        # cycling) since __init__ or the previous reset computed this.
+        self.music_offset_sec = self._music_offset_seconds()
         self._start_music()
 
     def _finish(self, result):
@@ -502,6 +621,14 @@ class PlaySession:
         self.start_x = None          # a test-from-cursor spawn no longer applies
         self.player.checkpoints.clear()
         self.paused = False
+        # A cached hint path was solved from the previous Start Pos — it
+        # is meaningless (often unwinnable outright) from this one, so
+        # drop it rather than show a stale "solved" badge for the wrong
+        # spawn.
+        self.hint_path = None
+        self.hint_mirror_path = None
+        self.hint_status = ""
+        self.hint_visible = False
         self.reset_attempt()
         self.toast(f"Start Position {index}/{len(starts)}")
 
@@ -653,7 +780,11 @@ class PlaySession:
         if self.death_slowmo_timer > 0:
             scale *= 0.2
             self.death_slowmo_timer -= 1
-        return scale * max(0.0, min(10.0, float(self.player.time_warp)))
+        # A "0" time-warp trigger is a legitimate slow-mo-to-a-crawl value
+        # in the editor, but a literal 0 multiplier stops physics forever
+        # with no way for the player to reach whatever would undo it — so
+        # floor it just above zero instead of allowing a hard freeze.
+        return scale * max(0.01, min(10.0, float(self.player.time_warp)))
 
     def _tick_input(self):
         """Pick this tick's ``(held, pressed)`` from human / bot / playback."""
@@ -782,8 +913,32 @@ class PlaySession:
             p.target_cam_y = p.y + p.size / 2 - HEIGHT / 2
         self.prev_cam_y = self.cam_y
         if not p.camera_locked:
-            dy = (p.target_cam_y - self.cam_y) * CAM_Y_EASE
-            self.cam_y += max(-CAM_Y_MAX_STEP, min(CAM_Y_MAX_STEP, dy))
+            if p.free_cam_mode:
+                # Continuous tracking (e.g. resumed "follow" mode): the
+                # target moves every tick, so a fixed-duration ease has
+                # no fixed endpoint to aim at — keep the old responsive
+                # exponential chase.
+                self._cam_pan_len = 1
+                dy = (p.target_cam_y - self.cam_y) * CAM_Y_EASE
+                self.cam_y += max(-CAM_Y_MAX_STEP, min(CAM_Y_MAX_STEP, dy))
+            else:
+                # One-shot "pan" trigger: ease smoothly to the target
+                # over the trigger's configured duration instead of a
+                # magic-number exponential chase, so mappers control how
+                # smooth/fast the transition looks.
+                if p.target_cam_y != self._cam_pan_target:
+                    self._cam_pan_target = p.target_cam_y
+                    self._cam_pan_start = self.cam_y
+                    self._cam_pan_timer = 0
+                    self._cam_pan_len = max(1, round(p.cam_pan_duration * PHYSICS_RATE))
+                if self._cam_pan_timer < self._cam_pan_len:
+                    self._cam_pan_timer += 1
+                    t = self._cam_pan_timer / self._cam_pan_len
+                    t = t * t * (3.0 - 2.0 * t)  # smoothstep
+                    self.cam_y = (self._cam_pan_start
+                                 + (self._cam_pan_target - self._cam_pan_start) * t)
+                else:
+                    self.cam_y = self._cam_pan_target
         target_top, target_bot = BG_PRESETS[p.bg_preset % len(BG_PRESETS)]
         for i in range(3):
             self.bg_top[i] += (target_top[i] - self.bg_top[i]) * 0.06
@@ -824,7 +979,9 @@ class PlaySession:
         # advancing (pause / dead) draw the latest pose.
         alpha = self.sim_accum if (p.alive and not p.won and not self.paused) else 1.0
         rx, _ry, _ = p.render_pose(alpha)
-        cam_x = rx - CAMERA_LEAD_PX if self.death_timer == 0 else self.cam_x
+        cam_x = (rx - CAMERA_LEAD_PX
+                 if self.death_timer == 0 and not p.camera_locked
+                 else self.cam_x)
         cam_y = self.prev_cam_y + (self.cam_y - self.prev_cam_y) * alpha
         update_shake()
         shake_x, shake_y = shake_offset
@@ -853,6 +1010,7 @@ class PlaySession:
                                     shake_x, shake_y, alpha)
         render_checkpoint_markers(s, self.practice_mode, p, self.pulse,
                                   cam_x, cam_y, shake_x, shake_y)
+        render_blackout(s, os_, p.blackout_value)
         render_death_reason(s, self.death_timer, p)
         render_toast(s, self.toast_text, self.toast_timer)
         render_slowmo_vignette(s, os_, self.CLEAR, self.death_slowmo_timer)
@@ -912,7 +1070,7 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
              practice_mode=False, level_music=None, bot_controller=None,
              playback_inputs=None, playback_waypoints=None, meta=None,
              level_path=None, out_hitboxes=None, out_mirror_hitboxes=None,
-             start_x=None, predicted_path=None, ghost_paths=None):
+             start_x=None, predicted_path=None, ghost_paths=None, noclip=False):
     """Run a single play session and return ``"menu"`` or ``"quit"``.
 
     ``meta`` / ``level_path`` let a hand-played win persist verification,
@@ -929,5 +1087,6 @@ def run_play(screen, clock, objects, level_name="Level", editor_test=False,
         bot_controller=bot_controller, playback_inputs=playback_inputs,
         playback_waypoints=playback_waypoints, meta=meta, level_path=level_path,
         out_hitboxes=out_hitboxes, out_mirror_hitboxes=out_mirror_hitboxes,
-        start_x=start_x, predicted_path=predicted_path, ghost_paths=ghost_paths)
+        start_x=start_x, predicted_path=predicted_path, ghost_paths=ghost_paths,
+        noclip=noclip)
     return session.run()

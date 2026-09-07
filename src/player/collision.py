@@ -8,7 +8,7 @@ share the player's ``x``; everything else is read from the body.
 import math
 
 from ..constants import (
-    CELL, PLAYER_SIZE, SOLID_HITBOX_FRACTION,
+    CELL, PLAYER_SIZE, SOLID_HITBOX_FRACTION, HITBOX_SOLID_FRACTION,
     T_BLOCK, T_SLAB, T_SLOPE, T_START, T_SPIKE, T_HALF_SPIKE, T_SAW,
     SOLID_TYPES,
 )
@@ -21,6 +21,16 @@ _NON_TRIGGER_TYPES = frozenset(SOLID_TYPES | {T_START, T_SLOPE})
 
 # Per-object caches that depend on the object's pose.
 _POSE_CACHE_KEYS = ("_srect", "_caabb", "_saw_aabb", "_sphb_aabbs")
+
+
+def solid_hitbox_fraction(mode, size):
+    """Inner ("blue" solid) hitbox as a fraction of the outer box, per the
+    physics bible's §3.2 per-(mode, mini) table. ``size`` decides normal vs
+    mini (mirrors the ``mini = b.size < PLAYER_SIZE`` convention used
+    elsewhere in the player module)."""
+    normal, mini = HITBOX_SOLID_FRACTION.get(
+        mode, (SOLID_HITBOX_FRACTION, SOLID_HITBOX_FRACTION))
+    return mini if size < PLAYER_SIZE else normal
 
 
 def is_non_trigger(o):
@@ -205,8 +215,9 @@ class CollisionMixin:
     _invalidate_solid_rect = staticmethod(invalidate_pose_caches)
 
     @staticmethod
-    def _inner_bounds(x, y, size):
-        inner = max(2, int(size * SOLID_HITBOX_FRACTION))
+    def _inner_bounds(x, y, size, mode=None):
+        frac = solid_hitbox_fraction(mode, size)
+        inner = max(2, int(size * frac))
         cx = round(x) + size // 2
         cy = round(y) + size // 2
         left = cx - inner // 2
@@ -216,11 +227,17 @@ class CollisionMixin:
     # ---- block resolution ------------------------------------------------
     def _resolve_x_collision(self, b, dx_step):
         """Kill the body if its inner hitbox is inside a block after the
-        x step (walls are always lethal).  Returns True on death."""
+        x step (walls are always lethal).  Returns True on death.
+
+        Pure death-trap, not real solid support (unlike landing on a
+        floor) — under noclip the position snap and substep-abort are
+        skipped so the body doesn't get pinned to the wall, but ``_kill``
+        still runs (it no-ops the actual death) so a dash that would
+        have ended here still ends, instead of dashing forever."""
         size = b.size
         px = round(self.x)
         py = round(b.y)
-        il, it, ir, ib = self._inner_bounds(self.x, b.y, size)
+        il, it, ir, ib = self._inner_bounds(self.x, b.y, size, b.mode)
         solid_rect = self._solid_rect
         for o in self._nearby_for_aabb(px, py, px + size, py + size):
             br = o.get("_srect") or solid_rect(o)
@@ -228,6 +245,9 @@ class CollisionMixin:
                 continue
             bl, bt, brr, bb = br
             if il < brr and ir > bl and it < bb and ib > bt:
+                if self.noclip:
+                    self._kill(b, "Crashed into a wall")
+                    return False
                 if dx_step > 0:
                     self.x = bl - size
                 elif dx_step < 0:
@@ -242,7 +262,7 @@ class CollisionMixin:
         size = b.size
         px = round(self.x)
         py = round(b.y)
-        il, it, ir, ib = self._inner_bounds(self.x, b.y, size)
+        il, it, ir, ib = self._inner_bounds(self.x, b.y, size, b.mode)
         hits = []
         solid_rect = self._solid_rect
         for o in self._nearby_for_aabb(px, py, px + size, py + size):
@@ -267,7 +287,7 @@ class CollisionMixin:
             b.vy = 0.0
             if landing:
                 b.on_ground = True
-            il, it, ir, ib = self._inner_bounds(self.x, b.y, size)
+            il, it, ir, ib = self._inner_bounds(self.x, b.y, size, b.mode)
 
     def _inner_in_block_dies(self, b):
         """Belt-and-braces wall death for the rare case a teleport / pad
@@ -277,7 +297,7 @@ class CollisionMixin:
         size = b.size
         px = round(self.x)
         py = round(b.y)
-        il, it, ir, ib = self._inner_bounds(self.x, b.y, size)
+        il, it, ir, ib = self._inner_bounds(self.x, b.y, size, b.mode)
         solid_rect = self._solid_rect
         for o in self._nearby_for_aabb(px, py, px + size, py + size):
             br = o.get("_srect") or solid_rect(o)
@@ -295,7 +315,8 @@ class CollisionMixin:
         if not b.alive:
             return
         size = b.size
-        gap = max(2, int(size * (1.0 - SOLID_HITBOX_FRACTION) * 0.5))
+        frac = solid_hitbox_fraction(b.mode, size)
+        gap = max(2, int(size * (1.0 - frac) * 0.5))
         px = round(self.x)
         py = round(b.y)
         p_top = py + size - 1 if b.grav == 1 else py - gap
@@ -328,20 +349,28 @@ class CollisionMixin:
         return int(round(r / 90.0)) % 4
 
     def _slope_surface_y(self, o, player_left, player_right):
-        cell_left = o["x"] * CELL
-        cell_right = cell_left + CELL
+        # Scaled around the cell centre, same convention as cell_rect /
+        # slab_rect, so a scaled slope's collision surface tracks its
+        # rendered footprint instead of always using the base cell.
+        sx, sy = obj_scale(o)
+        cx = o["x"] * CELL + CELL / 2.0
+        cy = o["y"] * CELL + CELL / 2.0
+        w = CELL * sx
+        h = CELL * sy
+        cell_left = cx - w / 2.0
+        cell_right = cx + w / 2.0
         px_l = max(player_left, cell_left)
         px_r = min(player_right, cell_right)
         if px_l > px_r:
             return None
-        cell_top = o["y"] * CELL
+        cell_top = cy - h / 2.0
         r = self._slope_orientation(o)
         x = px_r if r in (0, 3) else px_l
-        t = min(1.0, max(0.0, (x - cell_left) / CELL))
+        t = min(1.0, max(0.0, (x - cell_left) / w)) if w else 0.0
         if r in (0, 2):
-            surface_y = cell_top + (1.0 - t) * CELL
+            surface_y = cell_top + (1.0 - t) * h
         else:
-            surface_y = cell_top + t * CELL
+            surface_y = cell_top + t * h
         return surface_y, r >= 2
 
     def _resolve_slopes(self, b):

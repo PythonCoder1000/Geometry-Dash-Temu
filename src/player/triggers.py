@@ -83,7 +83,7 @@ class TriggerMixin:
             obj["_fy"] = fy
         invalidate_pose_caches(obj)
         self._spatial_rebucket(obj)
-        self._ever_moved[id(obj)] = obj
+        self._ever_moved[self._oid_index[id(obj)]] = obj
 
     # ---- move --------------------------------------------------------------
     def _start_move_trigger(self, trig):
@@ -167,7 +167,7 @@ class TriggerMixin:
                 "offset_x": float(int(trig.get("offset_cx", 0))),
                 "offset_y": float(int(trig.get("offset_cy", 0))),
             })
-            self._ever_moved[id(source)] = source
+            self._ever_moved[self._oid_index[id(source)]] = source
             return
         if not src_oid or not tgt_oid or src_oid == tgt_oid:
             return
@@ -185,8 +185,8 @@ class TriggerMixin:
             "offset_x": float(target.get("_fx", target["x"])) - sx,
             "offset_y": float(target.get("_fy", target["y"])) - sy,
         })
-        self._ever_moved[id(source)] = source
-        self._ever_moved[id(target)] = target
+        self._ever_moved[self._oid_index[id(source)]] = source
+        self._ever_moved[self._oid_index[id(target)]] = target
 
     def _step_follow_triggers(self):
         if not self.active_follows:
@@ -226,3 +226,22 @@ class TriggerMixin:
             phase = ((self.frame - p["start_frame"]) / frames_per_beat) * math.tau
             total += math.sin(phase) ** 2
         return min(1.0, total)
+
+    # ---- blackout ------------------------------------------------------
+    def _start_blackout_trigger(self, trig):
+        """Fade the full-screen blackout overlay toward on (1.0) or off
+        (0.0) over ``duration`` seconds, smoothstep-eased."""
+        target = 1.0 if trig.get("state", True) else 0.0
+        duration = max(0.0, float(trig.get("duration", 1.0)))
+        self.blackout_start = self.blackout_value
+        self.blackout_target = target
+        self.blackout_start_frame = self.frame
+        self.blackout_frames = max(1, int(round(duration * 60)))
+
+    def _step_blackout(self):
+        if self.blackout_value == self.blackout_target:
+            return
+        t = min(1.0, (self.frame - self.blackout_start_frame) / self.blackout_frames)
+        te = t * t * (3.0 - 2.0 * t)  # smoothstep
+        self.blackout_value = (self.blackout_start
+                               + (self.blackout_target - self.blackout_start) * te)

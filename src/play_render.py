@@ -20,7 +20,7 @@ import pygame
 from .constants import (
     WIDTH, HEIGHT, CELL, PLAYER_SIZE,
     C_DARK, C_PLAYER, C_GRAY, C_WHITE, C_BTN, C_COIN, C_SUCCESS, C_DANGER,
-    BG_PRESETS, T_COIN, T_END, T_TELEPORT_ORB, T_SPIDER_ORB,
+    BG_PRESETS, T_COIN, T_END, T_TELEPORT_ORB, T_TELEPORT_PORTAL, T_SPIDER_ORB,
 )
 from .graphics import (
     draw_bg, draw_obj, txt, btn, lighter, darker,
@@ -73,7 +73,8 @@ def render_world(screen, cam_x, cam_y, shake_x, shake_y, stars, mountains,
                 continue
             draw_obj(screen, o["t"], ox * CELL - cam_x + shake_x,
                      oy * CELL - cam_y + shake_y, CELL, pulse, o.get("r", 0),
-                     o if o["t"] in (T_TELEPORT_ORB, T_SPIDER_ORB) else None,
+                     o if o["t"] in (T_TELEPORT_ORB, T_TELEPORT_PORTAL,
+                                     T_SPIDER_ORB) else None,
                      scale=obj_scale(o))
             # Bot-only object marker: a translucent purple X overlay so
             # the level author can see at a glance that this hazard is
@@ -449,6 +450,19 @@ def render_pulse_flash(screen, overlay_scratch, pulse_amp):
     screen.blit(overlay_scratch, (0, 0))
 
 
+def render_blackout(screen, overlay_scratch, amount):
+    """Full-screen solid-black fade from a Blackout Trigger — drawn over
+    the world, hint/path overlays, player, trail and particles so an
+    ``amount`` of 1.0 hides everything underneath it."""
+    if amount <= 0.001:
+        return
+    if amount >= 0.999:
+        screen.fill((0, 0, 0))
+        return
+    overlay_scratch.fill((0, 0, 0, int(255 * amount)))
+    screen.blit(overlay_scratch, (0, 0))
+
+
 def render_hud(screen, player, max_x, attempts, attempt_frames, meta,
                 is_sim_run, bot_press_frames, bot_press_total,
                 manual_takeover, takeover_idle_frames, manual_takeover_grace,
@@ -515,6 +529,8 @@ def render_hud(screen, player, max_x, attempts, attempt_frames, meta,
     txt(screen, level_name, WIDTH // 2, 8, 15, C_WHITE, True, shadow=True)
     txt(screen, f"{player.mode.title()} · {player.move_speed:.1f}x",
         WIDTH - 170, 28, 14, C_GRAY, shadow=True)
+    if player.noclip:
+        txt(screen, "IGNORE DAMAGE", WIDTH - 170, 46, 13, (255, 120, 255), shadow=True)
 
     # Coin HUD (top-right)
     if total_coins > 0:
@@ -595,7 +611,7 @@ def render_debug_overlay(screen, show_debug, objects, cam_x, cam_y, player,
     else:
         probe = None
     if show_debug and probe is not None:
-        pred_result = pred_predict(objects, probe)
+        pred_result = pred_predict(objects, probe, params=player.params)
         pred_draw_overlay(
             screen, pred_result, cam_x, cam_y, zoom_level=1.0,
             clip_rect=pygame.Rect(0, 0, WIDTH, HEIGHT),

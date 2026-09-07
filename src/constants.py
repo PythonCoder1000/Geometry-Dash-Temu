@@ -26,43 +26,111 @@ GROUND_Y = 550
 COLLISION_SUBSTEP_PX = 1.0
 
 # Two-hitbox model: the OUTER rect (full sprite size, rotated with the
-# player) triggers hazards / orbs / pads / triggers; the INNER rect (this
-# fraction of the size, centred, axis-aligned) triggers block death.
-SOLID_HITBOX_FRACTION = 0.50
+# player) triggers hazards / orbs / pads / triggers; the INNER rect (a
+# per-gamemode fraction of the size, centred, axis-aligned) triggers block
+# death. The fraction now varies by (mode, mini) per the physics bible's
+# §3.2 hitbox table — see HITBOX_SOLID_FRACTION / SOLID_HITBOX_FRACTION
+# further down (after the mode constants they're keyed on).
 
 # ---------------------------------------------------------------------------
-# Player tunables (physics — do not change casually, levels depend on them)
+# Player tunables (physics)
+#
+# Source of truth: geometry-dash-physics-bible.md.  The bible states
+# gamemode speeds in "Vels" (1 Vel = 60 GD units/second) and distances in
+# GD units (1 editor block = 30 units = one CELL on screen).  We convert
+# through this engine's existing px/CELL scale so every constant below is
+# auditable against the bible's numbers:
+#
+#     PX_PER_UNIT     = CELL / 30          (px per GD unit)
+#     VEL_PX_PER_TICK = 60 * PX_PER_UNIT / PHYSICS_TPS   (px/tick per 1 Vel)
+#
+# PHYSICS_TPS is intentionally kept at 60, NOT the real game's 240 —
+# SPEED_VALUES below (px/tick horizontal scroll speed) is "baked into"
+# every saved level's move-trigger curves and timing (see this module's
+# own historical comment on SPEED_VALUES), and a tick-rate change would
+# silently redefine what those saved levels mean. That migration is
+# deferred as a separate, dedicated pass — see AUDIT.md follow-up.
 # ---------------------------------------------------------------------------
 PLAYER_SIZE = 44
 MINI_PLAYER_SIZE = 24
 BASE_MOVE_SPEED = 5.0
-GRAVITY = 1.0
-SHIP_GRAVITY = 0.72
-SHIP_THRUST = 1.22
-JUMP_FORCE = -16.0
-PAD_FORCE = -18.0
-BALL_FLIP_FORCE = 10.0
+
+PX_PER_UNIT = CELL / 30.0
+VEL_PX_PER_TICK = 60.0 * PX_PER_UNIT / PHYSICS_TPS  # == PX_PER_UNIT at 60 TPS
+
+# Cube: base gravity accel. Bible §1.4 single-source estimate (lily-pi/
+# GeometryPhysics, not a verified decompiled constant): ~72 blocks/s^2.
+# 72 blocks/s^2 * CELL(px/block) / PHYSICS_TPS^2 == 1.0 exactly at 60 TPS,
+# which is what this constant already was — kept as-is, now sourced.
+GRAVITY = 72.0 * CELL / (PHYSICS_TPS ** 2)
+
+# Ship: bible §1.4 calls ship acceleration "genuinely unresolved... don't
+# rely on it," citing lily-pi/GeometryPhysics's single-source estimate of
+# ~25 blocks/s^2 (~1/3 of cube's rate). SHIP_THRUST has no bible figure at
+# all (only the two *resulting* max velocities, 8G up / -6.4G down, are
+# documented — see SHIP_MAX_RISE/SHIP_MAX_FALL below) so its magnitude
+# keeps the old SHIP_THRUST/SHIP_GRAVITY ratio (~1.694) from before this
+# retune, applied to the new gravity value.
+SHIP_GRAVITY = 25.0 * CELL / (PHYSICS_TPS ** 2)  # single-source estimate
+SHIP_THRUST = SHIP_GRAVITY * 1.694444  # ratio-preserved; no bible figure
+
+# Cube jump velocity, 1x speed portal: bible §1.4 table, 11.18G.
+JUMP_FORCE = -11.18 * VEL_PX_PER_TICK
+# Pads: no distinct bible figure (the bible documents gamemode click
+# velocities, not a separate pad table) — ratio to JUMP_FORCE preserved
+# from the pre-retune tuning (pads hit ~12% harder than the yellow orb).
+PAD_FORCE = JUMP_FORCE * 1.125
+# Ball click velocity, 1x speed: bible §1.4 / §1.3, "3.354G (3/10 of cube)".
+BALL_FLIP_FORCE = 3.354 * VEL_PX_PER_TICK
 DASH_SPEED = 16.0
+# Dash duration: not given numerically anywhere in the bible (only
+# qualitative orb-buffering behavior around dash orbs, §2.4) — unchanged.
 DASH_TIME = 9
 # A dash now runs until something stops it (an S Block, a wall, death),
 # so the per-tick countdown is seeded with a value it can never reach.
 DASH_TIMER_INFINITE = 10 ** 9
+# Wave: bible §1.4, "Normal trail = 45 degrees" — already matched, kept.
 WAVE_ANGLE = 45.0
 PLAYER_START_GX = 3
-UFO_JUMP_FORCE = -13.5
+# UFO: bible §1.4, "constant 7G at every speed portal" — this single
+# value is now used for BOTH the grounded launch and the midair flap
+# (see player/core.py's _apply_mode_physics, MODE_UFO branch).
+UFO_JUMP_FORCE = -7.0 * VEL_PX_PER_TICK
 SPIDER_TELEPORT_RANGE = 6  # cells (legacy; teleports are now unbounded)
-# Robot: held thrust applied each tick while the button is down, limited
-# by a flight budget (seconds) that refills on landing.
-ROBOT_THRUST = 1.45
+# Robot: bible §1.4, "Hold velocity 5.59G (1/2 of cube jump)... gravity
+# disabled while held." Repurposed from a per-tick thrust subtracted
+# against gravity into the fixed hold velocity itself (gravity is now
+# skipped entirely while the hold is active — see core.py).
+ROBOT_THRUST = 5.59 * VEL_PX_PER_TICK
 ROBOT_FLIGHT_SECONDS = 1.5
 
-# Mini icon (size == MINI_PLAYER_SIZE): matches GD's slightly floatier mini
-# feel. Gravity/continuous-force terms are scaled down a touch (values <1
-# mean "less pull"); instantaneous jump/flip impulses are scaled down a
-# touch too; wave pitches its nose more steeply and ramps vy a bit faster.
-MINI_GRAVITY_SCALE = 0.92
+# Per-mode max-fall / max-rise magnitudes (bible §1.3 table). Modes not
+# listed here (Wave has no gravity; Spider's fall is defined by its
+# instant teleport, not acceleration, per §1.4) don't use a fall clamp.
+MAX_FALL_BOX = 15.0 * VEL_PX_PER_TICK      # Cube / Ball / Robot / Spider: -15G
+MAX_FALL_UFO = 6.4 * VEL_PX_PER_TICK       # UFO: -6.4G
+MAX_FALL_SWING = 8.0 * VEL_PX_PER_TICK     # Swing: -8G
+SHIP_MAX_RISE = 8.0 * VEL_PX_PER_TICK      # Ship (holding): 8G
+SHIP_MAX_FALL = 6.4 * VEL_PX_PER_TICK      # Ship (released): -6.4G
+# Swing click: bible §1.4, "multiplies the y-velocity by 0.8, then
+# toggles the gravity" — applied in core.py's MODE_SWING branch.
+SWING_VY_MULTIPLIER = 0.8
+
+# Mini icon (size == MINI_PLAYER_SIZE): bible §1.6 states mini's *hitbox*
+# scale numerically (0.6x hazard box — see the hitbox checkpoint) but
+# says its per-gamemode physics multiplier "beyond hitbox scale is
+# undocumented... described only qualitatively." These two scales are
+# therefore retained as pre-retune, qualitative-only tuning, not sourced
+# to a bible number: GD's mini isn't floatier — it falls/rises FASTER
+# while its jump/flip impulses are a touch weaker.
+MINI_GRAVITY_SCALE = 1.12
 MINI_JUMP_SCALE = 0.94
-MINI_WAVE_ANGLE_SCALE = 1.3
+# Bible §1.6: "Wave takes sharper diagonals (~63.43 degrees vs 45)" in
+# mini mode — an exact 2:1-slope figure, so this scale is now sourced:
+# 63.43 / WAVE_ANGLE(45).
+MINI_WAVE_ANGLE_SCALE = 63.43 / 45.0
+# No bible figure for how much faster mini's wave vy ramps — qualitative
+# only, retained from pre-retune tuning.
 MINI_WAVE_VY_SCALE = 1.15
 
 # Player trail: solid (no fade) while on screen; samples further behind
@@ -71,7 +139,9 @@ MINI_WAVE_VY_SCALE = 1.15
 TRAIL_MAX_DISTANCE = WIDTH * 3
 
 # Orb / pad strength multipliers relative to JUMP_FORCE / PAD_FORCE.
-# Mirrors GD: pink = small, yellow = medium, red = big.
+# Mirrors GD: pink = small, yellow = medium, red = big. No bible figure
+# exists for these ratios (the bible documents gamemode click velocities,
+# not per-orb-color scales) — retained from pre-retune tuning.
 ORB_PINK_SCALE = 0.75
 ORB_RED_SCALE = 1.35
 PAD_PINK_SCALE = 0.75
@@ -162,6 +232,9 @@ T_DASH_ORB = "dash_orb"          # green dash: hold to dash
 T_DASH_ORB_GRAV = "dash_orb_grav"  # pink dash: dash, flip gravity on release
 T_SPIDER_ORB = "spider_orb"
 T_TELEPORT_ORB = "teleport_orb"
+# GD "orange" teleport portal: same group-linked pairing as the teleport
+# orb, but fires the instant it's touched — no click needed.
+T_TELEPORT_PORTAL = "teleport_portal"
 T_PAD = "pad"                    # yellow
 T_PINK_PAD = "pink_pad"
 T_RED_PAD = "red_pad"
@@ -202,6 +275,7 @@ T_PULSE_TRIGGER = "pulse_trigger"
 T_ROTATE_TRIGGER = "rotate_trigger"
 T_FOLLOW_TRIGGER = "follow_trigger"
 T_TIME_WARP = "time_warp"
+T_BLACKOUT_TRIGGER = "blackout_trigger"
 # Editor-only helpers (inert at play time).
 T_JUMP_PREDICTOR = "jump_predictor"
 T_BOT_CHECKPOINT = "bot_checkpoint"
@@ -214,7 +288,7 @@ T_DASH_STOP = "dash_stop"
 DECORATION_TYPES = frozenset({T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW})
 TRIGGER_TYPES = frozenset({T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER,
                            T_COLOR_TRIGGER, T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
-                           T_TIME_WARP, T_FOLLOW_TRIGGER})
+                           T_TIME_WARP, T_FOLLOW_TRIGGER, T_BLACKOUT_TRIGGER})
 SOLID_TYPES = frozenset({T_BLOCK, T_SLAB})
 # Slopes have diagonal collision handled by a dedicated pass.
 SLOPE_TYPES = frozenset({T_SLOPE})
@@ -224,6 +298,10 @@ ORB_TYPES = frozenset({T_ORB, T_PINK_ORB, T_RED_ORB, T_BLUE_ORB, T_GREEN_ORB,
                        T_TELEPORT_ORB})
 DASH_ORB_TYPES = frozenset({T_DASH_ORB, T_DASH_ORB_GRAV})
 PAD_TYPES = frozenset({T_PAD, T_PINK_PAD, T_RED_PAD, T_BLUE_PAD, T_SPIDER_PAD})
+# Group-linked teleport pair types: the orb requires a click, the portal
+# fires automatically on touch. Both share the same group/dest pairing
+# machinery (editor Link tool, group-id allocation, level normalization).
+TELEPORT_LINK_TYPES = frozenset({T_TELEPORT_ORB, T_TELEPORT_PORTAL})
 COLLECTIBLE_TYPES = frozenset({T_COIN})
 EDITOR_ONLY_TYPES = frozenset({T_JUMP_PREDICTOR, T_BOT_CHECKPOINT})
 
@@ -253,14 +331,51 @@ MODE_PORTAL_TYPES = frozenset(MODE_FROM_TYPE.keys())
 ALL_MODES = (MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO,
              MODE_SPIDER, MODE_SWING, MODE_ROBOT)
 
-# Speed portal px/tick values.  Slow / normal / fast / faster are the
-# historical tunings (levels depend on them); fastest is the GD 4x tier.
+# ---------------------------------------------------------------------------
+# Hitboxes (physics bible §3.2)
+# ---------------------------------------------------------------------------
+# The OUTER rect (full sprite size, rotated with the player) already stands
+# in for the bible's "red" hazard hitbox — it's what triggers hazards/orbs/
+# pads/triggers (see player.core.Player.rect / _outer_obb_corners). The
+# bible's per-mode INNER "blue" solid hitbox is documented as a fraction of
+# that red box (units, §3.2 table), not an absolute size, so it translates
+# cleanly to a per-(mode, mini) fraction of the existing outer box instead of
+# a flat 0.50 for every mode:
+#   box modes (Cube/Ship/Ball/UFO/Robot/Swing): normal 9/30, mini 10/18
+#   Wave:                                        normal 3/10, mini 3/6
+#   Spider:                                       normal 9/27.5, mini 10/16.5
+#     (mini-red 16.5 is the one figure GD Docs itself flags uncertain)
+# Note the counter-intuitive direction in every row: mini SHRINKS the red
+# (hazard) box but GROWS the blue (solid) box relative to it, so minis are
+# safer around hazards but slightly worse squeezing through solid gaps —
+# exactly the effect this fraction table now reproduces.
+HITBOX_SOLID_FRACTION = {
+    # mode: (normal_fraction, mini_fraction)
+    MODE_CUBE: (9 / 30, 10 / 18),
+    MODE_SHIP: (9 / 30, 10 / 18),
+    MODE_BALL: (9 / 30, 10 / 18),
+    MODE_UFO: (9 / 30, 10 / 18),
+    MODE_ROBOT: (9 / 30, 10 / 18),
+    MODE_SWING: (9 / 30, 10 / 18),
+    MODE_WAVE: (3 / 10, 3 / 6),
+    MODE_SPIDER: (9 / 27.5, 10 / 16.5),
+}
+# Fallback for any mode not in the table above (there shouldn't be one).
+SOLID_HITBOX_FRACTION = 9 / 30
+
+# Speed portal px/tick values. Bible §1.8 (community-measured, via
+# move-trigger testing / official Fandom wiki): the portal labels are
+# misleading multiples of 1x baseline (BASE_MOVE_SPEED) —
+# 0.5x=~0.807x, 1x=1.0x, 2x=~1.243x, 3x=~1.502x, 4x=~1.849x. Ratios are
+# more reliable than the bible's absolute blocks/sec figures (which carry
+# measurement error across sources), so BASE_MOVE_SPEED anchors 1x and
+# every other tier is BASE_MOVE_SPEED * ratio.
 SPEED_VALUES = {
-    T_SPEED_SLOW: 4.0,
-    T_SPEED_NORMAL: 5.0,
-    T_SPEED_FAST: 6.7,
-    T_SPEED_FASTER: 8.4,
-    T_SPEED_FASTEST: 9.6,
+    T_SPEED_SLOW: BASE_MOVE_SPEED * 0.807,
+    T_SPEED_NORMAL: BASE_MOVE_SPEED * 1.0,
+    T_SPEED_FAST: BASE_MOVE_SPEED * 1.243,
+    T_SPEED_FASTER: BASE_MOVE_SPEED * 1.502,
+    T_SPEED_FASTEST: BASE_MOVE_SPEED * 1.849,
 }
 
 # ---------------------------------------------------------------------------
@@ -351,6 +466,7 @@ C_DASH_ORB = (110, 255, 110)
 C_DASH_ORB_GRAV = (255, 80, 220)
 C_SPIDER_ORB = (190, 120, 255)
 C_TELEPORT_ORB = (120, 240, 255)
+C_TELEPORT_PORTAL = (255, 165, 60)
 C_PAD = (255, 220, 40)
 C_PINK_PAD = (255, 140, 210)
 C_RED_PAD = (255, 70, 70)
@@ -394,6 +510,7 @@ C_COLOR_TRIGGER = (255, 200, 140)
 C_PULSE_TRIGGER = (255, 90, 200)
 C_ROTATE_TRIGGER = (180, 255, 100)
 C_FOLLOW_TRIGGER = (120, 220, 200)
+C_BLACKOUT_TRIGGER = (40, 40, 45)
 C_TIME_WARP = (200, 140, 255)
 C_JUMP_PREDICTOR = (255, 235, 120)
 C_BOT_CHECKPOINT = (120, 230, 255)

@@ -29,7 +29,8 @@ import time
 
 from .constants import (
     LEVELS_DIR, LEVEL_FORMAT_VERSION, DIFFICULTIES, LEGACY_DEMON_TARGET,
-    T_TELEPORT_ORB, T_COIN, T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_CHECKPOINT,
+    T_TELEPORT_ORB, T_TELEPORT_PORTAL, TELEPORT_LINK_TYPES,
+    T_COIN, T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_CHECKPOINT,
     T_ORB, T_BLUE_ORB, T_GREEN_ORB,
 )
 from . import objects as _registry
@@ -158,7 +159,7 @@ def normalize_object(o):
         out["sx"] = sx
         out["sy"] = sy
     # Legacy teleport-orb ``link`` -> ``group_id`` before the schema pass.
-    if t == T_TELEPORT_ORB:
+    if t in TELEPORT_LINK_TYPES:
         src = dict(o)
         src["group_id"] = get_group_id(o)
         if not src.get("dest"):
@@ -183,6 +184,8 @@ def normalize_object(o):
         out["group"] = int(o["group"])
     if o.get("invisible"):
         out["invisible"] = True
+    if o.get("_bot_only"):
+        out["_bot_only"] = True
     return out
 
 
@@ -224,6 +227,8 @@ def _int_field(meta, key, lo=0, hi=None):
 
 def _migrate(data):
     """Upgrade an older level's META dict to the current schema."""
+    if not isinstance(data, dict):
+        data = {}
     meta = _default_meta(data.get("name", "Untitled"))
     for k, v in data.items():
         if k != "objects":
@@ -263,7 +268,10 @@ _OBJECT_RENAMES = {
 
 def _migrate_objects(raw_objects, from_version):
     """Return normalized objects, applying type renames for old files."""
-    objs = [o for o in raw_objects if o.get("t") != T_CHECKPOINT]
+    if not isinstance(raw_objects, list):
+        raw_objects = []
+    objs = [o for o in raw_objects
+            if isinstance(o, dict) and "t" in o and o.get("t") != T_CHECKPOINT]
     try:
         from_version = int(from_version or 0)
     except (TypeError, ValueError):
@@ -324,6 +332,8 @@ def load_level_full(path):
     """Return ``(meta, objects)`` for a level file."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
+    if not isinstance(data, dict):
+        data = {}
     meta = _migrate(data)
     objects = _migrate_objects(data.get("objects", []), data.get("v", 0))
     return meta, objects
@@ -470,9 +480,10 @@ def _smallest_unused(used):
 
 
 def next_group_id(objects):
-    """Smallest unused teleport-orb group id (reads legacy ``link`` too)."""
+    """Smallest unused teleport-orb/portal group id (reads legacy ``link``
+    too)."""
     return _smallest_unused({get_group_id(o) for o in objects
-                             if o["t"] == T_TELEPORT_ORB
+                             if o["t"] in TELEPORT_LINK_TYPES
                              and get_group_id(o) > 0})
 
 

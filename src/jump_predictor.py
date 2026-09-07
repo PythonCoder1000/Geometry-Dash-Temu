@@ -196,8 +196,12 @@ def _snap_spawn_y(objects, probe_gx: int, probe_gy: int,
     return float(best[1])
 
 
-def predict(objects, probe):
+def predict(objects, probe, params=None):
     """Simulate one click at ``probe``'s cell; return a result dict.
+
+    ``params`` should be the level's :class:`~src.physics.PhysicsParams`
+    (from ``meta["physics"]``) so the probe matches the physics the real
+    playthrough uses; ``None`` falls back to vanilla defaults.
 
     Returned keys:
       ``samples``     list of (x_px, y_px, size_px) per simulated frame
@@ -248,7 +252,7 @@ def predict(objects, probe):
     # source of "not accurate at all" in earlier passes).
     detected_speed = detect_speed(world, gx)
 
-    sim = SimPlayer(world)
+    sim = SimPlayer(world, params=params)
     sim.mode = mode
     sim.grav = grav
     sim.size = size
