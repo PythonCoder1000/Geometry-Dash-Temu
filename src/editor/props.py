@@ -11,7 +11,7 @@ import pygame
 
 from ..constants import (
     WIDTH, C_WHITE, C_GRAY, C_BTN, C_DANGER, MOVE_CURVE_SPEED_MAX,
-    T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TELEPORT_ORB,
+    T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, TELEPORT_LINK_TYPES,
 )
 from ..graphics import txt, draw_obj, lighter
 from ..geometry import obj_scale, normalize_rotation
@@ -102,11 +102,21 @@ class PropPanel:
                 else:
                     self.rows.append(_value_row(y, f.key, f.label, f))
                 y += ROW_H
+                if f.default_from:
+                    # Fields like "Target row" / "Spawn row" snapshot the
+                    # object's own x/y at placement time and don't follow it
+                    # if the object is later moved (e.g. by a Move Trigger)
+                    # — this re-snaps them to the object's current cell.
+                    self.rows.append(_button_row(
+                        y, f"Resync {f.label} to current pos",
+                        "sync_field", arg=(f.key, f.default_from),
+                        color=(80, 90, 60)))
+                    y += ROW_H
             if t in (T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER):
                 self.rows.append(_button_row(y, "Set targets (Link tool)", "link", color=(120, 80, 190)))
                 y += ROW_H
-            elif t == T_TELEPORT_ORB:
-                self.rows.append(_button_row(y, "Link partner orb", "link", color=(120, 80, 190)))
+            elif t in TELEPORT_LINK_TYPES:
+                self.rows.append(_button_row(y, "Link partner orb/portal", "link", color=(120, 80, 190)))
                 y += ROW_H
             if single is not None and t == T_MOVE_TRIGGER:
                 self.rows.append(Row("curve", "curve", "Speed curve",
@@ -297,7 +307,7 @@ class PropPanel:
                     ops.toggle_flag(objs, row.key)
                 return True
             if row.kind == "button" and row.rect.collidepoint(pos):
-                session.panel_action(row.action)
+                session.panel_action(row.action, row.arg)
                 return True
             if row.kind == "stack":
                 single = objs[0]

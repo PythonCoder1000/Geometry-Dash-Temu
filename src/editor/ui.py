@@ -9,13 +9,13 @@ import pygame
 
 from ..constants import (
     WIDTH, HEIGHT, C_WHITE, C_GRAY, C_BTN, C_DANGER, C_PUBLISH, C_GRID,
-    T_TELEPORT_ORB,
+    TELEPORT_LINK_TYPES,
 )
-from ..graphics import txt, draw_obj, lighter, darker
+from ..graphics import txt, draw_obj, lighter, darker, draw_bevel_rect
 from ..objects import PALETTE_CATEGORIES, TYPE_NAMES, TYPE_TIPS
 from .state import (
     MODE_BUILD, MODE_EDIT, MODE_DELETE, TOOL_LINK,
-    TOOL_BOT_PATH, TOP_H, BAR_Y, SIDE_W,
+    TOOL_BOT_PATH, TOOL_MUSIC_PREVIEW, TOP_H, BAR_Y, SIDE_W,
 )
 from . import music_names  # noqa: F401  (import side effect free)
 
@@ -26,6 +26,7 @@ C_MODE_EDIT = (70, 160, 100)
 C_MODE_DELETE = (200, 70, 70)
 C_TOGGLE_ON = (70, 150, 220)
 C_TOGGLE_OFF = (46, 48, 74)
+C_ACTIVE_RING = (255, 218, 60)   # selection ring — reads at a glance in the palette
 
 # Bottom bar geometry.
 MODE_COL_X = 8
@@ -66,10 +67,21 @@ def draw_button(screen, b, mpos, pulse=0):
         col = lighter(col, 35)
     elif hov:
         col = lighter(col, 20)
-    pygame.draw.rect(screen, darker(col, 45), r.move(0, 2), border_radius=6)
-    pygame.draw.rect(screen, col, r, border_radius=6)
-    if b.active:
-        pygame.draw.rect(screen, C_WHITE, r, 2, border_radius=6)
+    radius = min(10, min(r.w, r.h) // 3)
+    pygame.draw.rect(screen, darker(col, 50), r.move(0, 3), border_radius=radius)
+    # The selected button gets a bright ring, not just a fatter white one:
+    # in the BUILD palette every tile shares a base colour, so a 2-vs-3 px
+    # width difference is not enough to find the current object at a glance.
+    if b.disabled:
+        ring = None
+    elif b.active:
+        ring = C_ACTIVE_RING
+    else:
+        ring = C_WHITE
+    draw_bevel_rect(screen, r, col, radius=radius,
+                    outline=2 if not b.active else 3,
+                    bevel=max(2, min(r.w, r.h) // 8),
+                    line_col=ring)
     if b.sprite is not None:
         s = min(r.w, r.h) - 6
         draw_obj(screen, b.sprite, r.x + (r.w - s) // 2, r.y + (r.h - s) // 2,
@@ -159,19 +171,24 @@ def layout_side(st):
     bts = []
     y = TOP_H + 10
     items = [
-        ("Swipe", "toggle_swipe", st.swipe),
-        ("Rotate", "toggle_rotate", st.rotate_drag),
-        ("Free", "toggle_free", st.free_move),
-        ("Grid", "toggle_grid", st.show_grid),
-        ("Hitbox", "toggle_hitbox", st.show_hitboxes),
-        ("Zoom +", "zoom_in", False),
-        ("Zoom -", "zoom_out", False),
-        ("1:1", "zoom_reset", False),
+        ("Swipe", "toggle_swipe", st.swipe, None),
+        ("Rotate", "toggle_rotate", st.rotate_drag, None),
+        ("Free", "toggle_free", st.free_move, None),
+        ("Grid", "toggle_grid", st.show_grid, None),
+        ("Hitbox", "toggle_hitbox", st.show_hitboxes, None),
+        ("No Dmg", "toggle_noclip", st.noclip, None),
+        ("Music @", "tool", st.edit_tool == TOOL_MUSIC_PREVIEW, TOOL_MUSIC_PREVIEW),
+        ("Zoom +", "zoom_in", False, None),
+        ("Zoom -", "zoom_out", False, None),
+        ("1:1", "zoom_reset", False, None),
     ]
-    for label, action, active in items:
+    for label, action, active, arg in items:
+        tip = ("Click the canvas to hear the music at that point in the "
+               "level (accounts for speed portals & teleports)"
+               if arg is TOOL_MUSIC_PREVIEW else "")
         bts.append(Button(pygame.Rect(6, y, SIDE_W - 12, 36), label, action,
                           C_TOGGLE_ON if active else C_TOGGLE_OFF, active=active,
-                          small=True))
+                          arg=arg, tip=tip, small=True))
         y += 42
     return bts
 
@@ -340,7 +357,7 @@ def draw_bottom(screen, st, buttons, mpos):
         name = TYPE_NAMES.get(st.selected_type, st.selected_type)
         txt(screen, f"Placing: {name}   ·   Tab / Shift+Tab: category   ·   "
             f"1-9: pick   ·   R / Q: rotate", CONTENT_X, HEIGHT - 18, 11, C_GRAY)
-        if st.selected_type == T_TELEPORT_ORB:
+        if st.selected_type in TELEPORT_LINK_TYPES:
             txt(screen, f"next group {st.group_id_counter}", WIDTH - 140,
                 HEIGHT - 18, 11, C_GRAY)
     elif st.mode == MODE_EDIT:
@@ -380,7 +397,6 @@ def draw_toast(screen, st):
     if st.msg_timer > 0:
         w = max(200, len(st.msg) * 8 + 30)
         rr = pygame.Rect(WIDTH // 2 - w // 2, BAR_Y - 36, w, 26)
-        pygame.draw.rect(screen, (0, 0, 0, 0), rr)
         s = pygame.Surface(rr.size, pygame.SRCALPHA)
         s.fill((0, 0, 0, 170))
         screen.blit(s, rr.topleft)

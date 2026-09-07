@@ -13,6 +13,7 @@ MODES = (MODE_BUILD, MODE_EDIT, MODE_DELETE)
 TOOL_SELECT = "select"
 TOOL_LINK = "link"
 TOOL_BOT_PATH = "bot_path"
+TOOL_MUSIC_PREVIEW = "music_preview"
 
 ZOOM_MIN = 0.3
 ZOOM_MAX = 3.0
@@ -56,6 +57,8 @@ class EditorState:
         self.rotate_drag = False
         self.free_move = False
         self.delete_filter = False       # delete only the active build type
+        self.noclip = False              # test-play invincibility (editor only)
+        self.music_preview_offset = None  # seconds; None when not previewing
         self.active_cat = 0
         self.palette_page = 0
         self.selected_type = PALETTE_CATEGORIES[0][1][0]

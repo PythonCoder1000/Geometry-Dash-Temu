@@ -5,10 +5,10 @@ import math
 import pygame
 
 from ..constants import (
-    WIDTH, HEIGHT, C_GRID, C_WHITE,
+    WIDTH, HEIGHT, C_GRID, C_WHITE, CELL, PLAYER_START_GX,
     T_BLOCK, T_SLAB, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW, T_END,
     T_MOVE_TRIGGER, T_CAMERA_TRIGGER, T_MODE_DUAL, T_ROTATE_TRIGGER,
-    T_FOLLOW_TRIGGER, SOLID_HITBOX_FRACTION, T_TELEPORT_ORB,
+    T_FOLLOW_TRIGGER, SOLID_HITBOX_FRACTION, TELEPORT_LINK_TYPES,
 )
 from ..graphics import draw_bg, draw_obj, draw_end_wall
 from ..geometry import (
@@ -17,7 +17,13 @@ from ..geometry import (
 from ..levels import get_group_id
 from ..objects import active_start
 from ..jump_predictor import find_probe, predict, draw_overlay
-from .state import TOP_H, BAR_Y, MODE_BUILD, MODE_DELETE, TOOL_LINK, TOOL_BOT_PATH
+from ..physics import PhysicsParams
+from ..play import x_at_time, real_time_to_x
+from .. import music
+from .state import (
+    TOP_H, BAR_Y, MODE_BUILD, MODE_DELETE, TOOL_LINK, TOOL_BOT_PATH,
+    TOOL_MUSIC_PREVIEW,
+)
 from . import ops
 
 CANVAS_RECT = pygame.Rect(0, TOP_H, WIDTH, BAR_Y - TOP_H)
@@ -150,7 +156,7 @@ def render_jump_predictor(screen, st):
     probe = find_probe(st.objects)
     if probe is None:
         return
-    result = predict(st.objects, probe)
+    result = predict(st.objects, probe, params=PhysicsParams.from_meta(st.level_meta))
     draw_overlay(screen, result, st.cam_x, st.cam_y, st.zoom, clip_rect=CANVAS_RECT,
                  show_hitbox=bool(probe.get("show_hitbox")))
     if result is None:
@@ -273,7 +279,7 @@ def render_selection(screen, st):
         if o.get("oid"):
             from ..graphics import txt
             txt(screen, f"#{o['oid']}", cx - w // 2 + 2, cy - h // 2 - 12, 10, (200, 255, 200))
-        if o["t"] == T_TELEPORT_ORB and get_group_id(o):
+        if o["t"] in TELEPORT_LINK_TYPES and get_group_id(o):
             from ..graphics import txt
             txt(screen, f"g{get_group_id(o)}", cx + w // 2 - 16, cy - h // 2 - 12, 10, (255, 230, 150))
     if single is None:
@@ -298,6 +304,73 @@ def render_selection(screen, st):
         screen.blit(layer, ghost.topleft)
         pygame.draw.rect(screen, (140, 230, 255), ghost, 2)
         pygame.draw.line(screen, (140, 230, 255), (cx, cy), (cx, gy + e // 2), 2)
+
+
+def render_music_playhead(screen, st):
+    """A vertical line that scrubs across the canvas in real time while
+    the "Music @" tool is previewing, so you can watch where in the
+    level the sound you're hearing actually is — moving at the speed a
+    real player would (speed portals / warps / teleports included),
+    not just a static marker at the clicked cell."""
+    if st.edit_tool != TOOL_MUSIC_PREVIEW or st.music_preview_offset is None:
+        return
+    if not music.is_playing():
+        return
+    pos_ms = music.get_pos_ms()
+    if pos_ms < 0:
+        return
+    cur_song_t = st.music_preview_offset + pos_ms / 1000.0
+    base = float(PhysicsParams.from_meta(st.level_meta).base_move_speed)
+    default_x = float(PLAYER_START_GX * CELL)
+    anchor_t = real_time_to_x(st.objects, default_x, base)
+    x_px = x_at_time(st.objects, cur_song_t + anchor_t, base)
+    e = st.eff_cell
+    sx = int(x_px / CELL * e - st.cam_x)
+    prev_clip = screen.get_clip()
+    screen.set_clip(CANVAS_RECT)
+    gold = (255, 215, 90)
+    pygame.draw.line(screen, gold, (sx, TOP_H), (sx, BAR_Y), 2)
+    from ..graphics import txt
+    mins, secs = divmod(int(cur_song_t), 60)
+    txt(screen, f"{mins}:{secs:02d}", sx + 6, TOP_H + 4, 12, gold, shadow=True)
+    screen.set_clip(prev_clip)
+
+
+def render_move_previews(screen, st):
+    """Ghost every Move Trigger target at its post-move position — for
+    triggers with "Show ghost" on (persists in the level) plus the
+    currently-selected Move Trigger (so editing one always previews it).
+    Editor-only; never rendered during play."""
+    single = st.selected[0] if len(st.selected) == 1 else None
+    triggers = [o for o in st.objects
+                if o["t"] == T_MOVE_TRIGGER and o.get("show_ghost")]
+    if (single is not None and single["t"] == T_MOVE_TRIGGER
+            and not any(t is single for t in triggers)):
+        triggers.append(single)
+    if not triggers:
+        return
+    by_oid = {o.get("oid"): o for o in st.objects if o.get("oid")}
+    e = st.eff_cell
+    prev_clip = screen.get_clip()
+    screen.set_clip(CANVAS_RECT)
+    layer = _overlay()
+    for trig in triggers:
+        oids = trig.get("target_oids") or ([trig["target_oid"]] if trig.get("target_oid") else [])
+        targets = [by_oid[oid] for oid in oids if oid in by_oid]
+        if not targets:
+            continue
+        first = targets[0]
+        dx = trig.get("tx", first["x"]) - first["x"]
+        dy = trig.get("ty", first["y"]) - first["y"]
+        for tgt in targets:
+            gsx = (tgt["x"] + dx) * e - st.cam_x
+            gsy = (tgt["y"] + dy) * e - st.cam_y
+            draw_obj(layer, tgt["t"], gsx, gsy, e, 0, tgt.get("r", 0), tgt,
+                     scale=obj_scale(tgt))
+            pygame.draw.rect(layer, (255, 200, 100, 255), (gsx, gsy, e, e), 1)
+    layer.set_alpha(150)
+    screen.blit(layer, (0, 0))
+    screen.set_clip(prev_clip)
 
 
 def render_marquee(screen, start, mpos):
@@ -332,6 +405,11 @@ def render_cursor(screen, st, mpos):
         pygame.draw.line(screen, red, (sx + e - 8, sy + 8), (sx + 8, sy + e - 8), 2)
     elif st.edit_tool == TOOL_LINK:
         pygame.draw.rect(screen, (200, 160, 255), (sx, sy, e, e), 2)
+    elif st.edit_tool == TOOL_MUSIC_PREVIEW:
+        gold = (255, 215, 90)
+        cx, cy = sx + e // 2, sy + e // 2
+        pygame.draw.line(screen, gold, (sx, cy), (sx + e, cy), 2)
+        pygame.draw.circle(screen, gold, (cx, cy), 5, 2)
     elif st.edit_tool == TOOL_BOT_PATH:
         amber = (255, 180, 60)
         pygame.draw.circle(screen, amber, mpos, 6, 2)

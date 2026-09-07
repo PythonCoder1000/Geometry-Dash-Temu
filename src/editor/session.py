@@ -24,21 +24,23 @@ import traceback
 import pygame
 
 from ..constants import (
-    WIDTH, FPS, LEVELS_DIR, T_START, T_TELEPORT_ORB,
+    WIDTH, LEVELS_DIR, T_START, TELEPORT_LINK_TYPES, T_MOVE_TRIGGER,
+    CELL, PLAYER_START_GX,
 )
 from ..graphics import make_stars, make_mountains
 from ..input_guard import ClickGuard
 from ..levels import (
     save_level, load_level_full, next_group_id,
     save_autosave, load_autosave, has_autosave, clear_autosave,
-    _default_meta,
+    _default_meta, _safe_filename,
 )
 from ..menus import (
     text_input_dialog, load_level_dialog, difficulty_picker, confirm_dialog,
     snippet_picker,
 )
 from ..objects import TYPE_NAMES, cycle_active_start, start_objects
-from ..play import run_play
+from ..physics import PhysicsParams
+from ..play import run_play, real_time_to_x
 from ..snippets import save_user_snippet, normalize_to_origin
 from .. import music, sfx, settings, prefs
 from . import ops, ui, render, music_names
@@ -46,10 +48,10 @@ from .dialogs import confirm_exit, show_error_modal, draw_shortcuts
 from .props import PropPanel
 from .state import (
     EditorState, MODE_BUILD, MODE_EDIT, MODE_DELETE, TOOL_SELECT, TOOL_LINK,
-    TOOL_BOT_PATH, TOP_H, BAR_Y, SIDE_W,
+    TOOL_BOT_PATH, TOOL_MUSIC_PREVIEW, TOP_H, BAR_Y, SIDE_W,
 )
 
-AUTOSAVE_INTERVAL = 30 * FPS     # frames between autosaves while dirty
+AUTOSAVE_INTERVAL_MS = 30_000    # wall-clock ms between autosaves while dirty
 AUTOSAVE_FLASH_FRAMES = 90
 ROTATE_SNAP_DEG = 15
 PAN_SPEED = 11
@@ -195,7 +197,7 @@ class EditorSession:
         if not name:
             return
         st.level_name = name
-        fn = name.lower().replace(" ", "_")
+        fn = _safe_filename(name)
         meta = dict(st.level_meta) if st.level_meta else _default_meta(name)
         meta["name"] = name
         self._stamp_author(meta)
@@ -223,7 +225,7 @@ class EditorSession:
             st.say("Publish cancelled", 120)
             return
         fn = (st.level_filename.replace(".json", "") if st.level_filename
-              else name.lower().replace(" ", "_"))
+              else _safe_filename(name))
         meta = dict(st.level_meta) if st.level_meta else _default_meta(name)
         meta.update(name=name, published=True, requested_difficulty=req,
                     verified=False, rated=False, suggested_difficulty="",
@@ -247,13 +249,35 @@ class EditorSession:
     # ------------------------------------------------------------------
     def _run(self, suffix, **kw):
         st = self.st
+        st.music_preview_offset = None
         st.last_run_hitboxes.clear()
         st.last_run_mirror_hitboxes.clear()
         run_play(self.screen, self.clock, list(st.objects), st.level_name + suffix,
                  editor_test=True, level_music=st.level_music, meta=st.level_meta,
                  out_hitboxes=st.last_run_hitboxes,
-                 out_mirror_hitboxes=st.last_run_mirror_hitboxes, **kw)
+                 out_mirror_hitboxes=st.last_run_mirror_hitboxes,
+                 noclip=st.noclip, **kw)
         self.guard.reset()
+
+    def _preview_music_at(self, gx):
+        """Play the level's music from the moment a player would actually
+        reach cell ``gx``, without running a play session — integrating
+        speed portals, time-warp triggers, and teleport orbs/portals
+        (forward or backward) exactly like a real spawn does."""
+        st = self.st
+        if not st.level_music:
+            st.say("No music set for this level (F5 / Cycle Music to pick one)", 120)
+            return
+        base = float(PhysicsParams.from_meta(st.level_meta).base_move_speed)
+        default_x = float(PLAYER_START_GX * CELL)
+        target_x = float(gx) * CELL
+        offset = max(0.0, real_time_to_x(st.objects, target_x, base)
+                     - real_time_to_x(st.objects, default_x, base))
+        music.stop()
+        music.play_file(st.level_music, start_sec=offset)
+        st.music_preview_offset = offset
+        mins, secs = divmod(int(offset), 60)
+        st.say(f"Music preview @ cell {gx} -> {mins}:{secs:02d}", 150)
 
     def do_test(self, from_cursor=False):
         start_x = None
@@ -339,7 +363,7 @@ class EditorSession:
     def _select_type(self, t):
         st = self.st
         st.selected_type = t
-        if t == T_TELEPORT_ORB:
+        if t in TELEPORT_LINK_TYPES:
             st.group_id_counter = next_group_id(st.objects)
 
     def _set_mode(self, mode):
@@ -350,6 +374,9 @@ class EditorSession:
             st.drag = None
             if mode != MODE_EDIT:
                 st.clear_selection()
+                if st.edit_tool == TOOL_MUSIC_PREVIEW:
+                    music.stop()
+                    st.music_preview_offset = None
                 st.edit_tool = TOOL_SELECT
 
     def _delete_selection(self):
@@ -377,6 +404,9 @@ class EditorSession:
             return
         st.push_undo()
         new_start = cycle_active_start(st.objects, delta)
+        # A cached bot path was solved from the previous Start Pos — it's
+        # meaningless (often unwinnable outright) replayed from this one.
+        self.clear_bot_path()
         st.center_on_cell(new_start["x"], new_start["y"])
         was_open = st.props_open
         st.selected = [new_start]
@@ -469,6 +499,12 @@ class EditorSession:
         elif action == "tool":
             st.edit_tool = TOOL_SELECT if st.edit_tool == arg else arg
             st.pending_link = None
+            if st.edit_tool == TOOL_MUSIC_PREVIEW:
+                st.say("Click the canvas to preview the music there "
+                       "(Esc or toggle off to stop)", 150)
+            else:
+                music.stop()
+                st.music_preview_offset = None
         elif action == "snippet":
             pick = snippet_picker(self.screen, self.clock)
             self.guard.reset()
@@ -517,6 +553,10 @@ class EditorSession:
             n = len(st.last_run_hitboxes)
             st.say("Hitbox view " + ("ON" if st.show_hitboxes else "OFF")
                    + (f" ({n} frames)" if n else " — run Test or Bot to record"), 100)
+        elif action == "toggle_noclip":
+            st.noclip = not st.noclip
+            st.say("Ignore Damage " + ("ON — hazards/crashes won't kill you in Test"
+                                       if st.noclip else "OFF"), 100)
         elif action == "zoom_in":
             st.set_zoom(st.zoom + 0.2)
         elif action == "zoom_out":
@@ -541,7 +581,7 @@ class EditorSession:
                         "save", "publish", "load", "export"):
             self.pending.append(action)
 
-    def panel_action(self, action):
+    def panel_action(self, action, arg=None):
         st = self.st
         if action == "delete":
             self._delete_selection()
@@ -549,6 +589,12 @@ class EditorSession:
             st.props_open = False
         elif action == "link" and st.selected:
             self._start_link_on(st.selected[0])
+        elif action == "sync_field" and st.selected:
+            key, src = arg
+            st.push_undo()
+            for o in st.selected:
+                o[key] = o.get(src, o.get(key))
+            st.say(f"Synced {len(st.selected)} object(s) to current position", 90)
 
     def _run_pending(self):
         st = self.st
@@ -610,6 +656,11 @@ class EditorSession:
             elif st.pending_link is not None:
                 st.pending_link = None
                 st.say("Link cancelled", 60)
+            elif st.edit_tool == TOOL_MUSIC_PREVIEW:
+                st.edit_tool = TOOL_SELECT
+                music.stop()
+                st.music_preview_offset = None
+                st.say("Music preview stopped", 60)
             elif st.props_open:
                 st.props_open = False
             elif st.selected:
@@ -770,7 +821,7 @@ class EditorSession:
             st.push_undo()
             ops.place_object(st.objects, gx, gy, st.selected_type, st.rotation,
                              st.group_id_counter)
-            if st.selected_type == T_TELEPORT_ORB:
+            if st.selected_type in TELEPORT_LINK_TYPES:
                 st.group_id_counter = next_group_id(st.objects)
             st.last_brush_cell = (gx, gy)
             st.drag = ({"kind": "paint"} if st.swipe
@@ -785,6 +836,9 @@ class EditorSession:
                        else {"kind": "pan", "anchor": pos, "cam": (st.cam_x, st.cam_y)})
             return
         # ---- edit mode ----
+        if st.edit_tool == TOOL_MUSIC_PREVIEW:
+            self._preview_music_at(gx)
+            return
         if st.edit_tool == TOOL_LINK:
             st.pending_link, msg = ops.link_click(st.objects, gx, gy, st.pending_link)
             st.say(msg, 110)
@@ -875,8 +929,9 @@ class EditorSession:
                 hits = ops.objects_in_cells(st.objects, gx0, gy0, gx1, gy1)
                 if drag["add"]:
                     for h in hits:
-                        if h in st.selected:
-                            st.selected.remove(h)
+                        existing = ops.index_by_id(st.selected, h)
+                        if existing != -1:
+                            del st.selected[existing]
                         else:
                             st.selected.append(h)
                 else:
@@ -913,7 +968,7 @@ class EditorSession:
                 sx, sy = drag["start"].get(id(o), (o["x"], o["y"]))
                 nx, ny = sx + dx, sy + dy
                 if (o["x"], o["y"]) != (nx, ny):
-                    if o["t"] == "move_trigger":
+                    if o["t"] == T_MOVE_TRIGGER:
                         if "tx" in o:
                             o["tx"] += nx - o["x"]
                         if "ty" in o:
@@ -946,7 +1001,7 @@ class EditorSession:
             if drag["kind"] == "paint" and (gx, gy) != st.last_brush_cell:
                 ops.place_object(st.objects, gx, gy, st.selected_type, st.rotation,
                                  st.group_id_counter)
-                if st.selected_type == T_TELEPORT_ORB:
+                if st.selected_type in TELEPORT_LINK_TYPES:
                     st.group_id_counter = next_group_id(st.objects)
                 st.last_brush_cell = (gx, gy)
                 st.mark_dirty()
@@ -978,8 +1033,12 @@ class EditorSession:
         if st.autosave_toast_frames > 0:
             st.autosave_toast_frames -= 1
         if st.dirty:
-            st.autosave_timer += 1
-            if st.autosave_timer >= AUTOSAVE_INTERVAL:
+            # Wall-clock ms, not a rendered-frame count — the editor's
+            # frame rate follows the user's FPS cap (60/120/144/240/
+            # uncapped), so counting frames made the real autosave
+            # cadence scale with whatever cap was picked.
+            st.autosave_timer += self.clock.get_time()
+            if st.autosave_timer >= AUTOSAVE_INTERVAL_MS:
                 st.autosave_timer = 0
                 if self.autosave_now():
                     st.say("Auto-saved", 60)
@@ -999,6 +1058,8 @@ class EditorSession:
         if st.show_hitboxes:
             render.render_hitbox_overlay(s, st)
         render.render_bot_paths(s, st)
+        render.render_move_previews(s, st)
+        render.render_music_playhead(s, st)
         in_canvas = self.in_canvas(mpos)
         if st.pending_link:
             render.render_pending_link(s, st, mpos, in_canvas)
