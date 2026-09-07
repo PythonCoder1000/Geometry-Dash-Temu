@@ -264,11 +264,12 @@ def run_menu(screen, clock):
         stack_cx = WIDTH // 2
         stack_y = 280
         gap = 60
-        b_play = btn(screen, "PLAY", stack_cx, stack_y, 260, 50, C_BTN, mpos)
+        b_play = btn(screen, "PLAY", stack_cx, stack_y, 260, 50,
+                     (40, 170, 60), mpos)
         b_practice = btn(screen, "PRACTICE", stack_cx, stack_y + gap,
-                         260, 50, (90, 130, 90), mpos)
+                         260, 50, (80, 160, 70), mpos)
         b_edit = btn(screen, "LEVEL EDITOR", stack_cx, stack_y + 2 * gap,
-                     260, 50, (80, 100, 160), mpos)
+                     260, 50, C_BTN, mpos)
         if _show_rate:
             b_rate = btn(screen, "RATE LEVELS",
                          stack_cx, stack_y + 3 * gap,
@@ -647,7 +648,7 @@ def run_select(screen, clock, practice=False):
         # ---- top bar: search right, back bottom ----
         r_search = btn(screen, "Search", WIDTH - 90, 35, 140, 36,
                        (70, 100, 160), mpos, font_size=14)
-        r_help = icon_button(screen, None, WIDTH - 180, 35, 40, 36,
+        r_help = icon_button(screen, None, WIDTH - 180, 35, 40, 40,
                              (70, 100, 140), mpos)
         txt(screen, "?", r_help.centerx, r_help.centery, 20, C_WHITE,
             True, shadow=True)
@@ -1880,9 +1881,13 @@ def run_settings(screen, clock, on_fullscreen_change=None):
                 running = False
                 break
             if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                # consume_click() always accepts a fresh MOUSEBUTTONDOWN
+                # now (see ClickGuard.consume_click) — a residual entry
+                # click is instead suppressed via guard.mouse_held() for
+                # polled-state consumers. This check is currently a no-op
+                # kept so a future change to consume_click() doesn't need
+                # every call site touched.
                 if not guard.consume_click(ev):
-                    # Swallow residual entry click so pygame_gui doesn't
-                    # see it — widgets otherwise fire on screen entry.
                     continue
             if ev.type == pygame_gui.UI_BUTTON_PRESSED:
                 if ev.ui_element is fps_btn:

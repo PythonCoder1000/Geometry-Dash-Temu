@@ -78,6 +78,27 @@ def draw_outlined_poly(surf, pts, col, width=2, line_col=None):
     pygame.draw.polygon(surf, line_col or outline_col(col), pts, width)
 
 
+@functools.lru_cache(maxsize=256)
+def _corner_inset(radius, outline):
+    """How far in from the fill edge a bevel line must start to stay
+    inside a `radius` corner arc.
+
+    The binding row is the outermost one the bevel band covers, `outline`
+    px inside the panel edge: there the arc has already curved in by
+    ``radius - sqrt(radius**2 - (radius - outline)**2)``.  Returned
+    relative to the inner (post-outline) rect, so it is 0 for square
+    panels.
+    """
+    if radius <= 0:
+        return 0
+    dy = max(0, radius - outline)
+    dx = math.sqrt(max(0.0, radius * radius - dy * dy))
+    # +2 of slack: pygame rasterises the arc a hair tighter than the exact
+    # circle, and by a further pixel on the bottom/right edges, so the
+    # analytic figure on its own still leaks a couple of corner pixels.
+    return max(0, math.ceil(radius - dx) + 2 - outline)
+
+
 def draw_bevel_rect(surf, rect, col, radius=0, outline=2, bevel=None,
                     line_col=None):
     """Panel with a dark contour and a two-tone inner bevel.
@@ -89,18 +110,24 @@ def draw_bevel_rect(surf, rect, col, radius=0, outline=2, bevel=None,
     bevel = bevel if bevel is not None else max(1, min(rect.w, rect.h) // 12)
     pygame.draw.rect(surf, col, rect, border_radius=radius)
     inner = rect.inflate(-outline * 2, -outline * 2)
-    if inner.w > bevel * 2 and inner.h > bevel * 2:
+    # ``pygame.draw.line`` knows nothing about ``border_radius``, so on a
+    # rounded panel the bevel end-caps would spill past the corner arc and
+    # paint stray pixels on the background.  Pull the endpoints in far
+    # enough that the outermost row/column of each bevel band still sits
+    # inside the arc.
+    pad = max(bevel, _corner_inset(radius, outline))
+    if inner.w > pad * 2 and inner.h > pad * 2:
         half = max(1, bevel // 2)
         hi = lighter(col, BEVEL_LIGHTEN)
         lo = darker(col, BEVEL_DARKEN)
-        pygame.draw.line(surf, hi, (inner.left + bevel, inner.top + half),
-                         (inner.right - bevel, inner.top + half), bevel)
-        pygame.draw.line(surf, hi, (inner.left + half, inner.top + bevel),
-                         (inner.left + half, inner.bottom - bevel), bevel)
-        pygame.draw.line(surf, lo, (inner.left + bevel, inner.bottom - half),
-                         (inner.right - bevel, inner.bottom - half), bevel)
-        pygame.draw.line(surf, lo, (inner.right - half, inner.top + bevel),
-                         (inner.right - half, inner.bottom - bevel), bevel)
+        pygame.draw.line(surf, hi, (inner.left + pad, inner.top + half),
+                         (inner.right - pad, inner.top + half), bevel)
+        pygame.draw.line(surf, hi, (inner.left + half, inner.top + pad),
+                         (inner.left + half, inner.bottom - pad), bevel)
+        pygame.draw.line(surf, lo, (inner.left + pad, inner.bottom - half),
+                         (inner.right - pad, inner.bottom - half), bevel)
+        pygame.draw.line(surf, lo, (inner.right - half, inner.top + pad),
+                         (inner.right - half, inner.bottom - pad), bevel)
     if outline > 0:
         pygame.draw.rect(surf, line_col or outline_col(col), rect, outline,
                          border_radius=radius)
@@ -389,8 +416,12 @@ def _lerp_rgb(a, b, t):
 
 def btn(surf, label, cx, cy, w=180, h=46, col=C_BTN, mpos=None, disabled=False,
         font_size=20):
+    """GD-style pill button: chunky bevel fill, thick white ring, drop
+    shadow — the look of the game's PLAY / BUILD / EDIT chrome rather
+    than a flat web button."""
     r = pygame.Rect(cx - w // 2, cy - h // 2, w, h)
     hovered = (mpos is not None) and r.collidepoint(mpos) and not disabled
+    radius = h // 2
     if disabled:
         base = darker(col, 50)
         lbl_col = (160, 160, 170)
@@ -401,13 +432,13 @@ def btn(surf, label, cx, cy, w=180, h=46, col=C_BTN, mpos=None, disabled=False,
         t = _hover_t((cx, cy, label), 1.0 if hovered else 0.0)
         base = _lerp_rgb(col, hot, t) if t > 0.0 else col
         lbl_col = C_WHITE
-    pygame.draw.rect(surf, darker(base, 50), r.move(0, 3), border_radius=10)
-    pygame.draw.rect(surf, base, r, border_radius=10)
-    pygame.draw.rect(surf, lighter(base, 55), r, 2, border_radius=10)
+    pygame.draw.rect(surf, darker(base, 55), r.move(0, 4), border_radius=radius)
+    draw_bevel_rect(surf, r, base, radius=radius, outline=max(2, h // 15),
+                    bevel=max(2, h // 6),
+                    line_col=None if disabled else C_WHITE)
     if hovered:
-        gloss = pygame.Rect(r.x + 4, r.y + 3, r.w - 8, r.h // 3)
-        pygame.draw.rect(surf, (*lighter(base, 80), ), gloss, border_radius=6)
-    txt(surf, label, cx, cy, font_size, lbl_col, True)
+        draw_gloss(surf, r.inflate(-r.w // 4, -r.h // 3), alpha=70)
+    txt(surf, label, cx, cy, font_size, lbl_col, True, shadow=True)
     return r
 
 
@@ -558,20 +589,24 @@ def speaker_icon(size=22, muted=False):
 
 
 def icon_button(surf, icon, cx, cy, w=40, h=40, col=C_BTN, mpos=None, active=False):
-    """Square button with an icon centred — used for mute toggle etc.
+    """Round button with an icon centred — GD's gear / undo / redo chrome.
 
     `icon` may be None when the caller wants the chrome only and plans
     to draw its own glyph on top (e.g. the gear icon overlay on the
     main menu).
     """
-    r = pygame.Rect(cx - w // 2, cy - h // 2, w, h)
+    # The chrome is a circle of `min(w, h)`, so the hit rect is squared off
+    # to match — otherwise a non-square call leaves strips that click but
+    # show no button under the cursor.
+    radius = min(w, h) // 2
+    r = pygame.Rect(cx - radius, cy - radius, radius * 2, radius * 2)
     hovered = mpos is not None and r.collidepoint(mpos)
     base = lighter(col, 35) if hovered else col
     if active:
         base = darker(base, 20)
-    pygame.draw.rect(surf, darker(base, 50), r.move(0, 2), border_radius=8)
-    pygame.draw.rect(surf, base, r, border_radius=8)
-    pygame.draw.rect(surf, lighter(base, 55), r, 1, border_radius=8)
+    pygame.draw.circle(surf, darker(base, 55), (cx, cy + 3), radius)
+    draw_bevel_circle(surf, (cx, cy), radius, base,
+                      outline=max(2, radius // 6), line_col=C_WHITE)
     if icon is not None:
         ir = icon.get_rect(center=r.center)
         surf.blit(icon, ir)
