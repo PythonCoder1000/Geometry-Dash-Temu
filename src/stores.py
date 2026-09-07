@@ -261,13 +261,19 @@ class _HTTP:
             headers["Authorization"] = f"Bearer {self._token}"
         try:
             import requests  # type: ignore
-            resp = requests.request(method, url, data=data_bytes,
-                                    headers=headers, timeout=6.0)
+        except ImportError:
+            requests = None
+        if requests is not None:
+            try:
+                resp = requests.request(method, url, data=data_bytes,
+                                        headers=headers, timeout=6.0)
+            except requests.exceptions.RequestException:
+                return 0, {"error": "unreachable"}
             try:
                 return resp.status_code, resp.json()
             except ValueError:
                 return resp.status_code, {}
-        except ImportError:
+        else:
             import urllib.request
             import urllib.error
             req = urllib.request.Request(url, data=data_bytes,
