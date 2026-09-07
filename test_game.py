@@ -27,7 +27,8 @@ from src import constants as C
 from src.constants import (
     CELL, FPS, PLAYER_SIZE, GRAVITY, JUMP_FORCE, SPEED_VALUES,
     T_BLOCK, T_SLAB, T_SPIKE, T_HALF_SPIKE, T_SAW,
-    T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_BLACK_ORB, T_BLUE_ORB, T_GREEN_ORB,
+    T_ORB, T_DASH_ORB, T_TELEPORT_ORB, T_TELEPORT_PORTAL,
+    T_BLACK_ORB, T_BLUE_ORB, T_GREEN_ORB,
     T_PAD, T_BLUE_PAD, T_GRAV_UP, T_GRAV_DOWN, T_END, T_START, T_COIN, T_CHECKPOINT,
     T_MODE_CUBE, T_MODE_SHIP, T_MODE_BALL, T_MODE_WAVE, T_MODE_UFO, T_MODE_SPIDER,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
@@ -1147,8 +1148,9 @@ check("HumanBot probe index populated when probes exist",
 
 
 # ---------------------------------------------------------------------------
-# Dash rework: one global speed, no duration of its own, stopped by the
-# S Block rather than by releasing the button.
+# Dash rework: matches the player's current move speed (so it can't
+# desync from the music), no duration of its own, stopped by an S Block,
+# a wall, death, OR releasing the button.
 # ---------------------------------------------------------------------------
 section("Dash rework + S Block")
 from src.constants import (T_DASH_ORB_GRAV as _TDOG, T_DASH_STOP as _TDS,
@@ -1172,31 +1174,105 @@ def _run_to_dash(p, orb_gx, max_frames=60):
 
 _dp = Player(_dash_level([{"t": _TDO, "x": 6, "y": 9, "r": 0}]))
 check("dash orb starts a dash", _run_to_dash(_dp, 6))
-check("dash uses the single global dash speed",
-      abs(_dp.dash_vx - _DEF_PARAMS.dash_speed) < 1e-6)
+check("dash matches the player's current move speed",
+      abs(_dp.dash_vx - _dp.move_speed) < 1e-6)
 check("dash duration is the infinite sentinel",
       _dp.dash_timer > _DASH_INF - 100)
 _x_before = _dp.x
+_dp.update(False, False)
+check("releasing the button ends the dash", _dp.dash_timer == 0)
+_x_after_release = _dp.x
 for _ in range(20):
     _dp.update(False, False)
-check("releasing the button no longer ends the dash", _dp.dash_timer > 0)
-check("released dash keeps travelling at dash speed",
-      abs((_dp.x - _x_before) - 20 * _DEF_PARAMS.dash_speed) < 1e-6)
+check("after release, the player no longer travels at dash speed",
+      abs((_dp.x - _x_after_release) - 20 * _DEF_PARAMS.dash_speed) > 1.0)
 
 # S Block stops it, and the gravity variant still flips on that stop.
+# Held throughout so the dash isn't cut short by a release first.
 _sp_dash = Player(_dash_level([{"t": _TDOG, "x": 6, "y": 9, "r": 0},
                             {"t": _TDS, "x": 14, "y": 9, "r": 0}]))
 check("gravity dash orb starts a dash", _run_to_dash(_sp_dash, 6))
 _grav_before = _sp_dash.grav
 _stopped = False
-for _ in range(60):
-    _sp_dash.update(False, False)
+for _ in range(150):
+    _sp_dash.update(True, False)
     if _sp_dash.dash_timer == 0:
         _stopped = True
         break
 check("S Block stops an active dash", _stopped)
 check("gravity dash orb still flips gravity when an S Block ends the dash",
       _sp_dash.grav == -_grav_before)
+
+# Dash angle is clamped to ±70° off horizontal (never purely vertical).
+from src.player.core import _clamp_dash_angle_rad as _clamp_dash
+import math as _math_dash
+check("straight-up dash orb rotation clamps to -70deg off horizontal",
+      abs(_math_dash.degrees(_clamp_dash(270)) - (-70.0)) < 1e-6
+      or abs(_math_dash.degrees(_clamp_dash(-90)) - (-70.0)) < 1e-6)
+check("horizontal dash orb rotation is unaffected by the clamp",
+      abs(_clamp_dash(0)) < 1e-9)
+check("left-facing dash orb rotation stays left-facing after the clamp",
+      _math_dash.cos(_clamp_dash(180)) < 0)
+
+
+# ---------------------------------------------------------------------------
+# Orb buffering: a click fires at most ONE orb. Holding the button down
+# through a whole chain of orbs must not auto-fire every orb it touches —
+# only the orb near the actual click (or within its short buffer window).
+# ---------------------------------------------------------------------------
+section("Orb click buffering (one click, one orb)")
+_orb1_gx, _orb2_gx = 6, 10
+_buf_level = make_flat_level(40, extras=[
+    {"t": T_ORB, "x": _orb1_gx, "y": 9, "r": 0},
+    {"t": T_ORB, "x": _orb2_gx, "y": 9, "r": 0},
+])
+_bp = Player(_buf_level)
+# Ship mode: holding the button just thrusts every frame (no cube-style
+# "hold = bunny-hop on every landing" side effect), so this isolates orb
+# buffering from that unrelated ground-jump mechanic.
+_bp.mode = MODE_SHIP
+_pressed_once = False
+for _ in range(150):
+    orb1_left = _orb1_gx * CELL
+    about_to_touch = (orb1_left - (_bp.x + _bp.size)) <= 25
+    press_now = about_to_touch and not _pressed_once
+    if press_now:
+        _pressed_once = True
+    # Held continuously once pressed — never released — through both orbs.
+    _bp.update(_pressed_once, press_now)
+check("first orb in the chain fires from the single click",
+      (T_ORB, _orb1_gx, 9) in _bp.passed)
+check("second orb does NOT fire from the same continuous hold",
+      (T_ORB, _orb2_gx, 9) not in _bp.passed)
+
+
+# ---------------------------------------------------------------------------
+# Teleport portal: same group-linked pairing as the teleport orb, but
+# fires automatically on touch — no click required.
+# ---------------------------------------------------------------------------
+section("Auto teleport portal")
+_tp_dest_gx = 30
+_portal_level = make_flat_level(40, extras=[
+    {"t": T_TELEPORT_PORTAL, "x": 6, "y": 9, "group_id": 1},
+    {"t": T_TELEPORT_PORTAL, "x": _tp_dest_gx, "y": 9, "group_id": 1,
+     "dest": True},
+])
+_tpp = Player(_portal_level)
+for _ in range(80):
+    _tpp.update(False, False)   # never clicked — auto-run only
+check("teleport portal fires without any click",
+      _tpp.x > 20 * CELL)
+
+_orb_level = make_flat_level(40, extras=[
+    {"t": T_TELEPORT_ORB, "x": 6, "y": 9, "group_id": 1},
+    {"t": T_TELEPORT_ORB, "x": _tp_dest_gx, "y": 9, "group_id": 1,
+     "dest": True},
+])
+_tpo = Player(_orb_level)
+for _ in range(80):
+    _tpo.update(False, False)   # never clicked — teleport orb needs one
+check("teleport orb (unlike the portal) does NOT fire without a click",
+      _tpo.x < 20 * CELL)
 
 # Registry / placement wiring for the S Block.
 from src.objects import (SPECS as _SPECS, CAT_EDITOR_UTILS as _CAT_UTILS,
@@ -1822,8 +1898,8 @@ check("_run_solver required args unchanged (screen, clock, objects)",
 # 2. Crash surfacing: a deliberately malformed level should NOT vanish into
 #    a silent "failed". The exception's class name needs to land in `err`.
 _garbage = [{"no_t_field": True}]
-_wp, _mwp, _inp, _status, _err = _bm._run_solver(None, None, _garbage)
-check("_run_solver returns 5-tuple (wp, mwp, inputs, status, err)",
+_wp, _mwp, _inp, _status, _err, _sk = _bm._run_solver(None, None, _garbage)
+check("_run_solver returns 6-tuple (wp, mwp, inputs, status, err, start_key)",
       _wp is None and _mwp == [] and _inp == [] and _status == "failed"
       and isinstance(_err, str))
 check("_run_solver surfaces crash exception class in error string",
@@ -2292,8 +2368,8 @@ _bot_modules = sorted(
     f for f in _os_roster.listdir(_os_roster.path.dirname(_bots_pkg.__file__))
     if f.endswith(".py"))
 check("bots package holds exactly the two bots plus shared machinery",
-      _bot_modules == ["__init__.py", "action_space.py", "human.py",
-                       "loophole.py", "progress.py", "sim.py",
+      _bot_modules == ["__init__.py", "action_space.py", "brute_force.py",
+                       "human.py", "loophole.py", "progress.py", "sim.py",
                        "toggle_search.py"])
 check("no legacy bot modules remain",
       not any(_os_roster.path.exists(_os_roster.path.join("src", _f))
@@ -2360,7 +2436,7 @@ check("dash-orb solution is reproducible on one button",
 #    representable. Pin both halves.
 _core_src = inspect.getsource(Player.update)
 check("Player.update feeds the mirror the SAME input it got",
-      "self._step_mirror(input_held, input_pressed)" in _core_src)
+      "self._step_mirror(input_held, input_pressed, dx_step)" in _core_src)
 _dual_lvl = make_flat_level(length=30,
                             extras=[{"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0}])
 _dual_bot = _HintBot([dict(o) for o in _dual_lvl])
