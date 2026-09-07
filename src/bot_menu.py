@@ -678,15 +678,33 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
             picked = _pick_saved_run(screen, clock, level_key)
             guard.reset()
             if picked is not None:
-                _last_inputs = list(picked["inputs"])
-                _last_waypoints = list(picked["waypoints"])
-                _last_mirror_waypoints = list(picked["mirror_waypoints"])
-                _last_status = picked.get("status") or "ok"
-                _last_note = picked.get("note") or ""
+                # The level may have been edited since this run was saved
+                # (same level_key, different objects) — a stale "ok" run
+                # replayed against the current level could die partway or
+                # not at all, so re-verify before trusting the saved
+                # status instead of taking it on faith.
+                from .bots import HumanBot
+                inputs = list(picked["inputs"])
+                verifier = HumanBot(_strip_internal(objects), params=params)
+                wp, mwp, won, last_alive = verifier.verify(inputs)
+                still_ok = won and (picked.get("status") or "ok") == "ok"
+                _last_inputs = inputs
+                _last_waypoints = list(wp) if wp else list(picked["waypoints"])
+                _last_mirror_waypoints = (list(mwp) if wp
+                                          else list(picked["mirror_waypoints"]))
+                if still_ok:
+                    _last_status = "ok"
+                    _last_note = picked.get("note") or ""
+                    info_msg = (f"Loaded \"{picked['name']}\" "
+                                f"({len(_last_inputs)} frames).")
+                    info_color = C_SUCCESS
+                else:
+                    _last_status = "partial" if wp else "failed"
+                    _last_note = "level changed since this run was saved"
+                    info_msg = (f"\"{picked['name']}\" no longer wins on "
+                                f"this level — loaded as {_last_status}.")
+                    info_color = (250, 200, 80)
                 return_value = (list(_last_waypoints), _last_status)
-                info_msg = (f"Loaded \"{picked['name']}\" "
-                            f"({len(_last_inputs)} frames).")
-                info_color = C_SUCCESS
 
         # ---- Clear cached result -----------------------------------------
         # The only escape from the monotone gate in _record_result: without
