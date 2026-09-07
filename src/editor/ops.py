@@ -12,7 +12,8 @@ import pygame
 
 from ..constants import (
     CELL, DEFAULT_MOVE_CURVE, _USER_DATA,
-    T_START, T_TELEPORT_ORB, T_MOVE_TRIGGER, T_FOLLOW_TRIGGER,
+    T_START, TELEPORT_LINK_TYPES,
+    T_MOVE_TRIGGER, T_FOLLOW_TRIGGER,
     T_ROTATE_TRIGGER, T_COIN, T_JUMP_PREDICTOR, T_SLOPE, T_SLAB,
     DASH_ORB_TYPES, T_SPIDER_ORB, T_SPIDER_PAD,
 )
@@ -123,7 +124,7 @@ def place_object(objects, gx, gy, selected_type, rotation, group_id_counter=0):
         return existing
     obj = {"t": selected_type, "x": gx, "y": gy, "r": rotation}
     seed_defaults(obj)
-    if selected_type == T_TELEPORT_ORB:
+    if selected_type in TELEPORT_LINK_TYPES:
         obj["group_id"] = group_id_counter or next_group_id(objects)
     elif selected_type == T_COIN:
         obj["coin_id"] = next_coin_id(objects)
@@ -158,11 +159,12 @@ def ensure_curve(obj):
 
 def move_in_stack(objects, obj, delta):
     """Reorder ``obj`` among the objects sharing its cell."""
-    if obj not in objects:
+    obj_i = index_by_id(objects, obj)
+    if obj_i == -1:
         return
     positions = [i for i, o in enumerate(objects)
                  if o["x"] == obj["x"] and o["y"] == obj["y"]]
-    cur = positions.index(objects.index(obj))
+    cur = positions.index(obj_i)
     new = cur + delta
     if 0 <= new < len(positions):
         a, b = positions[cur], positions[new]
@@ -207,7 +209,7 @@ def clone_objects(srcs, target_first_xy, all_objects):
     target_x, target_y = target_first_xy
     used_oids = {o.get("oid", 0) for o in all_objects if o.get("oid", 0) > 0}
     used_groups = {get_group_id(o) for o in all_objects
-                   if o.get("t") == T_TELEPORT_ORB and get_group_id(o) > 0}
+                   if o.get("t") in TELEPORT_LINK_TYPES and get_group_id(o) > 0}
 
     def alloc(used):
         i = 1
@@ -222,7 +224,7 @@ def clone_objects(srcs, target_first_xy, all_objects):
         soid = src.get("oid")
         if soid and soid not in oid_map:
             oid_map[soid] = alloc(used_oids)
-        if src.get("t") == T_TELEPORT_ORB:
+        if src.get("t") in TELEPORT_LINK_TYPES:
             sgid = get_group_id(src)
             if sgid and sgid not in group_map:
                 group_map[sgid] = alloc(used_groups)
@@ -234,7 +236,7 @@ def clone_objects(srcs, target_first_xy, all_objects):
         new["y"] = target_y + oy
         if new.get("oid") in oid_map:
             new["oid"] = oid_map[new["oid"]]
-        if new.get("t") == T_TELEPORT_ORB:
+        if new.get("t") in TELEPORT_LINK_TYPES:
             sgid = get_group_id(new)
             if sgid in group_map:
                 new["group_id"] = group_map[sgid]
@@ -461,34 +463,39 @@ def link_click(objects, gx, gy, pending):
     clicked = object_at_cell(objects, gx, gy, prefer_non_start=True)
     if pending is None:
         if not clicked:
-            return None, "Click a teleport orb or a move / rotate / follow trigger"
+            return None, "Click a teleport orb/portal or a move / rotate / follow trigger"
         t = clicked["t"]
-        if t == T_TELEPORT_ORB:
+        if t in TELEPORT_LINK_TYPES:
             return ({"kind": "teleport", "first": clicked},
-                    f"Select partner orb (group={get_group_id(clicked)})")
+                    f"Select partner orb/portal (group={get_group_id(clicked)})")
         if t in (T_MOVE_TRIGGER, T_ROTATE_TRIGGER):
-            return ({"kind": "targets", "trigger": clicked, "targets": [],
-                     "phase": "select"},
-                    "Click objects to target (Enter when done)")
+            existing_oids = clicked.get("target_oids") or (
+                [clicked["target_oid"]] if clicked.get("target_oid") else [])
+            by_oid = {o.get("oid"): o for o in objects if o.get("oid")}
+            targets = [by_oid[oid] for oid in existing_oids if oid in by_oid]
+            msg = (f"{len(targets)} existing target(s) loaded — click to add/remove, "
+                   "Enter when done") if targets else "Click objects to target (Enter when done)"
+            return ({"kind": "targets", "trigger": clicked, "targets": targets,
+                     "phase": "select"}, msg)
         if t == T_FOLLOW_TRIGGER:
             what = ("the object that follows the player"
                     if clicked.get("follow_player")
                     else "the SOURCE object (the one being followed)")
             return {"kind": "follow", "trigger": clicked, "source": None}, f"Click {what}"
-        return None, "Click a teleport orb or a move / rotate / follow trigger"
+        return None, "Click a teleport orb/portal or a move / rotate / follow trigger"
     kind = pending.get("kind")
     if kind == "teleport":
         first = pending["first"]
         if clicked is first:
             return None, "Link cancelled"
-        if not clicked or clicked["t"] != T_TELEPORT_ORB:
-            return pending, "Click another teleport orb"
+        if not clicked or clicked["t"] not in TELEPORT_LINK_TYPES:
+            return pending, "Click another teleport orb/portal"
         gid = get_group_id(first) or get_group_id(clicked) or next_group_id(objects)
         first["group_id"] = gid
         clicked["group_id"] = gid
         first.pop("link", None)
         clicked.pop("link", None)
-        return None, f"Linked orbs as group {gid}"
+        return None, f"Linked as group {gid}"
     if kind == "targets":
         trig = pending["trigger"]
         if pending.get("phase") == "select":
@@ -497,8 +504,9 @@ def link_click(objects, gx, gy, pending):
             if not clicked:
                 return pending, "Click objects to target (Enter when done)"
             targets = pending["targets"]
-            if clicked in targets:
-                targets.remove(clicked)
+            existing = index_by_id(targets, clicked)
+            if existing != -1:
+                del targets[existing]
             else:
                 clicked["oid"] = clicked.get("oid") or next_object_id(objects)
                 targets.append(clicked)

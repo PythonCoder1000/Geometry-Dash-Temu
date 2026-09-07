@@ -104,7 +104,11 @@ def confirm_exit(screen, clock, *, unsaved):
         mpos = pygame.mouse.get_pos()
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
-                continue
+                # The OS window-close button reaffirms the exit the user
+                # already asked for (that's why this modal is open) —
+                # honour it as "Leave" instead of trapping them here with
+                # no way out but the mouse.
+                return True
             if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
                 now = time.monotonic()
                 esc_times.append(now)
@@ -155,7 +159,9 @@ def show_error_modal(screen, clock, exc, *, where="editor"):
         mpos = pygame.mouse.get_pos()
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
-                continue
+                # Same reasoning as confirm_exit: don't trap the user in
+                # a modal with no way to honour the OS close button.
+                return
             if ev.type == pygame.KEYDOWN and ev.key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE):
                 return
             if (ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1
