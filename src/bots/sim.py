@@ -17,10 +17,16 @@ pruning.
 from typing import NamedTuple
 
 from ..constants import (
-    CELL, PLAYER_SIZE,
+    CELL, PLAYER_SIZE, ORB_TYPES, T_TELEPORT_PORTAL,
     MODE_CUBE, MODE_SHIP, MODE_WAVE, MODE_UFO, MODE_ROBOT,
 )
-from ..player import Player, _NON_TRIGGER_TYPES
+
+# ``passed`` entries for these types gate a real future action (a
+# not-yet-fired orb/portal can still be clicked; a fired one can't), so
+# they have to be part of the dedup key — see the comment inside
+# ``dedup_key`` for why.
+_DEDUP_TRACKED_PASSED_TYPES = ORB_TYPES | {T_TELEPORT_PORTAL}
+from ..player import Player, _NON_TRIGGER_TYPES, is_non_trigger
 
 class SnapVals(NamedTuple):
     x: float
@@ -48,6 +54,8 @@ class SnapVals(NamedTuple):
     dash_vy: float
     flight_budget: int
     robot_thrust_disabled: bool
+    wave_vy_smooth: float = 0.0
+    time_warp: float = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -74,17 +82,24 @@ class SimPlayer(Player):
 
     def __init__(self, objects, params=None):
         self._init_grid(objects)
-        self._obj_index = {id(o): o for o in objects}
+        # Keyed by position in `objects`, not id() — restore() uses this
+        # to resolve the portable indices snapshot() embeds for moved
+        # objects/animations, which must resolve correctly even when
+        # restoring a snapshot taken from a *different* SimPlayer
+        # instance (their independently-copied dicts have different
+        # id()s but the same list order).
+        self._obj_index = {i: o for i, o in enumerate(objects)}
         self._nearby_cache_key = None
         self._nearby_cache_result = []
         self._nearby_trigger_cache_key = None
         self._nearby_trigger_cache_result = []
+        super().__init__(objects, params=params)
         # Solver probe sees bot-only objects by default — that's the
         # whole point of the "bot only" toggle: the bot must reason
         # about the phantom hazard even though the real player walks
-        # through it.
+        # through it. Must be set *after* super().__init__() /
+        # reset(), which otherwise forces this back to False.
         self._bot_visibility = True
-        super().__init__(objects, params=params)
 
     def _init_grid(self, objects):
         if not objects:
@@ -121,6 +136,11 @@ class SimPlayer(Player):
                     trig_arr[idx] = [o]
                 else:
                     tcell.append(o)
+            # Tracked so _spatial_rebucket can find (and remove) an
+            # object's *previous* slot after a move-trigger animation
+            # displaces it, without rescanning every object in the
+            # level to find it.
+            o["_cell"] = (o["x"], o["y"])
         self._grid_arr = arr
         self._trigger_grid_arr = trig_arr
 
@@ -182,7 +202,8 @@ class SimPlayer(Player):
         right = right_px // CELL + extra - ox
         top = top_px // CELL - extra - oy
         bottom = bottom_px // CELL + extra - oy
-        cache_key = (left, top, right, bottom, extra)
+        bot_vis = bool(getattr(self, "_bot_visibility", False))
+        cache_key = (left, top, right, bottom, extra, bot_vis)
         if cache_key == self._nearby_trigger_cache_key:
             return self._nearby_trigger_cache_result
         w = self._grid_w
@@ -207,6 +228,12 @@ class SimPlayer(Player):
                 cell = arr[base + gx]
                 if cell is not None:
                     result.extend(cell)
+        if not bot_vis and result:
+            for o in result:
+                if o.get("_bot_only"):
+                    result = [o for o in result
+                              if not o.get("_bot_only")]
+                    break
         self._nearby_trigger_cache_key = cache_key
         self._nearby_trigger_cache_result = result
         return result
@@ -216,11 +243,82 @@ class SimPlayer(Player):
         self._nearby_cache_key = None
         self._nearby_trigger_cache_key = None
 
-    def _step_move_animations(self):
-        if not self.move_animations:
+    def _spatial_rebucket(self, obj):
+        """Move ``obj`` to its new grid cell in place, instead of the
+        base class's dict-based ``_spatial_index`` update.
+
+        SimPlayer's own lookups (``_nearby_for_aabb``) read the flat
+        array grid, not ``_spatial_index`` — so the base implementation
+        here would just be wasted work. This used to be handled by
+        overriding ``_step_move_animations`` to call ``_init_grid``
+        (a full rebuild over every object in the level) after *any*
+        animation stepped, every single frame one was active. On a
+        level with many move triggers that's the dominant cost of a
+        search by a wide margin (profiled at ~45% of total wall time
+        on a 342-object level) for a change that only ever touches one
+        object. Bucket-swapping just that object is the same operation
+        ``_rebuild_spatial_index``/``_spatial_rebucket`` already do for
+        the real ``Player`` class — SimPlayer just wasn't using it.
+        """
+        old = obj.get("_cell")
+        new = (obj["x"], obj["y"])
+        if old == new:
             return
-        super()._step_move_animations()
-        self._rebuild_grid()
+        ox, oy, w, h = self._grid_ox, self._grid_oy, self._grid_w, self._grid_h
+        trigger = not is_non_trigger(obj)
+
+        def _idx(cell):
+            gx = cell[0] - ox
+            gy = cell[1] - oy
+            if 0 <= gx < w and 0 <= gy < h:
+                return gy * w + gx
+            return None
+
+        if old is not None:
+            oidx = _idx(old)
+            if oidx is not None:
+                bucket = self._grid_arr[oidx]
+                if bucket is not None:
+                    try:
+                        bucket.remove(obj)
+                    except ValueError:
+                        pass
+                    if not bucket:
+                        self._grid_arr[oidx] = None
+                if trigger:
+                    tbucket = self._trigger_grid_arr[oidx]
+                    if tbucket is not None:
+                        try:
+                            tbucket.remove(obj)
+                        except ValueError:
+                            pass
+                        if not tbucket:
+                            self._trigger_grid_arr[oidx] = None
+
+        nidx = _idx(new)
+        obj["_cell"] = new
+        if nidx is None:
+            # The move carried the object outside the grid's
+            # precomputed bounds (extents of every object at
+            # construction time, plus a fixed margin) — rare, since
+            # in-level animations don't normally travel further than
+            # the level's own extents. Only this case still needs a
+            # full rebuild.
+            self._rebuild_grid()
+            return
+        cell = self._grid_arr[nidx]
+        if cell is None:
+            self._grid_arr[nidx] = [obj]
+        else:
+            cell.append(obj)
+        if trigger:
+            tcell = self._trigger_grid_arr[nidx]
+            if tcell is None:
+                self._trigger_grid_arr[nidx] = [obj]
+            else:
+                tcell.append(obj)
+        self._nearby_cache_key = None
+        self._nearby_trigger_cache_key = None
 
     def update(self, input_held, input_pressed):
         super().update(input_held, input_pressed)
@@ -235,7 +333,7 @@ class SimPlayer(Player):
 def build_obj_index(player):
     """Compatibility shim — populates the per-instance obj index used by
     ``restore`` to translate snap ids back to live object refs."""
-    player._obj_index = {id(o): o for o in player.objects}
+    player._obj_index = {i: o for i, o in enumerate(player.objects)}
 
 
 def snapshot(player):
@@ -250,12 +348,15 @@ def snapshot(player):
         player.dash_vx, player.dash_vy,
         player.flight_budget,
         player.thrust_disabled,
+        player.wave_vy_smooth,
+        player.time_warp,
     )
     passed = frozenset(player.passed)
     anims = player.move_animations
     if anims:
+        oid_index = player._oid_index
         anims = tuple(
-            (id(a['obj']), a['sx'], a['sy'], a['ex'], a['ey'],
+            (oid_index[id(a['obj'])], a['sx'], a['sy'], a['ex'], a['ey'],
              a['frame'], a['duration'], a['curve'], a['curve_area'])
             for a in anims
         )
@@ -290,9 +391,9 @@ def snapshot(player):
                                      o.get('_fx'), o.get('_fy')))
     else:
         # Fallback for callers that don't populate _ever_moved.
-        for o in player.objects:
+        for i, o in enumerate(player.objects):
             if '_fx' in o or '_fy' in o:
-                obj_pos_list.append((id(o), o['x'], o['y'],
+                obj_pos_list.append((i, o['x'], o['y'],
                                      o.get('_fx'), o.get('_fy')))
     obj_pos = tuple(obj_pos_list)
     m = player.mirror
@@ -353,6 +454,12 @@ def restore(player, snap):
         player.thrust_disabled = bool(vals[24])
     else:
         player.thrust_disabled = False
+    if len(vals) >= 27:
+        player.wave_vy_smooth = float(vals[25])
+        player.time_warp = float(vals[26])
+    else:
+        player.wave_vy_smooth = 0.0
+        player.time_warp = 1.0
     player.passed = set(passed)
     player.held_orbs = set(held_orbs)
     player.mirror_passed = set(mirror_passed)
@@ -371,8 +478,17 @@ def restore(player, snap):
             ]
     else:
         player.move_animations = []
+    # Both loops below used to just flag need_rebuild and let a single
+    # player._rebuild_grid() at the end redo the *entire* level's grid
+    # placement — for a full rebuild's cost regardless of how many
+    # objects actually moved. restore() runs on every probe restore
+    # (several times per simulated frame across the search's probes),
+    # so on any level with even one ever-moved object this was by far
+    # the dominant cost of a search (profiled at ~45% of wall time on
+    # a 342-object level). _spatial_rebucket only touches the object
+    # that actually moved, so call it per-object here instead — same
+    # fix as SimPlayer._spatial_rebucket for _step_move_animations.
     ever_moved = getattr(player, "_ever_moved", None)
-    need_rebuild = False
     if ever_moved:
         snap_oids = {entry[0] for entry in obj_pos} if obj_pos else ()
         for oid, o in ever_moved.items():
@@ -387,7 +503,7 @@ def restore(player, snap):
                 o["y"] = oy
                 o.pop("_fx", None)
                 o.pop("_fy", None)
-                need_rebuild = True
+                player._spatial_rebucket(o)
     if obj_pos:
         obj_index = getattr(player, "_obj_index", None)
         if obj_index is None:
@@ -405,9 +521,7 @@ def restore(player, snap):
                 o['_fy'] = fy
             else:
                 o.pop('_fy', None)
-        need_rebuild = True
-    if need_rebuild:
-        player._rebuild_grid()
+            player._spatial_rebucket(o)
     if mirror is None:
         player.mirror = None
     else:
@@ -462,7 +576,10 @@ def dedup_key(snap):
         on_ground = vals.on_ground
         input_buffer = vals.input_buffer
         dash_timer = vals.dash_timer
+        teleport_cooldown = vals.teleport_cooldown
         mirror_input_buffer = vals.mirror_input_buffer
+        size = vals.size
+        move_speed = vals.move_speed
     else:
         mode = vals[9]
         y = vals[1]
@@ -471,7 +588,10 @@ def dedup_key(snap):
         on_ground = vals[3]
         input_buffer = vals[12]
         dash_timer = vals[11]
+        teleport_cooldown = vals[13]
         mirror_input_buffer = vals[19]
+        size = vals[20]
+        move_speed = vals[10]
     if mode in _CONTINUOUS_Y_MODES:
         y_bucket = round(y / 1.5)
         vy_bucket = round(vy / 0.75)
@@ -498,11 +618,27 @@ def dedup_key(snap):
             for entry in obj_pos_t))
     else:
         obj_pos_key = ()
+    # A one-shot orb/portal already fired closes off a real future
+    # action that an otherwise-identical position/velocity/mode state
+    # (from before the orb was used) still has open — most visibly a
+    # *backward* teleport orb, whose destination often lands right back
+    # in a bucket the search already visited, at shallower depth, before
+    # the orb was ever used. Without this, that earlier, orb-still-live
+    # visit wins the dedup and the branch that actually used the orb —
+    # which can reach places the other branch cannot — gets silently
+    # discarded. Only orb/portal types are tracked, not the full
+    # ``passed`` set, so this stays cheap.
+    passed = snap[1] if len(snap) > 1 else ()
+    passed_orbs = (tuple(sorted(
+        k for k in passed if k[0] in _DEDUP_TRACKED_PASSED_TYPES))
+        if passed else ())
     base = (
         y_bucket, vy_bucket, grav, mode, on_ground,
         1 if input_buffer > 0 else 0,
         1 if dash_timer > 0 else 0,
-        anim_key, obj_pos_key,
+        1 if teleport_cooldown > 0 else 0,
+        int(size), round(move_speed, 4),
+        anim_key, obj_pos_key, passed_orbs,
     )
     mirror = snap[4] if len(snap) > 4 else None
     if mirror is None:
@@ -541,7 +677,9 @@ def player_dedup_key(player):
         vy_bucket = round(vy / 1.0)
     anims = player.move_animations
     if anims:
-        anim_key = tuple(sorted((id(a['obj']), a['frame']) for a in anims))
+        oid_index = player._oid_index
+        anim_key = tuple(sorted(
+            (oid_index[id(a['obj'])], a['frame']) for a in anims))
     else:
         anim_key = ()
     # Match snapshot()'s filter exactly: include any ever-moved object
@@ -563,11 +701,19 @@ def player_dedup_key(player):
         obj_pos_key = tuple(sorted(rows))
     else:
         obj_pos_key = ()
+    # See dedup_key's comment: a fired one-shot orb/portal has to be
+    # part of the key or a backward teleport's destination can alias
+    # with an earlier, shallower visit where the orb was still live.
+    passed_orbs = (tuple(sorted(
+        k for k in player.passed if k[0] in _DEDUP_TRACKED_PASSED_TYPES))
+        if player.passed else ())
     base = (
         y_bucket, vy_bucket, player.grav, mode, player.on_ground,
         1 if player.input_buffer > 0 else 0,
         1 if player.dash_timer > 0 else 0,
-        anim_key, obj_pos_key,
+        1 if player.teleport_cooldown > 0 else 0,
+        int(player.size), round(player.move_speed, 4),
+        anim_key, obj_pos_key, passed_orbs,
     )
     m = player.mirror
     if m is None:

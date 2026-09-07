@@ -73,10 +73,15 @@ class SolveProgress:
     hot loop and unconditionally on every paint.
     """
 
-    def __init__(self, screen, clock, win_x, title="BOT SEARCH"):
+    def __init__(self, screen, clock, win_x, title="BOT SEARCH", has_end=True):
         self.screen = screen
         self.clock = clock
         self.win_x = max(1.0, float(win_x))
+        # win_x_for_objects() falls back to 0 (clamped to 1.0 above) when
+        # the level has no T_END at all — without this flag, percent()
+        # would divide against that dummy 1px target and claim 100% the
+        # instant the player moves, even though nothing was ever reached.
+        self.has_end = has_end
         self.title = title
         self.cancelled = False
         self.solved = False
@@ -110,9 +115,27 @@ class SolveProgress:
         if x > self.best_x:
             self.best_x = float(x)
 
+    def set_x(self, x):
+        """Force the displayed x, even downward.
+
+        ``note_x`` is monotonic so a live preview from an unverified
+        search (e.g. brute force reporting its own SimPlayer's frontier
+        mid-search) can never be corrected once the real, Player-replay
+        -verified result turns out lower. Call this once a phase has a
+        confirmed final value to realign the bar with what was actually
+        committed.
+        """
+        self.best_x = float(x)
+
     def percent(self):
         if self.solved:
             return 100
+        if not self.has_end:
+            # No T_END in the level — there is no goal to measure
+            # progress against, so don't fabricate one against the 1px
+            # placeholder win_x falls back to (that would hit 100% the
+            # instant the player takes a single step).
+            return 0
         pct = int(self.best_x / self.win_x * 100)
         return min(100, max(0, pct))
 

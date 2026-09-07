@@ -85,12 +85,16 @@ def _path_for(level_key, name):
 
 
 def save_run(level_key, name, *, inputs, waypoints, mirror_waypoints,
-             status, beam_width=None, attempts=None, bot="", note=""):
+             status, beam_width=None, attempts=None, bot="", note="",
+             start_key=None):
     """Persist one bot run. Overwrites any prior save with the same name.
 
     ``bot`` records which of the two bots produced the run and ``note``
     carries its verdict (e.g. that a frame-perfect fallback was needed),
-    so a reloaded run still says how it was obtained.
+    so a reloaded run still says how it was obtained. ``start_key`` is
+    the ``(x, y)`` cell of the Start Pos this run was solved from — a
+    level with 2+ Start Positions can win from any of them, and a run
+    saved for one is not a valid "ok" result replayed from another.
     """
     if not level_key or not name:
         return False
@@ -107,6 +111,7 @@ def save_run(level_key, name, *, inputs, waypoints, mirror_waypoints,
                              for x, y in (mirror_waypoints or [])],
         "beam_width": beam_width,
         "attempts": attempts,
+        "start_key": (list(start_key) if start_key is not None else None),
     }
     path = _path_for(level_key, name)
     tmp = path + ".tmp"
@@ -173,6 +178,8 @@ def load_run(level_key, name):
                          for x, y in data.get("waypoints", [])]
     data["mirror_waypoints"] = [(float(x), float(y))
                                 for x, y in data.get("mirror_waypoints", [])]
+    sk = data.get("start_key")
+    data["start_key"] = (sk[0], sk[1]) if sk else None
     return data
 
 

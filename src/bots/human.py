@@ -34,7 +34,7 @@ import time
 _os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "hide")
 
 from ..constants import (
-    CELL, PLAYER_SIZE,
+    CELL, HEIGHT, PLAYER_SIZE,
     MODE_CUBE, MODE_BALL, MODE_SPIDER,
     HAZARD_TYPES, ORB_TYPES,
     T_END, T_SPEED_NORMAL, SPEED_VALUES,
@@ -45,6 +45,7 @@ from .. import sfx
 from .action_space import (
     HUMAN, FRAME_PERFECT, DWELL_CAP, replay_state,
 )
+from .brute_force import BruteForceSearch
 from .progress import SolveProgress, win_x_for_objects
 from .sim import SimPlayer, snapshot, restore, player_dedup_key, dedup_key
 from .toggle_search import ToggleSearch
@@ -72,7 +73,11 @@ class BestSolution:
     def offer(self, waypoints, mirror_waypoints, inputs, won=False):
         if not waypoints and not inputs:
             return False
-        x = max((p[0] for p in waypoints), default=-1.0)
+        # Where this candidate's path actually ends, not any transient peak
+        # along the way — a bounce/collision nudge can push x briefly past
+        # where the returned inputs finish, which would otherwise report
+        # more progress than the committed path really reaches.
+        x = waypoints[-1][0] if waypoints else -1.0
         if self.won and not won:
             return False
         if won == self.won and x <= self.deepest_x:
@@ -177,6 +182,24 @@ class HumanBot:
 
     ALLOW_FRAME_PERFECT = True
 
+    # When True, Phase 3/4 (A* + checkpoint backtracking + toggle
+    # search) is replaced by a single BruteForceSearch run — see
+    # brute_force.py. That engine handles its own dead-branch pruning
+    # and dedup, so no ladder phase runs alongside it.
+    USE_BRUTE_FORCE = False
+    # Dedup granularity passed straight through to BruteForceSearch —
+    # see that module's docstring for the completeness/speed tradeoff.
+    BRUTE_FORCE_POS_BUCKET = 1.0
+    BRUTE_FORCE_VEL_BUCKET = 0.5
+    # Opt-in multi-process macro-scan for BruteForceSearch — see that
+    # module's "Parallel search" block for the design and the earlier
+    # CPU-peg / unresponsive-ESC bug it's built to avoid. Off by
+    # default: it changes nothing about search correctness (never part
+    # of the completeness guarantee), only wall-clock speed, and a
+    # toggle exists specifically so it can be turned back off if it
+    # ever misbehaves on someone's machine.
+    USE_PARALLEL_SEARCH = False
+
     def __init__(self, objects, params=None):
         self.objects = objects
         self.params = params
@@ -194,7 +217,29 @@ class HumanBot:
 
         end_xs = [o["x"] * CELL for o in objects if o["t"] == T_END]
         self.end_x = max(end_xs) if end_xs else 0
+        self.has_end = bool(end_xs)
         self.win_x = win_x_for_objects(objects)
+
+        # The physics has no bottomless-pit death, so a branch that
+        # falls past every last piece of placed geometry just keeps
+        # falling forever, alive, with x still climbing from forward
+        # move speed. Nothing in its future can ever touch level
+        # geometry again, but nothing here knows that from ``alive``
+        # alone — it looks like the best partial result any phase has
+        # found (its x only ever grows) and, once ``commit`` accepts
+        # it, it becomes an unbeatable floor: a later phase (brute
+        # force in particular) that seeds from ``best.inputs`` inherits
+        # a start point already deep in the void, where every branch
+        # dies immediately. Trimming to just before the void in
+        # ``replay_for_waypoints`` — the one real-Player re-verification
+        # every non-win candidate already funnels through — keeps this
+        # from ever being treated as real, recoverable progress.
+        max_y = max((o["y"] for o in objects), default=0)
+        # Generous on purpose — see brute_force.py's matching comment.
+        # A real drop can run several screen heights before it's done;
+        # too tight a margin kills a still-recoverable fall before it
+        # ever reaches what it was falling toward.
+        self._void_y = max_y * CELL + HEIGHT * 4
 
         self._orb_cells = set()
         for o in objects:
@@ -379,12 +424,21 @@ class HumanBot:
     def replay_for_waypoints(self, inputs):
         """Replay against a real ``Player`` — the same class the game runs
         — so a search win is only reported after it survives the exact
-        code path a replay will take."""
-        player = Player([dict(o) for o in self.objects])
+        code path a replay will take.
+
+        Returns ``(waypoints, mirror_waypoints, won, stopped_at)``;
+        ``stopped_at`` is how many leading ``inputs`` frames actually ran
+        before death/win cut the replay short (``len(inputs)`` if
+        neither happened) — the caller's chain routinely runs longer
+        than that, and trimming to it keeps a committed result from
+        carrying dead frames past where it actually ends.
+        """
+        player = Player([dict(o) for o in self.objects], params=self.params)
         player.trail = []
         size = player.size
         waypoints = [(player.x + size / 2, player.y + size / 2)]
         mirror_waypoints = []
+        stopped_at = len(inputs)
         for i, (held, pressed) in enumerate(inputs):
             player.update(held, pressed)
             size = player.size
@@ -396,8 +450,15 @@ class HumanBot:
                         (player.x + size / 2,
                          player.mirror["y"] + msize / 2))
             if not player.alive or player.won:
+                stopped_at = i + 1
                 break
-        return waypoints, mirror_waypoints, player.won
+            if player.y > self._void_y:
+                # See __init__'s comment on _void_y: falling this far
+                # below every last object in the level is unrecoverable,
+                # so it's cut off exactly like a death would be.
+                stopped_at = i + 1
+                break
+        return waypoints, mirror_waypoints, player.won, stopped_at
 
     def _x_track(self, inputs):
         """Per-frame x for ``inputs`` — feeds the checkpoint ladder."""
@@ -438,12 +499,17 @@ class HumanBot:
         """
         was_enabled = sfx.is_enabled()
         if was_enabled:
-            sfx.toggle()
+            # Transient — don't persist this to prefs (see set_enabled's
+            # docstring): a solve does this every run, and a crash between
+            # here and the ``finally`` restore below must not leave SFX
+            # permanently muted on disk.
+            sfx.set_enabled(False, persist=False)
         if not time_budget or time_budget <= 0:
             time_budget = 60.0
         started = time.monotonic()
         self.progress = SolveProgress(screen, clock, self.win_x,
-                                      title=self.progress_title)
+                                      title=self.progress_title,
+                                      has_end=self.has_end)
         self.used_frame_perfect = False
         best = BestSolution()
         try:
@@ -475,16 +541,38 @@ class HumanBot:
         finally:
             self._deadline = None
             if was_enabled:
-                sfx.toggle()
+                sfx.set_enabled(True, persist=False)
 
     def _run_pipeline(self, best, max_frames, seed_inputs, fix_only):
         model = self.model
         ladder = CheckpointLadder()
 
         def commit(waypoints, mirror_waypoints, inputs, won=False):
-            """Funnel every phase result through the monotone floor."""
+            """Funnel every phase result through the monotone floor.
+
+            Callers (canned chains, warm starts, brute force) hand over
+            whatever raw input chain they generated, which routinely runs
+            longer than the player actually survives — planners don't
+            stop early just because the replay would die at frame 199 of
+            a 556-frame attempt. ``waypoints`` already gets cut off at
+            the real death frame (``replay_for_waypoints``/``verify``
+            break their loop there), so trim ``inputs`` to match before
+            it can ever reach ``best``. Otherwise a bloated candidate
+            that dies at the same x as a cleanly-trimmed one ties on x
+            and keeps its dead weight forever, since ``offer`` has no
+            way to prefer the shorter of two equal-x results.
+            """
             if won:
                 self.progress.report_win("SOLVED")
+            elif inputs:
+                # Re-check against the real Player regardless of which
+                # (possibly SimPlayer-based) engine the caller used —
+                # this is the one authoritative "what does this chain
+                # actually reach" pass every non-win candidate goes
+                # through before it can become the committed best.
+                waypoints, mirror_waypoints, _, stopped_at = (
+                    self.replay_for_waypoints(inputs))
+                inputs = list(inputs[:stopped_at])
             improved = best.offer(waypoints, mirror_waypoints, inputs, won)
             if improved and inputs:
                 ladder.record_chain(inputs, self._x_track(inputs))
@@ -544,13 +632,18 @@ class HumanBot:
                 inp, won = fn()
                 if not inp:
                     continue
-                wp, mwp, _ = self.replay_for_waypoints(inp)
-                if won:
+                wp, mwp, real_won, _ = self.replay_for_waypoints(inp)
+                if won and real_won:
                     commit(wp, mwp, inp, True)
                     if not require_pickups:
                         return
                 else:
                     commit(wp, mwp, inp)
+
+        # ---- Phase 3/4 — directed search -------------------------------
+        if self.USE_BRUTE_FORCE:
+            self._brute_force_phase(best, commit, seed_inputs, max_frames)
+            return
 
         # ---- Phase 3 — A* with checkpoint backtracking ---------------
         if best.inputs:
@@ -681,8 +774,56 @@ class HumanBot:
             return
         if not inputs:
             return
-        wp, mwp, replay_won = self.replay_for_waypoints(inputs)
+        wp, mwp, replay_won, _ = self.replay_for_waypoints(inputs)
         commit(wp, mwp, inputs, won and replay_won)
+
+    def _brute_force_phase(self, best, commit, seed_inputs, max_frames):
+        """Exhaustive decision-point search — see ``USE_BRUTE_FORCE`` and
+        ``brute_force.py``'s module docstring for the full argument.
+
+        Unlike the old MCTS phase, seeding doesn't fight this engine the
+        same way — it's not sampling-based, so a mediocre warm-start
+        prefix just gets explored and superseded rather than locking in
+        a bad opening. Still prefers the caller's own ``seed_inputs``
+        (a real run to repair/continue) over the internal warm start
+        when both exist, for the same reason as before: a run someone
+        actually asked to continue from should be honored as a seed,
+        an internally-generated one shouldn't be treated as a floor.
+
+        Doesn't use ``route_bias`` — this engine has no cost function to
+        bias, only "is this frame a real decision" and "have we seen
+        this state." A loophole-bot run through here will find *a* win,
+        not necessarily one that hugs the drawn path.
+        """
+        budget = self._phase_budget(1.0)
+        if not budget or budget <= 0:
+            return
+        seed = seed_inputs or best.inputs or None
+        if seed:
+            seed = self._safe_prefix(seed)
+        search = BruteForceSearch(
+            self.objects, params=self.params, model=self.model,
+            seed_inputs=seed, time_budget=budget, max_frames=max_frames,
+            pos_bucket=self.BRUTE_FORCE_POS_BUCKET,
+            vel_bucket=self.BRUTE_FORCE_VEL_BUCKET,
+            parallel=self.USE_PARALLEL_SEARCH,
+            progress=self.progress)
+        try:
+            inputs, won = search.run()
+        except Exception:
+            return
+        if not inputs:
+            return
+        wp, mwp, replay_won, _ = self.replay_for_waypoints(inputs)
+        commit(wp, mwp, inputs, won and replay_won)
+        # The search reports live progress off its own SimPlayer as it
+        # explores (see BruteForceSearch.run's note_x calls), which can
+        # run ahead of what a real Player replay confirms. Realign the
+        # displayed x with the actual committed result now that this
+        # phase is done, instead of leaving an optimistic overshoot
+        # stuck on screen (note_x alone can't correct it downward).
+        if not self.progress.solved:
+            self.progress.set_x(best.deepest_x)
 
     # ------------------------------------------------------------------
     # Canned / greedy warm starts (all one-button by construction)
@@ -866,7 +1007,7 @@ class HumanBot:
                 if player.won:
                     inputs = self._reconstruct(nodes, terminal)
                     self.progress.report_win("SOLVED")
-                    wp, mwp, ok = self.replay_for_waypoints(inputs)
+                    wp, mwp, ok, _ = self.replay_for_waypoints(inputs)
                     return wp, mwp, inputs, ok
                 if not player.alive:
                     return [], [], [], False
@@ -950,7 +1091,7 @@ class HumanBot:
                     nodes.append((node_id, held, pressed))
                     inputs = self._reconstruct(nodes, len(nodes) - 1)
                     self.progress.report_win("SOLVED")
-                    wp, mwp, ok = self.replay_for_waypoints(inputs)
+                    wp, mwp, ok, _ = self.replay_for_waypoints(inputs)
                     return wp, mwp, inputs, ok
 
                 if not player.alive:
@@ -1093,7 +1234,7 @@ class HumanBot:
             inputs = self._reconstruct(nodes, best_partial_node)
         else:
             inputs = list(prefix_inputs) if prefix_inputs else []
-        wp, mwp, ok = self.replay_for_waypoints(inputs)
+        wp, mwp, ok, _ = self.replay_for_waypoints(inputs)
         if ok:
             self.progress.report_win("SOLVED")
         return wp, mwp, inputs, ok

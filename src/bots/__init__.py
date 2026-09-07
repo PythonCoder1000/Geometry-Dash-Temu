@@ -14,6 +14,7 @@ headless replay, :mod:`.action_space` for the one-button input model,
 """
 
 from .action_space import FRAME_PERFECT, HUMAN, InputModel
+from .brute_force import BruteForceSearch
 from .human import BestSolution, CheckpointLadder, HumanBot
 from .loophole import (
     DrawnPath, LoopholeBot, PathFollowController,
@@ -27,8 +28,9 @@ from .sim import (
 from .toggle_search import ToggleSearch
 
 __all__ = [
-    "BestSolution", "CheckpointLadder", "DrawnPath", "FRAME_PERFECT",
-    "HUMAN", "HumanBot", "InputModel", "LoopholeBot", "PathFollowController",
+    "BestSolution", "BruteForceSearch", "CheckpointLadder", "DrawnPath",
+    "FRAME_PERFECT", "HUMAN", "HumanBot", "InputModel", "LoopholeBot",
+    "PathFollowController",
     "SimPlayer", "SnapVals", "SolveProgress", "ToggleSearch",
     "build_obj_index", "dedup_key", "load_bot_inputs", "player_dedup_key",
     "restore", "save_bot_inputs", "snapshot", "win_x_for_objects",

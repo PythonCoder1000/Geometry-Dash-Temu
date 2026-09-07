@@ -26,11 +26,12 @@ could not physically input is not a loophole worth reporting.
 import os
 
 from ..constants import (
+    BOT_RUNS_DIR,
     CELL, PLAYER_SIZE,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING,
     HAZARD_TYPES, SOLID_TYPES,
-    T_DASH_ORB,
+    T_DASH_ORB, T_DASH_ORB_GRAV,
 )
 from .action_space import HUMAN, DWELL_CAP
 from .human import HumanBot
@@ -68,7 +69,7 @@ PATH_CORRIDOR_PX = CELL * 2
 # corridor, small enough that a genuinely faster off-path line wins.
 PATH_BIAS_WEIGHT = 1.5
 
-DEFAULT_INPUT_FILE = "level_bot_inputs.txt"
+DEFAULT_INPUT_FILE = os.path.join(BOT_RUNS_DIR, "level_bot_inputs.txt")
 
 
 class DrawnPath:
@@ -175,7 +176,7 @@ class PathFollowController:
         # straight through one. Stamping a hold as the player enters the
         # cell lets the engine activate whichever orb is actually there.
         self._dash_orb_cells = {(o["x"], o["y"]) for o in objects
-                                if o["t"] == T_DASH_ORB}
+                                if o["t"] in (T_DASH_ORB, T_DASH_ORB_GRAV)}
 
     def hazard_ahead(self, gx_from, gx_to, gy_center, y_tol=1,
                       follow_path=False):
@@ -422,30 +423,38 @@ class PathFollowController:
 
 
 def save_bot_inputs(inputs, filepath=DEFAULT_INPUT_FILE):
-    """Write an input chain for later playback. Returns the path."""
+    """Write an input chain for later playback. Returns the path, or
+    None if the file couldn't be written."""
     if not inputs:
         return filepath
-    with open(filepath, "w") as f:
-        f.write("# Bot inputs: frame,held,pressed\n")
-        f.write("# Play back with K in editor (no path drawn)\n")
-        for i, (held, pressed) in enumerate(inputs):
-            f.write(f"{i},{1 if held else 0},{1 if pressed else 0}\n")
+    try:
+        os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+        with open(filepath, "w") as f:
+            f.write("# Bot inputs: frame,held,pressed\n")
+            f.write("# Play back with K in editor (no path drawn)\n")
+            for i, (held, pressed) in enumerate(inputs):
+                f.write(f"{i},{1 if held else 0},{1 if pressed else 0}\n")
+    except OSError:
+        return None
     return filepath
 
 
 def load_bot_inputs(filepath=DEFAULT_INPUT_FILE):
     """Load a saved input chain for playback."""
     inputs = []
-    if not os.path.exists(filepath):
-        return inputs
-    with open(filepath, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split(",")
-            if len(parts) >= 3:
-                inputs.append((bool(int(parts[1])), bool(int(parts[2]))))
+    try:
+        if not os.path.exists(filepath):
+            return inputs
+        with open(filepath, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split(",")
+                if len(parts) >= 3:
+                    inputs.append((bool(int(parts[1])), bool(int(parts[2]))))
+    except (OSError, ValueError):
+        return []
     return inputs
 
 
@@ -460,11 +469,16 @@ class LoopholeBot:
     """
 
     def __init__(self, objects, waypoints, params=None, *,
-                 frontier_cap=None, backtrack_depth=None):
+                 frontier_cap=None, backtrack_depth=None,
+                 use_brute_force=False):
         self.objects = objects
         self.params = params
         self.frontier_cap = frontier_cap
         self.backtrack_depth = backtrack_depth
+        # Note: the brute-force engine has no cost function to bias, so
+        # in this mode the result is *a* win, not one that hugs the
+        # drawn path — see HumanBot._brute_force_phase.
+        self.use_brute_force = use_brute_force
         self.path = DrawnPath(waypoints)
         self.max_deviation_px = 0.0
         self.off_path_fraction = 0.0
@@ -543,6 +557,7 @@ class LoopholeBot:
             solver.FRONTIER_CAP = self.frontier_cap
         if self.backtrack_depth is not None:
             solver.BACKTRACK_DEPTH = self.backtrack_depth
+        solver.USE_BRUTE_FORCE = self.use_brute_force
         wp, mwp, inputs, won = solver.solve(
             screen, clock, max_frames=max_frames,
             seed_inputs=seed or None, time_budget=time_budget)
@@ -551,6 +566,6 @@ class LoopholeBot:
             # The plain follow beat the level and the search did not
             # improve on it — keep the route the user drew.
             inputs = seed
-            wp, mwp, won = solver.replay_for_waypoints(seed)
+            wp, mwp, won, _ = solver.replay_for_waypoints(seed)
         self._measure_deviation(inputs)
         return wp, mwp, inputs, won

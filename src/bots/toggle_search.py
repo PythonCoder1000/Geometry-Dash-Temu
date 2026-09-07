@@ -295,10 +295,10 @@ class ToggleSearch:
         if not scored:
             return []
         buckets = {}
-        for cand, key, mx in scored:
+        for cand, key, mx, terminal in scored:
             tc = len(cand)
             b = 0 if tc <= 1 else 1 if tc <= 4 else 2 if tc <= 8 else 3
-            buckets.setdefault(b, []).append((cand, key, mx))
+            buckets.setdefault(b, []).append((cand, key, mx, terminal))
         out = []
         seen = set()
         per_bucket = max(1, self.ELITE_KEEP // max(1, len(buckets)))
@@ -312,7 +312,7 @@ class ToggleSearch:
             if len(out) >= self.ELITE_KEEP:
                 break
             if id(tup[0]) not in seen:
-                out.append((tup[0], tup[1], tup[2]))
+                out.append((tup[0], tup[1], tup[2], tup[3]))
                 seen.add(id(tup[0]))
         return out
 
@@ -321,10 +321,13 @@ class ToggleSearch:
     def _evaluate(self, candidate, start, snap0, initial_held):
         """Simulate ``candidate`` from ``snap0``.
 
-        Returns ``(score, won, max_x)``.  The score is the terminal frame
-        (survival) plus any caller-supplied fitness, so a candidate that
-        lives longer on a viable line outranks one that dives further and
-        dies.
+        Returns ``(score, won, max_x, terminal)``.  ``score`` is the
+        terminal frame (survival) plus any caller-supplied fitness, so a
+        candidate that lives longer on a viable line outranks one that
+        dives further and dies. ``terminal`` is kept separate from
+        ``score`` because callers that need an actual frame index (e.g.
+        sizing a commit window) can't use ``score`` once a fitness
+        function has skewed it away from a frame count.
         """
         sim = self.sim
         restore(sim, snap0)
@@ -370,7 +373,7 @@ class ToggleSearch:
         won = bool(sim.won)
         terminal = cur if (sim.alive or sim.won) else cur - 1
         restore(sim, snap0)
-        return terminal + extra, won, max_x
+        return terminal + extra, won, max_x, terminal
 
     def _commit_front(self, candidate, start, end):
         toggles = set(candidate)
@@ -433,12 +436,12 @@ class ToggleSearch:
             scored = []
             winner = None
             for cand in self._population(start, elites):
-                score, won, mx = self._evaluate(cand, start, snap0,
-                                                initial_held)
+                score, won, mx, terminal = self._evaluate(cand, start, snap0,
+                                                           initial_held)
                 if won:
                     winner = cand
                     break
-                scored.append((cand, (score, mx), mx))
+                scored.append((cand, (score, mx), mx, terminal))
             if winner is not None:
                 self._commit_all(winner, start)
                 if self.sim.won:
@@ -452,8 +455,8 @@ class ToggleSearch:
                 fail += self.ROLLBACK_GROWTH
                 continue
 
-            top_cand, top_key, top_x = elites[0]
-            self._commit_front(top_cand, start, int(top_key[0]))
+            top_cand, top_key, top_x, top_terminal = elites[0]
+            self._commit_front(top_cand, start, top_terminal)
 
             if self.sim.x > best_x + 0.5:
                 best_x = float(self.sim.x)

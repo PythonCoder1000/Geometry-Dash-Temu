@@ -47,6 +47,7 @@ from .graphics import (
     draw_bg, txt, btn, make_stars, make_mountains, lighter, darker,
 )
 from .input_guard import ClickGuard
+from .objects import active_start, set_active_start, start_objects
 from . import bot_saves
 from . import settings
 
@@ -71,9 +72,23 @@ _bot_backtrack_idx = 4         # default = 160 (matches AutoBot.BACKTRACK_DEPTH)
 # thing the user can usefully bound is total wall-clock.
 _bot_time_budget_opts = [10, 20, 30, 60, 120, 300]
 _bot_time_budget_idx = 3       # default = 60 s
-# Fix-only: when True, Find Path only verifies the current seed and,
-# if it doesn't still win, runs ONE short A* repair to patch the break.
-_bot_fix_only = False
+# Brute force: when True, Phase 3/4 (A* + checkpoint backtracking +
+# toggle search) is replaced by the exhaustive decision-point search —
+# see bots/brute_force.py. Off by default: A*/toggle is the
+# better-tested, generally faster path; brute force trades that speed
+# for a completeness guarantee (given enough budget it can prove no
+# win exists, not just fail to find one).
+_bot_use_brute_force = False
+
+# Multi-process brute force — only has any effect while brute force
+# itself is ON. Off by default: an earlier parallel-search feature was
+# removed from this exact menu for causing the CPU-peg / unresponsive-
+# ESC bug (see this module's docstring); the rebuilt version fixes the
+# failure mode that likely caused it (pool always torn down, batches
+# small enough to stay ESC-responsive — see brute_force.py's "Parallel
+# search" block), but it's still new enough to keep as an explicit
+# opt-in rather than a new default.
+_bot_use_parallel = False
 
 # Which bot runs. Exactly two exist; there is no third code path.
 BOT_HUMAN = "human"
@@ -94,13 +109,34 @@ _last_mirror_waypoints = None
 _last_inputs = None
 _last_status = ""
 _last_note = ""
+# Which Start Pos was active when the cached result above was produced.
+# A level with 2+ Start Positions can be solved from any of them, and a
+# run for one is meaningless — often unwinnable outright — replayed from
+# another. Without tracking this, cycling Start Pos (Q/E) left a stale
+# "solved" result on screen, and re-solving fed its inputs back in as a
+# seed that no longer matched the spawn, turning a real solve into a
+# bogus "partial".
+_last_start_key = None
 
 
 def _deepest_x(waypoints):
-    return max((p[0] for p in waypoints), default=-1.0)
+    # Where the run actually ends, not any transient peak along the
+    # way (see BestSolution.offer in bots/human.py for the same fix
+    # and why: a bounce/collision nudge can push x briefly past where
+    # the run really finishes).
+    return waypoints[-1][0] if waypoints else -1.0
 
 
-def _record_result(waypoints, mirror_waypoints, inputs, status, note=""):
+def _start_key(objects):
+    """Identity of the Start Pos attempts currently spawn from, or
+    ``None`` if the level has none. ``(x, y)`` is stable across saves —
+    unlike an oid, every Start Pos has coordinates."""
+    start = active_start(objects)
+    return (start["x"], start["y"]) if start is not None else None
+
+
+def _record_result(waypoints, mirror_waypoints, inputs, status, note="",
+                   start_key=None):
     """Adopt a new solve only if it beats the cached one.
 
     A solve is better when it wins and the cached one did not, or when
@@ -108,16 +144,22 @@ def _record_result(waypoints, mirror_waypoints, inputs, status, note=""):
     pressing Find Path a second time could replace a solved run with a
     shallower partial — the "bot fails a section it already cleared"
     report, which was a UI bookkeeping bug rather than a search bug.
+
+    A result solved from a *different* Start Pos than the cached one
+    always wins outright — the two aren't comparable, and holding onto
+    a stale result would misreport this run's status.
     """
     global _last_waypoints, _last_mirror_waypoints, _last_inputs
-    global _last_status, _last_note
+    global _last_status, _last_note, _last_start_key
     if not waypoints:
         return False
-    was_ok = _last_status == "ok"
+    stale_start = (_last_start_key is not None
+                   and start_key != _last_start_key)
+    was_ok = _last_status == "ok" and not stale_start
     now_ok = status == "ok"
     if was_ok and not now_ok:
         return False
-    if was_ok == now_ok and _last_waypoints is not None:
+    if not stale_start and was_ok == now_ok and _last_waypoints is not None:
         if _deepest_x(waypoints) <= _deepest_x(_last_waypoints):
             return False
     _last_waypoints = list(waypoints)
@@ -125,6 +167,7 @@ def _record_result(waypoints, mirror_waypoints, inputs, status, note=""):
     _last_inputs = list(inputs)
     _last_status = status
     _last_note = note
+    _last_start_key = start_key
     return True
 
 
@@ -141,12 +184,13 @@ def get_last_mirror_waypoints():
 def clear_last_solve():
     """Discard the cached solution. Call after edits invalidate the path."""
     global _last_waypoints, _last_mirror_waypoints, _last_inputs
-    global _last_status, _last_note
+    global _last_status, _last_note, _last_start_key
     _last_waypoints = None
     _last_mirror_waypoints = None
     _last_inputs = None
     _last_status = ""
     _last_note = ""
+    _last_start_key = None
 
 
 def _strip_internal(objects):
@@ -164,22 +208,24 @@ def _run_solver(screen, clock, objects, params=None, kind=None,
                 drawn_path=None):
     """Run the selected bot with the current knobs.
 
-    Returns ``(waypoints, mirror_waypoints, inputs, status, error)``.
-    ``error`` is "" on success/partial and non-empty on hard failure, so
-    a crash surfaces to the user instead of collapsing into a bare
-    "failed".
+    Returns ``(waypoints, mirror_waypoints, inputs, status, error,
+    start_key)``. ``error`` is "" on success/partial and non-empty on
+    hard failure, so a crash surfaces to the user instead of collapsing
+    into a bare "failed".
     """
     global _last_note
     kind = kind or _BOT_KINDS[_bot_kind_idx]
+    start_key = _start_key(objects)
     try:
         clean = _strip_internal(objects)
         max_frames = _bot_max_frames_opts[_bot_max_frames_idx]
-        seed = list(_last_inputs) if _last_inputs else None
+        # A cached seed only applies to the Start Pos it was solved
+        # from — replaying it against a different spawn (the level has
+        # 2+ Start Positions and the active one changed) would report a
+        # bogus "partial" for a level section the bot never even ran.
+        seed = (list(_last_inputs)
+                if _last_inputs and start_key == _last_start_key else None)
         time_budget = _bot_time_budget_opts[_bot_time_budget_idx]
-        if _bot_fix_only and not seed:
-            return None, [], [], "failed", (
-                "fix-only needs a saved run to repair — "
-                "solve once or load a saved run first")
 
         if kind == BOT_LOOPHOLE:
             if not drawn_path:
@@ -190,7 +236,8 @@ def _run_solver(screen, clock, objects, params=None, kind=None,
             bot = LoopholeBot(
                 clean, list(drawn_path), params=params,
                 frontier_cap=_bot_frontier_caps[_bot_frontier_idx],
-                backtrack_depth=_bot_backtrack_depths[_bot_backtrack_idx])
+                backtrack_depth=_bot_backtrack_depths[_bot_backtrack_idx],
+                use_brute_force=_bot_use_brute_force)
             wp, mwp, inputs, won = bot.solve(
                 screen, clock, max_frames=max_frames, seed_inputs=seed,
                 time_budget=time_budget)
@@ -207,22 +254,25 @@ def _run_solver(screen, clock, objects, params=None, kind=None,
             bot = HumanBot(clean, params=params)
             bot.FRONTIER_CAP = _bot_frontier_caps[_bot_frontier_idx]
             bot.BACKTRACK_DEPTH = _bot_backtrack_depths[_bot_backtrack_idx]
+            bot.USE_BRUTE_FORCE = _bot_use_brute_force
+            bot.USE_PARALLEL_SEARCH = _bot_use_parallel
             wp, mwp, inputs, won = bot.solve(
                 screen, clock, max_frames=max_frames, seed_inputs=seed,
-                fix_only=_bot_fix_only, time_budget=time_budget)
+                time_budget=time_budget)
             note = ("frame-perfect fallback — not humanly playable"
                     if bot.used_frame_perfect else
                     "played within human timing" if won else "")
 
         if not wp:
             return None, [], [], "failed", (
-                "no path found (level may be unsolvable)")
+                "no path found (level may be unsolvable)"), start_key
         _last_note = note
         return (list(wp), list(mwp), list(inputs),
-                ("ok" if won else "partial"), "")
+                ("ok" if won else "partial"), "", start_key)
     except Exception as exc:
         traceback.print_exc()
-        return None, [], [], "failed", f"crash: {type(exc).__name__}: {exc}"
+        return (None, [], [], "failed",
+                f"crash: {type(exc).__name__}: {exc}", start_key)
 
 
 def _pick_saved_run(screen, clock, level_key):
@@ -375,14 +425,23 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
     """
     # The stepper closures below declare their own globals; only the
     # toggle and the result cache are written directly here.
-    global _bot_fix_only
+    global _bot_use_brute_force, _bot_use_parallel
     global _last_waypoints, _last_mirror_waypoints, _last_inputs
-    global _last_status, _last_note
+    global _last_status, _last_note, _last_start_key
+
+    # A path cached from a *different* Start Pos (the level has 2+ and
+    # the active one changed since it was solved) is not a valid seed
+    # or "already ok" floor here — drop it so this menu starts clean
+    # instead of quietly measuring against the wrong spawn.
+    current_start_key = _start_key(objects)
+    if _last_start_key is not None and current_start_key != _last_start_key:
+        clear_last_solve()
 
     target_path = drawn_path if drawn_path is not None else precomputed_path
     if precomputed_path is not None and not _last_waypoints:
         _last_waypoints = list(precomputed_path)
         _last_status = "ok"
+        _last_start_key = current_start_key
 
     from .physics import PhysicsParams
     params = PhysicsParams.from_meta(meta)
@@ -412,13 +471,14 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
         to carry duplicate copies of this block, which is how they drifted
         apart on error handling.
         """
-        wp, mwp, inputs, status, err = _run_solver(
+        wp, mwp, inputs, status, err, start_key = _run_solver(
             screen, clock, objects, params=params,
             drawn_path=target_path)
         if not wp:
             return None, (f"Solver failed — {err}" if err
                           else "Solver failed."), C_DANGER
-        adopted = _record_result(wp, mwp, inputs, status, _last_note)
+        adopted = _record_result(wp, mwp, inputs, status, _last_note,
+                                 start_key=start_key)
         if not adopted:
             return ((list(_last_waypoints), _last_status),
                     "Kept the earlier, deeper run (this one got less far).",
@@ -545,15 +605,26 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                  lambda: _set_bt((_bot_backtrack_idx + 1) % len(_bot_backtrack_depths)))
         row_y += _STEP
 
-        # ---- Fix-only toggle ---------------------------------------------
-        fo_label = "ON" if _bot_fix_only else "OFF"
-        fo_col = (130, 90, 60) if _bot_fix_only else (70, 70, 80)
-        txt(screen, "Fix only", col_x, row_y, 16, C_WHITE)
-        b_fo = btn(screen, fo_label, val_x + 80, row_y + 12, 200, 30,
-                   fo_col, mpos, font_size=15)
-        if click_pos and b_fo.collidepoint(click_pos):
-            _bot_fix_only = not _bot_fix_only
+        # ---- Brute force toggle ---------------------------------------
+        bf_label = "ON" if _bot_use_brute_force else "OFF"
+        bf_col = (130, 90, 60) if _bot_use_brute_force else (70, 70, 80)
+        txt(screen, "Brute force", col_x, row_y, 16, C_WHITE)
+        b_bf = btn(screen, bf_label, val_x + 80, row_y + 12, 200, 30,
+                   bf_col, mpos, font_size=15)
+        if click_pos and b_bf.collidepoint(click_pos):
+            _bot_use_brute_force = not _bot_use_brute_force
         row_y += _STEP
+
+        # ---- Parallel brute force toggle (only matters with the above ON)
+        if _bot_use_brute_force:
+            par_label = "ON" if _bot_use_parallel else "OFF"
+            par_col = (130, 90, 60) if _bot_use_parallel else (70, 70, 80)
+            txt(screen, "Parallel (experimental)", col_x, row_y, 16, C_WHITE)
+            b_par = btn(screen, par_label, val_x + 80, row_y + 12, 200, 30,
+                       par_col, mpos, font_size=15)
+            if click_pos and b_par.collidepoint(click_pos):
+                _bot_use_parallel = not _bot_use_parallel
+            row_y += _STEP
 
         # ---- Last solve summary ------------------------------------------
         if _last_status:
@@ -664,7 +735,8 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                         status=_last_status or "ok",
                         beam_width=_bot_frontier_caps[_bot_frontier_idx],
                         attempts=1,
-                        bot=_BOT_LABELS[kind], note=_last_note)
+                        bot=_BOT_LABELS[kind], note=_last_note,
+                        start_key=_last_start_key)
                     if ok:
                         info_msg = f"Saved run \"{name}\"."
                         info_color = C_SUCCESS
@@ -685,7 +757,20 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                 # status instead of taking it on faith.
                 from .bots import HumanBot
                 inputs = list(picked["inputs"])
-                verifier = HumanBot(_strip_internal(objects), params=params)
+                verify_objects = _strip_internal(objects)
+                saved_start = picked.get("start_key")
+                # Activate the exact Start Pos this run was solved from
+                # before replaying it — a level with 2+ Start Positions
+                # otherwise reports a bogus "partial" whenever the
+                # currently active one differs, even though the run is
+                # perfectly valid for the start it was actually solved
+                # against.
+                if saved_start is not None:
+                    for o in start_objects(verify_objects):
+                        if (o["x"], o["y"]) == tuple(saved_start):
+                            set_active_start(verify_objects, o)
+                            break
+                verifier = HumanBot(verify_objects, params=params)
                 wp, mwp, won, last_alive = verifier.verify(inputs)
                 still_ok = won and (picked.get("status") or "ok") == "ok"
                 _last_inputs = inputs
@@ -695,12 +780,20 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                 if still_ok:
                     _last_status = "ok"
                     _last_note = picked.get("note") or ""
+                    _last_start_key = (tuple(saved_start) if saved_start
+                                       is not None else _start_key(verify_objects))
                     info_msg = (f"Loaded \"{picked['name']}\" "
                                 f"({len(_last_inputs)} frames).")
                     info_color = C_SUCCESS
                 else:
                     _last_status = "partial" if wp else "failed"
-                    _last_note = "level changed since this run was saved"
+                    _last_start_key = None
+                    if saved_start is not None and (
+                            saved_start != _start_key(objects)):
+                        _last_note = ("saved from a different Start "
+                                      "Position than the one active now")
+                    else:
+                        _last_note = "level changed since this run was saved"
                     info_msg = (f"\"{picked['name']}\" no longer wins on "
                                 f"this level — loaded as {_last_status}.")
                     info_color = (250, 200, 80)
