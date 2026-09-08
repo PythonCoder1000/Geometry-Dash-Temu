@@ -9,7 +9,12 @@ import functools
 
 import pygame
 
-from .constants import CELL
+from .constants import CELL, UNITS_PER_BLOCK
+
+# Ratio that converts a CELL-px literal into the equivalent GD-unit
+# value, preserving the exact fraction-of-block it represents (both CELL
+# and UNITS_PER_BLOCK denote "1 block" in their own scale). 30/50 = 0.6.
+_PX_TO_UNIT_RATIO = UNITS_PER_BLOCK / CELL
 
 
 def clamp(v, lo, hi):
@@ -263,4 +268,149 @@ def saw_hitbox(gx, gy, scale=1.0, scale_y=None):
     """
     base = cell_rect(gx, gy).inflate(-16, -16)
     return _scale_rect_around_cell_center(base, gx, gy, scale, scale_y)
+
+
+# ---------------------------------------------------------------------------
+# Unit-space (GD units, float) hitbox builders.
+#
+# Mirror the CELL-px functions above exactly, but in real GD units using
+# pygame.FRect (no integer snapping) — see docs/development/UNITS_REFACTOR.md
+# ("Decision: collision precision"). Every pixel-literal inset in the
+# functions above is a fraction of CELL by design; each is converted here
+# via ``* _PX_TO_UNIT_RATIO`` (30/50 = 0.6), preserving the identical
+# fraction-of-block ratio rather than retuning it. These are additive:
+# nothing above is changed or removed by adding these.
+# ---------------------------------------------------------------------------
+
+def _scale_frect_around_cell_center(frect, gx, gy, scale, scale_y=None):
+    """Float-rect analogue of :func:`_scale_rect_around_cell_center`."""
+    sx, sy = _resolve_scale(scale, scale_y)
+    if sx == 1.0 and sy == 1.0:
+        return frect
+    cx = gx * UNITS_PER_BLOCK + UNITS_PER_BLOCK / 2.0
+    cy = gy * UNITS_PER_BLOCK + UNITS_PER_BLOCK / 2.0
+    nw = frect.w * sx
+    nh = frect.h * sy
+    nx = cx + (frect.x - cx) * sx
+    ny = cy + (frect.y - cy) * sy
+    return pygame.FRect(nx, ny, max(1e-6, nw), max(1e-6, nh))
+
+
+def cell_rect_units(gx, gy, scale=1.0, scale_y=None):
+    base = pygame.FRect(gx * UNITS_PER_BLOCK, gy * UNITS_PER_BLOCK,
+                         UNITS_PER_BLOCK, UNITS_PER_BLOCK)
+    return _scale_frect_around_cell_center(base, gx, gy, scale, scale_y)
+
+
+_SLAB_LOCAL_UNITS = {
+    rot: tuple(v * _PX_TO_UNIT_RATIO for v in local)
+    for rot, local in _SLAB_LOCAL.items()
+}
+
+
+def slab_rect_units(gx, gy, rotation=0, scale=1.0, scale_y=None):
+    lx, ly, lw, lh = _SLAB_LOCAL_UNITS[normalize_rotation(rotation)]
+    base = pygame.FRect(gx * UNITS_PER_BLOCK + lx, gy * UNITS_PER_BLOCK + ly,
+                         lw, lh)
+    return _scale_frect_around_cell_center(base, gx, gy, scale, scale_y)
+
+
+def rotate_local_frect(local_frect, rotation, size=UNITS_PER_BLOCK):
+    """Float-rect analogue of :func:`rotate_local_rect` — no rounding."""
+    rot = normalize_rotation(rotation)
+    if rot == 0:
+        return pygame.FRect(local_frect)
+    cx = size / 2.0
+    cy = size / 2.0
+    points = [
+        (local_frect.left, local_frect.top),
+        (local_frect.right, local_frect.top),
+        (local_frect.right, local_frect.bottom),
+        (local_frect.left, local_frect.bottom),
+    ]
+    rotated = []
+    for lx, ly in points:
+        dx = lx - cx
+        dy = ly - cy
+        if rot == 90:
+            rdx, rdy = -dy, dx
+        elif rot == 180:
+            rdx, rdy = -dx, -dy
+        else:
+            rdx, rdy = dy, -dx
+        rotated.append((cx + rdx, cy + rdy))
+    min_x = min(p[0] for p in rotated)
+    max_x = max(p[0] for p in rotated)
+    min_y = min(p[1] for p in rotated)
+    max_y = max(p[1] for p in rotated)
+    return pygame.FRect(min_x, min_y, max_x - min_x, max_y - min_y)
+
+
+@functools.lru_cache(maxsize=16)
+def _spike_base_rotated_units(rotation, half):
+    if half:
+        base = (pygame.FRect(17 * _PX_TO_UNIT_RATIO, 32 * _PX_TO_UNIT_RATIO,
+                              15 * _PX_TO_UNIT_RATIO, 17 * _PX_TO_UNIT_RATIO),)
+    else:
+        base = (pygame.FRect(17 * _PX_TO_UNIT_RATIO, 17 * _PX_TO_UNIT_RATIO,
+                              15 * _PX_TO_UNIT_RATIO, 32 * _PX_TO_UNIT_RATIO),)
+    return tuple(rotate_local_frect(r, rotation) for r in base)
+
+
+def spike_hitboxes_units(gx, gy, rotation=0, half=False, scale=1.0, scale_y=None):
+    x = gx * UNITS_PER_BLOCK
+    y = gy * UNITS_PER_BLOCK
+    rects = [pygame.FRect(r.x + x, r.y + y, r.w, r.h) for r in
+              _spike_base_rotated_units(normalize_rotation(rotation), bool(half))]
+    sx, sy = _resolve_scale(scale, scale_y)
+    if sx == 1.0 and sy == 1.0:
+        return rects
+    return [_scale_frect_around_cell_center(r, gx, gy, (sx, sy)) for r in rects]
+
+
+@functools.lru_cache(maxsize=8)
+def _pad_trigger_base_rotated_units(rotation):
+    return rotate_local_frect(
+        pygame.FRect(5 * _PX_TO_UNIT_RATIO, (CELL - 18) * _PX_TO_UNIT_RATIO,
+                     (CELL - 10) * _PX_TO_UNIT_RATIO, 18 * _PX_TO_UNIT_RATIO),
+        rotation)
+
+
+def pad_trigger_rect_units(gx, gy, rotation=0):
+    base = _pad_trigger_base_rotated_units(normalize_rotation(rotation))
+    x = gx * UNITS_PER_BLOCK
+    y = gy * UNITS_PER_BLOCK
+    return pygame.FRect(base.x + x, base.y + y, base.w, base.h)
+
+
+def slope_polygon_units(gx, gy, rotation=0, scale=1.0, scale_y=None):
+    """Unit-space analogue of :func:`slope_polygon`."""
+    cl = gx * UNITS_PER_BLOCK
+    cr = cl + UNITS_PER_BLOCK
+    ct = gy * UNITS_PER_BLOCK
+    cb = ct + UNITS_PER_BLOCK
+    try:
+        r = int(round(float(rotation) / 90.0)) % 4
+    except (TypeError, ValueError):
+        r = 0
+    if r == 0:
+        pts = [(cl, cb), (cr, cb), (cr, ct)]
+    elif r == 1:
+        pts = [(cl, cb), (cr, cb), (cl, ct)]
+    elif r == 2:
+        pts = [(cl, ct), (cr, ct), (cl, cb)]
+    else:
+        pts = [(cl, ct), (cr, ct), (cr, cb)]
+    sx, sy = _resolve_scale(scale, scale_y)
+    if sx == 1.0 and sy == 1.0:
+        return pts
+    cx = cl + UNITS_PER_BLOCK / 2.0
+    cy = ct + UNITS_PER_BLOCK / 2.0
+    return [(cx + (px - cx) * sx, cy + (py - cy) * sy) for px, py in pts]
+
+
+def saw_hitbox_units(gx, gy, scale=1.0, scale_y=None):
+    base = cell_rect_units(gx, gy).inflate(-16 * _PX_TO_UNIT_RATIO,
+                                            -16 * _PX_TO_UNIT_RATIO)
+    return _scale_frect_around_cell_center(base, gx, gy, scale, scale_y)
 

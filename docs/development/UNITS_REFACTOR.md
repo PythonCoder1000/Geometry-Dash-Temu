@@ -60,20 +60,37 @@ already assumed, so the *physics numbers* don't change. What changes is
   render constant. A handful of literal-px assertions will need converting
   to unit-space.
 
+## Decision: collision precision (2026-09-07)
+
+`pygame.Rect` snaps to integer pixels — at `CELL=50` that's 50
+subdivisions/block. Naively rebuilding the same hitboxes as integer *GD
+units* (30/block) would coarsen collision precision: a real physics
+regression, not just a representation change. Real GD (cocos2d) uses
+floating-point coordinates internally, not integer-snapped ones. Decided:
+**Phase 3 uses `pygame.FRect` (float rect, available in pygame-ce) in
+unit-space** for all collision/hitbox math, matching GD's actual float
+model. Rects are rasterized to integer-pixel `pygame.Rect` only at the
+render boundary (`world_to_screen`), never for collision resolution.
+Existing pixel-literal hitbox insets (e.g. spike's `Rect(17, 32, 15, 17)`)
+are fractions of `CELL` by design (see geometry.py's own comments); they
+convert exactly via `px_literal * (UNITS_PER_BLOCK / CELL)` = `px_literal
+* 0.6`, preserving the identical fraction-of-block ratio, not retuning it.
+
 ## Phases (checklist — kept in sync here and restated in chat each turn)
 
-- [ ] **Phase 0 — scouting** (done: coupling map above)
-- [ ] **Phase 1 — foundation**: add `UNITS_PER_BLOCK = 30` and a
-      `src/units.py` (or extend `geometry.py`) with `block_to_units`,
-      `world_to_screen`, `screen_to_world`. Rewrite `constants.py` physics
-      block so gravity/jump/speed constants are defined directly in
-      units/second (no `PX_PER_UNIT`/`VEL_PX_PER_TICK` bake-in). Keep `CELL`
-      as a render-only constant.
+- [x] **Phase 0 — scouting** (done: coupling map above)
+- [x] **Phase 1 — foundation**: `UNITS_PER_BLOCK = 30`, `src/units.py`
+      (`block_to_units`, `world_to_screen`, `screen_to_world`), physics
+      constants redefined in units/second first, px/tick derived from them.
+      Zero behavior change (test_physics.py 28/28, test_game.py 504/504
+      bit-for-bit). Committed `1079450`.
 - [ ] **Phase 2 — player core**: migrate `Player.x/y/vx/vy` and every
       spawn/checkpoint/teleport/mode-transition site in `player/core.py` to
       units.
-- [ ] **Phase 3 — collision & geometry**: migrate `player/collision.py` and
-      `geometry.py` hitbox/rect construction to unit-space.
+- [ ] **Phase 3 — collision & geometry**: add `pygame.FRect` unit-space
+      hitbox builders to `geometry.py` (parallel to the existing px-space
+      ones, additive/zero-risk first step), then migrate
+      `player/collision.py` to consume them in lockstep with Phase 2.
 - [ ] **Phase 4 — bot parity**: migrate `bots/sim.py` and
       `jump_predictor.py` onto the same shared unit-space helpers as
       `player/core.py`/`collision.py` (delegate, don't re-derive).
