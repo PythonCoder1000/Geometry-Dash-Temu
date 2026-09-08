@@ -412,6 +412,7 @@ T_SPAWN_TRIGGER = "spawn_trigger"
 T_TOGGLE_TRIGGER = "toggle_trigger"
 T_STOP_TRIGGER = "stop_trigger"
 T_SEQUENCE_TRIGGER = "sequence_trigger"
+T_REPEAT_TRIGGER = "repeat_trigger"
 T_SCALE_TRIGGER = "scale_trigger"
 T_ALPHA_TRIGGER = "alpha_trigger"
 # Editor-only helpers (inert at play time).
@@ -493,7 +494,7 @@ TRIGGER_TYPES = frozenset({T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER,
                            T_COLOR_TRIGGER, T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
                            T_TIME_WARP, T_FOLLOW_TRIGGER, T_BLACKOUT_TRIGGER,
                            T_SPAWN_TRIGGER, T_TOGGLE_TRIGGER, T_STOP_TRIGGER,
-                           T_SEQUENCE_TRIGGER, T_SCALE_TRIGGER,
+                           T_SEQUENCE_TRIGGER, T_REPEAT_TRIGGER, T_SCALE_TRIGGER,
                            T_ALPHA_TRIGGER, T_ZOOM_TRIGGER,
                            T_CAM_OFFSET_TRIGGER, T_CAM_ROTATE_TRIGGER,
                            T_CAM_EDGE_TRIGGER, T_CAM_GUIDE_TRIGGER,
@@ -519,7 +520,8 @@ ITEM_LOGIC_TRIGGER_TYPES = frozenset({
 # chain must itself remain live), and their own touch is never gated by
 # _trigger_active.
 CONTROL_TRIGGER_TYPES = frozenset({T_SPAWN_TRIGGER, T_TOGGLE_TRIGGER,
-                                   T_STOP_TRIGGER, T_SEQUENCE_TRIGGER}
+                                   T_STOP_TRIGGER, T_SEQUENCE_TRIGGER,
+                                   T_REPEAT_TRIGGER}
                                   ) | ITEM_LOGIC_TRIGGER_TYPES
 COLLECTIBLE_ITEM_TYPES = frozenset({T_ITEM_PICKUP})
 # Checkpoint 8: data-only keyframe markers, indexed by animation id

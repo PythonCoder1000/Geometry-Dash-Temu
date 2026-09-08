@@ -9,7 +9,8 @@ from ..constants import (
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
     T_BLACKOUT_TRIGGER, T_SPAWN_TRIGGER, T_TOGGLE_TRIGGER, T_STOP_TRIGGER,
-    T_SEQUENCE_TRIGGER, T_SCALE_TRIGGER, T_ALPHA_TRIGGER, TRIGGER_TYPES,
+    T_SEQUENCE_TRIGGER, T_REPEAT_TRIGGER, T_SCALE_TRIGGER, T_ALPHA_TRIGGER,
+    TRIGGER_TYPES,
     T_ZOOM_TRIGGER, T_CAM_OFFSET_TRIGGER, T_CAM_ROTATE_TRIGGER,
     T_CAM_EDGE_TRIGGER, T_CAM_GUIDE_TRIGGER,
     T_GRAYSCALE_TRIGGER, T_SEPIA_TRIGGER, T_INVERT_TRIGGER, T_HUE_TRIGGER,
@@ -521,6 +522,37 @@ class TriggerMixin:
                 remaining.append(spawn)
         self.pending_spawns = remaining
 
+    def _start_repeat_trigger(self, trig):
+        """Fire the target group once every Interval seconds, Count times
+        total -- a Spawn Trigger that loops instead of firing once, so a
+        mapper doesn't have to stack N Spawn Triggers by hand to run
+        something "every 0.5s for 50 cycles"."""
+        interval = max(0.05, float(trig.get("interval", 0.5)))
+        interval_frames = max(1, int(round(interval * PHYSICS_TPS)))
+        count = max(1, int(trig.get("count", 10)))
+        group = trig.get("target_group")
+        if not group:
+            return
+        self.pending_repeats.append({
+            "due_frame": self.frame + interval_frames, "group": group,
+            "interval_frames": interval_frames, "remaining": count,
+        })
+
+    def _step_pending_repeats(self):
+        if not self.pending_repeats:
+            return
+        remaining = []
+        for rep in self.pending_repeats:
+            if self.frame >= rep["due_frame"]:
+                self._fire_group(rep["group"])
+                rep["remaining"] -= 1
+                if rep["remaining"] > 0:
+                    rep["due_frame"] += rep["interval_frames"]
+                    remaining.append(rep)
+            else:
+                remaining.append(rep)
+        self.pending_repeats = remaining
+
     def _fire_group(self, group):
         """Run every trigger in ``group`` immediately -- shared by Spawn/
         Sequence's delayed dispatch and the Checkpoint 7 item/counter
@@ -733,6 +765,8 @@ class TriggerMixin:
             self._apply_stop_trigger(o)
         elif t == T_SEQUENCE_TRIGGER:
             self._start_sequence_trigger(o)
+        elif t == T_REPEAT_TRIGGER:
+            self._start_repeat_trigger(o)
         elif t == T_ZOOM_TRIGGER:
             self._start_zoom_trigger(o)
         elif t == T_CAM_OFFSET_TRIGGER:

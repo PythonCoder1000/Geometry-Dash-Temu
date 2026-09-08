@@ -140,7 +140,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # Checkpoint 5 (editor reference Sec 4, logic/group family):
         # Scale/Alpha animations, Spawn/Sequence's delayed-fire queue, and
         # the set of group ids a Toggle Trigger has disabled.
-        "active_scales", "active_alphas", "pending_spawns",
+        "active_scales", "active_alphas", "pending_spawns", "pending_repeats",
         "_trigger_disabled",
         "blackout_value", "blackout_target", "blackout_start",
         "blackout_start_frame", "blackout_frames",
@@ -293,6 +293,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.active_alphas = []
         self.active_keyframe_anims = []
         self.pending_spawns = []
+        self.pending_repeats = []
         self._trigger_disabled = set()
         # Checkpoint 7: non-persistent items start at 0; a persisted item
         # id (Item Pers Trigger) re-seeds from its last snapshot instead.
@@ -1291,6 +1292,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self._step_cam_rotation_animations()
         self._step_screen_effects()
         self._step_pending_spawns()
+        self._step_pending_repeats()
         self._step_timers()
         self._step_count_watchers()
         self._step_follow_triggers()

@@ -43,6 +43,7 @@ from .constants import (
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
     T_BLACKOUT_TRIGGER,
     T_SPAWN_TRIGGER, T_TOGGLE_TRIGGER, T_STOP_TRIGGER, T_SEQUENCE_TRIGGER,
+    T_REPEAT_TRIGGER,
     T_SCALE_TRIGGER, T_ALPHA_TRIGGER,
     T_ZOOM_TRIGGER, T_CAM_OFFSET_TRIGGER, T_CAM_ROTATE_TRIGGER,
     T_CAM_EDGE_TRIGGER, T_CAM_GUIDE_TRIGGER,
@@ -508,6 +509,18 @@ _SPEC_LIST = [
                              persist="always"),
                        Field("step_delay", "Step Delay (s)", "float", 0.5,
                              0.0, 30.0, step=0.1, decimals=2,
+                             persist="always"),
+                       _F_MULTI_ACTIVATE)),
+    ObjectSpec(T_REPEAT_TRIGGER, "Repeat Trigger", "Fires every trigger in "
+               "the target group once every Interval seconds, for Count "
+               "cycles total — a loop for chaining Spawn-style triggers "
+               "without stacking them by hand.", (255, 160, 220),
+               CAT_TRIGGERS,
+               fields=(_F_GROUP,
+                       Field("interval", "Interval (s)", "float", 0.5,
+                             0.05, 60.0, step=0.05, decimals=2,
+                             persist="always"),
+                       Field("count", "Count", "int", 10, 1, 10000,
                              persist="always"),
                        _F_MULTI_ACTIVATE)),
     ObjectSpec(T_SCALE_TRIGGER, "Scale Trigger", "Resizes the target group "
