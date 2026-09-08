@@ -16,6 +16,14 @@ WIDTH, HEIGHT = 1200, 700
 # Internal editor/world cell.  Gameplay and level files are authored against
 # this stable value; presentation zoom is handled by the camera/editor.
 CELL = 50
+# Real GD units per editor block (verified live 2026-09-07 against the
+# Move Trigger's "Small Step" behavior: Small Step only changes the
+# trigger UI's input granularity, not the underlying scale, which is
+# always 30). This is the canonical world unit — see src/units.py and
+# docs/development/UNITS_REFACTOR.md. CELL above is a RENDER-ONLY
+# constant (px per block on screen at zoom 1); it must not be used by
+# physics/collision/bot code once that refactor is complete.
+UNITS_PER_BLOCK = 30.0
 # Canonical physics tick rate. Physics bible Part 0 / §2.7: real GD
 # standardized its physics loop to 240 TPS in Update 2.2 (Dec 19, 2023);
 # this engine now matches. Every "per tick" constant below is expressed
@@ -57,27 +65,69 @@ COLLISION_SUBSTEP_PX = 1.0
 PLAYER_SIZE = 44
 MINI_PLAYER_SIZE = 24
 
-PX_PER_UNIT = CELL / 30.0
+PX_PER_UNIT = CELL / UNITS_PER_BLOCK
 VEL_PX_PER_TICK = 60.0 * PX_PER_UNIT / PHYSICS_TPS  # == PX_PER_UNIT at 60 TPS
-BASE_MOVE_SPEED = 5.193 * VEL_PX_PER_TICK
+
+# ---------------------------------------------------------------------------
+# Canonical GD-unit constants (units/second, units/second^2).
+#
+# The bible expresses velocities in "Vels" (1 Vel = 60 GD units/second —
+# the legacy 60 fps-per-frame convention) and accelerations as a Vel-like
+# factor times 60^2. VEL_UNIT_PER_S below IS that "1 Vel", named for what
+# it actually is instead of leaving it as an inline literal. These _UPS /
+# _UPS2 constants are the ones player/collision/bot code should migrate
+# to (see docs/development/UNITS_REFACTOR.md); the legacy *_PX-scale names
+# further down are still derived from them so nothing else has to change
+# yet, and their numeric values are unchanged by this refactor.
+# ---------------------------------------------------------------------------
+VEL_UNIT_PER_S = 60.0  # 1 "Vel" (bible units)
+
+def _vel_ups(vels):
+    """Bible "Vels" -> GD units/second."""
+    return vels * VEL_UNIT_PER_S
+
+
+def _accel_ups2(factor):
+    """Bible acceleration factor -> GD units/second^2."""
+    return factor * VEL_UNIT_PER_S ** 2
+
+
+def _ups_to_px_per_tick(v_ups):
+    """GD units/second -> px/tick, at this engine's render/tick scale."""
+    return v_ups * PX_PER_UNIT / PHYSICS_TPS
+
+
+def _ups2_to_px_per_tick2(a_ups2):
+    """GD units/second^2 -> px/tick^2."""
+    return a_ups2 * PX_PER_UNIT / PHYSICS_TPS ** 2
+
+
+BASE_MOVE_SPEED_UPS = _vel_ups(5.193)
+BASE_MOVE_SPEED = _ups_to_px_per_tick(BASE_MOVE_SPEED_UPS)
 
 # 0.216 velocity units per 240 Hz tick (reference §1.3). The old
 # 72 blocks/s² estimate contradicted that and produced a 3.5-block jump.
-GRAVITY = 0.864 * 60.0 ** 2 * PX_PER_UNIT / PHYSICS_TPS ** 2
+GRAVITY_UPS2 = _accel_ups2(0.864)
+GRAVITY = _ups2_to_px_per_tick2(GRAVITY_UPS2)
 
 # Flying modes use 0.9582 base acceleration in updateJump's decompilation.
 # Ship's baseline ascent factor is 0.4; release depends on momentum.
-SHIP_GRAVITY = 0.9582 * 0.4 * 60.0 ** 2 * PX_PER_UNIT / PHYSICS_TPS ** 2
+SHIP_GRAVITY_UPS2 = _accel_ups2(0.9582 * 0.4)
+SHIP_GRAVITY = _ups2_to_px_per_tick2(SHIP_GRAVITY_UPS2)
+SHIP_THRUST_UPS2 = SHIP_GRAVITY_UPS2 * 2.0
 SHIP_THRUST = SHIP_GRAVITY * 2.0
 
 # Cube jump velocity, 1x speed portal: bible §1.4 table, 11.18G.
-JUMP_FORCE = -11.18 * VEL_PX_PER_TICK
+JUMP_FORCE_UPS = -_vel_ups(11.18)
+JUMP_FORCE = _ups_to_px_per_tick(JUMP_FORCE_UPS)
 # Pads: no distinct bible figure (the bible documents gamemode click
 # velocities, not a separate pad table) — ratio to JUMP_FORCE preserved
 # from the pre-retune tuning (pads hit ~12% harder than the yellow orb).
+PAD_FORCE_UPS = JUMP_FORCE_UPS * 1.125
 PAD_FORCE = JUMP_FORCE * 1.125
 # Ball click velocity, 1x speed: bible §1.4 / §1.3, "3.354G (3/10 of cube)".
-BALL_FLIP_FORCE = 3.354 * VEL_PX_PER_TICK
+BALL_FLIP_FORCE_UPS = _vel_ups(3.354)
+BALL_FLIP_FORCE = _ups_to_px_per_tick(BALL_FLIP_FORCE_UPS)
 DASH_SPEED = 16.0
 # Dash duration: not given numerically anywhere in the bible (only
 # qualitative orb-buffering behavior around dash orbs, §2.4). Also dead
@@ -100,13 +150,15 @@ PLAYER_START_GX = 3
 # UFO: bible §1.4, "constant 7G at every speed portal" — this single
 # value is now used for BOTH the grounded launch and the midair flap
 # (see player/core.py's _apply_mode_physics, MODE_UFO branch).
-UFO_JUMP_FORCE = -7.0 * VEL_PX_PER_TICK
+UFO_JUMP_FORCE_UPS = -_vel_ups(7.0)
+UFO_JUMP_FORCE = _ups_to_px_per_tick(UFO_JUMP_FORCE_UPS)
 SPIDER_TELEPORT_RANGE = 6  # cells (legacy; teleports are now unbounded)
 # Robot: bible §1.4, "Hold velocity 5.59G (1/2 of cube jump)... gravity
 # disabled while held." Repurposed from a per-tick thrust subtracted
 # against gravity into the fixed hold velocity itself (gravity is now
 # skipped entirely while the hold is active — see core.py).
-ROBOT_THRUST = 5.59 * VEL_PX_PER_TICK
+ROBOT_THRUST_UPS = _vel_ups(5.59)
+ROBOT_THRUST = _ups_to_px_per_tick(ROBOT_THRUST_UPS)
 # The decompiled timer advances by dt/10 with dt in 60 Hz units:
 # its 1.5 limit represents 15/60 seconds, not 1.5 seconds.
 ROBOT_FLIGHT_SECONDS = 0.25
@@ -114,12 +166,18 @@ ROBOT_FLIGHT_SECONDS = 0.25
 # Per-mode max-fall / max-rise magnitudes (bible §1.3 table). Modes not
 # listed here (Wave has no gravity; Spider's fall is defined by its
 # instant teleport, not acceleration, per §1.4) don't use a fall clamp.
-MAX_FALL_BOX = 15.0 * VEL_PX_PER_TICK      # Cube / Ball / Robot / Spider: -15G
-MAX_FALL_UFO = 6.4 * VEL_PX_PER_TICK       # UFO: -6.4G
-MAX_RISE_UFO = 8.0 * VEL_PX_PER_TICK
-MAX_FALL_SWING = 8.0 * VEL_PX_PER_TICK     # Swing: -8G
-SHIP_MAX_RISE = 8.0 * VEL_PX_PER_TICK      # Ship (holding): 8G
-SHIP_MAX_FALL = 6.4 * VEL_PX_PER_TICK      # Ship (released): -6.4G
+MAX_FALL_BOX_UPS = _vel_ups(15.0)           # Cube / Ball / Robot / Spider: -15G
+MAX_FALL_BOX = _ups_to_px_per_tick(MAX_FALL_BOX_UPS)
+MAX_FALL_UFO_UPS = _vel_ups(6.4)            # UFO: -6.4G
+MAX_FALL_UFO = _ups_to_px_per_tick(MAX_FALL_UFO_UPS)
+MAX_RISE_UFO_UPS = _vel_ups(8.0)
+MAX_RISE_UFO = _ups_to_px_per_tick(MAX_RISE_UFO_UPS)
+MAX_FALL_SWING_UPS = _vel_ups(8.0)          # Swing: -8G
+MAX_FALL_SWING = _ups_to_px_per_tick(MAX_FALL_SWING_UPS)
+SHIP_MAX_RISE_UPS = _vel_ups(8.0)           # Ship (holding): 8G
+SHIP_MAX_RISE = _ups_to_px_per_tick(SHIP_MAX_RISE_UPS)
+SHIP_MAX_FALL_UPS = _vel_ups(6.4)           # Ship (released): -6.4G
+SHIP_MAX_FALL = _ups_to_px_per_tick(SHIP_MAX_FALL_UPS)
 # Swing click: bible §1.4, "multiplies the y-velocity by 0.8, then
 # toggles the gravity" — applied in core.py's MODE_SWING branch.
 SWING_VY_MULTIPLIER = 0.8
