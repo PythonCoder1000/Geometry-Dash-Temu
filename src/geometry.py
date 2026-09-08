@@ -53,6 +53,23 @@ def obj_scale(o):
     return sx, sy
 
 
+def obj_alpha(o):
+    """Return an object's render alpha as an int in [0, 255].
+
+    ``_alpha`` (Checkpoint 5's Alpha Trigger) stores a [0.0, 1.0] float;
+    objects that were never targeted by one simply have no key and
+    render fully opaque, same as before this existed.
+    """
+    a = o.get("_alpha")
+    if a is None:
+        return 255
+    try:
+        a = float(a)
+    except (TypeError, ValueError):
+        return 255
+    return max(0, min(255, int(round(a * 255))))
+
+
 def _resolve_scale(scale, scale_y=None):
     """Normalize the various scale-arg shapes into ``(sx, sy)``.
 

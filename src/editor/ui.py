@@ -108,7 +108,9 @@ def layout_top(st):
     x = 8
     for label, action, col, w in (
             ("Menu", "menu", C_DANGER, 64), ("Test [T]", "test", (40, 130, 80), 76),
-            ("Bot", "bot_menu", (180, 120, 30), 56)):
+            ("Bot", "bot_menu", (180, 120, 30), 56),
+            ("Layers", "layers", (70, 90, 150), 62),
+            ("Filter", "select_filter", (70, 90, 150), 58)):
         bts.append(Button(pygame.Rect(x, 6, w, 32), label, action, col))
         x += w + 6
     x = WIDTH - 8

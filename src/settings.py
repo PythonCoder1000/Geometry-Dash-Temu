@@ -4,14 +4,15 @@ Everything exposed by the in-game Settings menu lives here so every
 consumer (main loop, editor, audio) reads one authoritative place.
 Level progress and similar mechanics stay in :mod:`levels`.
 
-Timing: physics always ticks at :data:`PHYSICS_RATE` (60 Hz); the
+Timing: physics always ticks at :data:`PHYSICS_RATE` (240 Hz); the
 render FPS cap is a free setting because the play loop interpolates
 between physics ticks (see :mod:`play`).
 """
 
 from . import prefs
+from .constants import PHYSICS_TPS
 
-PHYSICS_RATE = 60
+PHYSICS_RATE = PHYSICS_TPS
 # Kept as the default FPS cap for backwards compatibility with callers
 # that import it.
 GAME_RATE = 120
@@ -38,7 +39,7 @@ FPS_CAP_OPTIONS = [60, 120, 144, 240, 0]
 def _coerce_float_01(v, default):
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return min(1.0, max(0.0, f))
 
@@ -46,7 +47,7 @@ def _coerce_float_01(v, default):
 def _coerce_int(v, default):
     try:
         return int(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -54,6 +55,13 @@ def _coerce_bool(v, default):
     if isinstance(v, bool):
         return v
     if v is None:
+        return default
+    if isinstance(v, str):
+        value = v.strip().lower()
+        if value in ("true", "1", "yes", "on"):
+            return True
+        if value in ("false", "0", "no", "off", ""):
+            return False
         return default
     return bool(v)
 

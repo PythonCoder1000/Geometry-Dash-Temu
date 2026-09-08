@@ -41,7 +41,7 @@ from .constants import (
 # same span. Falls back to 180 if the settings module isn't importable
 # (headless pytest runs, import-time probes in the bots).
 _PROBE_SECONDS = 3.0
-_PROBE_FALLBACK_FRAMES = 180
+_PROBE_FALLBACK_FRAMES = 720  # 3.0s * 240 TPS (was 180 at the old 60 TPS)
 
 
 def _probe_max_frames():
@@ -82,11 +82,12 @@ def modes():
     return list(_ALL_MODES)
 
 
-def detect_speed(objects, probe_x_cell: int) -> float:
+def detect_speed(objects, probe_x_cell: int, params=None) -> float:
     """Return the move_speed in px/frame at ``probe_x_cell`` after
     applying every speed portal to the left of it. Matches the real
     engine, which latches the most recent portal crossed."""
-    speed = SPEED_VALUES.get(T_SPEED_NORMAL, 5.0)
+    from .physics import DEFAULT_PARAMS
+    speed = (params or DEFAULT_PARAMS).base_move_speed
     # Iterate in x-order so the latest-latched speed wins.
     ports = sorted(
         (o for o in objects
@@ -234,7 +235,8 @@ def predict(objects, probe, params=None):
     # Strip the probe from the world so the simulated player can't
     # collide with or react to it. SimPlayer needs at least one object
     # to size its grid; if the caller passed an empty world, bail.
-    world = [o for o in objects if o.get("t") != T_JUMP_PREDICTOR]
+    from copy import deepcopy
+    world = [deepcopy(o) for o in objects if o.get("t") != T_JUMP_PREDICTOR]
     if not world:
         return None
     # Spawn: centered in the probe cell horizontally, and rested on the
@@ -245,12 +247,11 @@ def predict(objects, probe, params=None):
     # ±1 px tweaks ride on top of the snap.
     spawn_x = gx * CELL + (CELL - size) / 2.0 + dx_px
     spawn_y = _snap_spawn_y(world, gx, gy, grav, size) + dy_px
-    snapped = abs((spawn_y - dy_px) - (gy * CELL + (CELL - size) / 2.0)) > 0.5
 
     # Apply the speed portal chain up to the probe's x so 1.35x / 1.65x
     # sections aren't secretly simulated at 1.0x (the single biggest
     # source of "not accurate at all" in earlier passes).
-    detected_speed = detect_speed(world, gx)
+    detected_speed = detect_speed(world, gx, params=params)
 
     sim = SimPlayer(world, params=params)
     sim.mode = mode
@@ -260,14 +261,15 @@ def predict(objects, probe, params=None):
     sim.x = float(spawn_x)
     sim.y = float(spawn_y)
     sim.vy = 0.0
-    # Only force on_ground when we actually snapped to a surface. In
-    # mid-air placements the sim should behave like a mid-air click —
-    # cube/ball/spider go quiet, ship/wave/ufo still react.
-    sim.on_ground = snapped
+    # Use real contact after the nudge: a probe above the floor must not
+    # invent an airborne cube/robot launch.
+    sim.on_ground = False
+    sim._check_ground_adjacency(sim)
+    grounded_at_spawn = sim.on_ground
     # _x_at_frame_start is read during end-wall crossing checks; without
     # re-seeding, the sim thinks the player warped from x=0.
     sim._x_at_frame_start = sim.x
-    sim._was_on_ground = snapped
+    sim._was_on_ground = sim.on_ground
     # Prevent the probe's initial position from being flagged as a
     # finish-wall crossing when the probe sits past an existing T_END.
     sim._end_walls_x = []
@@ -309,7 +311,7 @@ def predict(objects, probe, params=None):
         "size": size,
         "frames": len(samples) - 1,
         "speed": detected_speed,
-        "grounded": snapped,
+        "grounded": grounded_at_spawn,
     }
 
 

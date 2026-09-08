@@ -41,15 +41,25 @@ from typing import NamedTuple
 # the game's flight sections are actually built around.  A solution that
 # needs the button to change state on consecutive frames is asking for
 # 60 Hz precision, which is not something a person reproduces.
-HUMAN_MIN_DWELL_FRAMES = 2
+#
+# Checkpoint-3 tick-rate migration (60 -> 240 TPS): this is a real-world
+# human-reaction-time constraint expressed in ticks, so it scales with
+# the tick rate like INPUT_BUFFER_TICKS elsewhere (2 * 240/60 = 8) to
+# keep meaning "~15 cycles/sec", not "~60 cycles/sec".
+HUMAN_MIN_DWELL_FRAMES = 8
 
 # The escape hatch keeps the one-button rule (that one is physical, not
-# a matter of skill) and only relaxes timing precision.
+# a matter of skill) and only relaxes timing precision. Deliberately left
+# at 1 tick (not rescaled): "frame-perfect" means "as precise as the
+# physics engine allows, no human-timing floor at all," so it should mean
+# 1 *tick* at whatever rate the engine runs, not a fixed real-world time.
 FRAME_PERFECT_MIN_DWELL_FRAMES = 1
 
 # Dwell counters saturate here — anything at or above ``min_dwell`` is
 # behaviourally identical, so clamping keeps search state buckets small.
-DWELL_CAP = 8
+# Scaled with HUMAN_MIN_DWELL_FRAMES (8 * 4 = 32) to preserve the same
+# margin above it the old 8/2 ratio had.
+DWELL_CAP = 32
 
 
 class InputModel(NamedTuple):

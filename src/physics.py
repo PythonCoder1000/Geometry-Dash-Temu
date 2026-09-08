@@ -5,7 +5,7 @@ etc.) lived as a module-level value in ``constants.py``. That made every
 level play with identical feel, which is a design ceiling — GD itself
 ships with explicit "speed portals" and level-specific physics quirks.
 
-``PhysicsParams`` is a thin dataclass that defaults to the historical
+``PhysicsParams`` is a thin dataclass that defaults to the calibrated
 constants and is passed into ``Player``. Each gameplay site that used to
 read ``GRAVITY`` now reads ``self.params.gravity``. Per-level overrides
 are loaded from the level JSON's ``meta["physics"]`` dict — an absent
@@ -21,14 +21,12 @@ The wire-format is a flat dict:
       }
     }
 
-Unknown keys are ignored by :meth:`PhysicsParams.from_meta` so a newer
-save file can still round-trip through an older client. Only the keys
-listed in :attr:`PhysicsParams._FIELDS` are applied; each value is
-coerced through the default's type so a malformed "1.0" string doesn't
-crash the physics loop.
+Only declared dataclass fields are applied. Unknown keys and invalid or
+non-finite values are ignored; numeric strings are accepted.
 """
 
-from dataclasses import dataclass, fields, asdict
+from dataclasses import dataclass, fields
+import math
 
 from .constants import (
     GRAVITY as _GRAVITY,
@@ -49,6 +47,7 @@ from .constants import (
     MINI_JUMP_SCALE as _MINI_JUMP_SCALE,
     MINI_WAVE_ANGLE_SCALE as _MINI_WAVE_ANGLE_SCALE,
     MINI_WAVE_VY_SCALE as _MINI_WAVE_VY_SCALE,
+    SHIP_MAX_RISE, SHIP_MAX_FALL,
 )
 
 
@@ -56,9 +55,8 @@ from .constants import (
 class PhysicsParams:
     """Immutable bundle of every per-level-overrideable gameplay tunable.
 
-    Defaults mirror the module-level constants so a level without a
-    ``meta.physics`` block plays identically to levels authored before
-    this abstraction existed.
+    Defaults mirror the module-level calibration constants. A missing
+    ``meta.physics`` block always selects the current default behavior.
     """
     gravity: float = _GRAVITY
     ship_gravity: float = _SHIP_GRAVITY
@@ -77,18 +75,45 @@ class PhysicsParams:
     spider_teleport_range: int = _SPIDER_TELEPORT_RANGE
     robot_thrust: float = _ROBOT_THRUST
     robot_flight_seconds: float = _ROBOT_FLIGHT_SECONDS
-    # GD's mini icon isn't just a smaller hitbox — it falls/rises faster
-    # (higher gravity) but jumps a touch weaker, and wave pitches harder.
-    # Scoped to size < PLAYER_SIZE so normal-size play is untouched.
+    # Additional mini-only tuning; mode-specific factors are applied in
+    # the shared movement code. Ground jump defaults scale to 0.8.
     mini_gravity_scale: float = _MINI_GRAVITY_SCALE
     mini_jump_scale: float = _MINI_JUMP_SCALE
     mini_wave_angle_scale: float = _MINI_WAVE_ANGLE_SCALE
     mini_wave_vy_scale: float = _MINI_WAVE_VY_SCALE
 
+    def wave_velocity(self, speed, grav, mini, held):
+        """Instant diagonal velocity shared by gameplay and bot previews.
+
+        mini_wave_angle_scale is retained for old level files. New files
+        should use mini_wave_vy_scale; an explicit old angle override is
+        interpreted as a path angle rather than a cosmetic-only change.
+        """
+        angle = self.wave_angle
+        scale = self.mini_wave_vy_scale if mini else 1.0
+        if mini and self.mini_wave_angle_scale != _MINI_WAVE_ANGLE_SCALE:
+            angle *= self.mini_wave_angle_scale
+            scale /= _MINI_WAVE_VY_SCALE
+        slope = math.tan(math.radians(max(0.0, min(89.0, angle))))
+        return speed * slope * scale * grav * (-1 if held else 1)
+
+    def ship_velocity(self, vy, grav, mini, held):
+        """One ship tick, including momentum-dependent acceleration/caps."""
+        falling = vy * grav > 0
+        size_factor = 1.0 / 0.85 if mini else 1.0
+        gmul = self.mini_gravity_scale if mini else 1.0
+        if held:
+            accel = (self.ship_gravity - self.ship_thrust) * (1.25 if falling else 1.0)
+        else:
+            accel = self.ship_gravity * (0.8 if falling else 1.2)
+        local_vy = vy * grav + accel * size_factor * gmul
+        return max(-SHIP_MAX_RISE * size_factor,
+                   min(SHIP_MAX_FALL * size_factor, local_vy)) * grav
+
     @classmethod
     def from_meta(cls, meta):
         """Build params from a level meta dict. None / missing → defaults."""
-        if not meta:
+        if not isinstance(meta, dict):
             return cls()
         overrides = meta.get("physics")
         if not overrides or not isinstance(overrides, dict):
@@ -100,7 +125,7 @@ class PhysicsParams:
         """Build params from a bare dict of overrides (unknown keys ignored,
         values coerced through the default's type).
         """
-        if not data:
+        if not isinstance(data, dict):
             return cls()
         defaults = cls()
         kwargs = {}
@@ -125,8 +150,23 @@ class PhysicsParams:
                     else:
                         kwargs[f.name] = bool(raw)
                 else:
-                    kwargs[f.name] = type(default)(raw)
-            except (TypeError, ValueError):
+                    value = type(default)(raw)
+                    if not math.isfinite(value):
+                        continue
+                    # All magnitudes are nonnegative; run speed and mini
+                    # scales must be positive. Impulses use screen-space
+                    # negatives and may be zero to disable jumping.
+                    if f.name in ("jump_force", "pad_force", "ufo_jump_force"):
+                        if value > 0:
+                            continue
+                    elif value < 0:
+                        continue
+                    if (f.name == "base_move_speed" or f.name.startswith("mini_")) and value == 0:
+                        continue
+                    if f.name == "wave_angle" and value >= 90:
+                        continue
+                    kwargs[f.name] = value
+            except (TypeError, ValueError, OverflowError):
                 # Keep the default rather than crash — a malformed
                 # override should degrade to vanilla physics, not brick
                 # the level.

@@ -40,11 +40,13 @@ from ..menus import (
 )
 from ..objects import TYPE_NAMES, cycle_active_start, start_objects
 from ..physics import PhysicsParams
+from ..channels import channels_from_meta, channel_color
 from ..play import run_play, real_time_to_x
 from ..snippets import save_user_snippet, normalize_to_origin
 from .. import music, sfx, settings, prefs
 from . import ops, ui, render, music_names
-from .dialogs import confirm_exit, show_error_modal, draw_shortcuts
+from .dialogs import (confirm_exit, show_error_modal, draw_shortcuts,
+                       layers_dialog, select_filter_dialog)
 from .props import PropPanel
 from .state import (
     EditorState, MODE_BUILD, MODE_EDIT, MODE_DELETE, TOOL_SELECT, TOOL_LINK,
@@ -298,8 +300,11 @@ class EditorSession:
             bot = PathFollowController(list(st.bot_waypoints),
                                        objects=list(st.objects))
             self._run(" (Bot)", bot_controller=bot)
-            bot.save_inputs()
-            st.say(f"Bot done — {len(bot.inputs)} frames saved to level_bot_inputs.txt", 180)
+            saved_path = bot.save_inputs()
+            if saved_path:
+                st.say(f"Bot done — {len(bot.inputs)} frames saved to bot_runs/level_bot_inputs.txt", 180)
+            else:
+                st.say("Bot done — could not save playback inputs", 180)
         else:
             inputs = load_bot_inputs()
             if inputs:
@@ -381,11 +386,14 @@ class EditorSession:
 
     def _delete_selection(self):
         st = self.st
-        if not st.selected:
+        victims = st.filter_locked(st.selected)
+        if not victims:
+            if st.selected:
+                st.say("Selection is on a locked layer", 90)
             return
         st.push_undo()
-        n = len(st.selected)
-        ops.remove_objects(st.objects, st.selected)
+        n = len(victims)
+        ops.remove_objects(st.objects, victims)
         st.clear_selection()
         st.say(f"Deleted {n} object{'s' if n != 1 else ''}", 80)
 
@@ -428,7 +436,10 @@ class EditorSession:
     # ------------------------------------------------------------------
     def do(self, action, arg=None):
         st = self.st
-        sel = st.selected
+        # A locked layer is immune to edits; since every mutating action
+        # below (rotate/flip/scale/nudge/delete/cut/toggle_*) reads only
+        # ``sel``, filtering once here is the single choke point.
+        sel = st.filter_locked(st.selected)
         mods = pygame.key.get_mods()
         big = bool(mods & pygame.KMOD_CTRL)
         if action == "mode":
@@ -480,7 +491,8 @@ class EditorSession:
             st.say(f"Duplicated {len(new)} in place — drag to move", 100)
         elif action == "select_all":
             st.mode = MODE_EDIT
-            st.selected = [o for o in st.objects if o["t"] != T_START]
+            st.selected = st.filter_locked(
+                [o for o in st.objects if o["t"] != T_START])
             st.say(f"Selected all ({len(st.selected)})", 80)
         elif action == "deselect":
             st.clear_selection()
@@ -565,6 +577,14 @@ class EditorSession:
             st.set_zoom(1.0)
         elif action == "help":
             st.show_shortcuts = not st.show_shortcuts
+        elif action == "layers":
+            layers_dialog(self.screen, self.clock, st)
+            self.guard.reset()
+        elif action == "select_filter":
+            select_filter_dialog(self.screen, self.clock, st)
+            self.guard.reset()
+            if st.selected:
+                st.mode = MODE_EDIT
         elif action == "mute_music":
             music.toggle_mute()
         elif action == "mute_sfx":
@@ -595,6 +615,32 @@ class EditorSession:
             for o in st.selected:
                 o[key] = o.get(src, o.get(key))
             st.say(f"Synced {len(st.selected)} object(s) to current position", 90)
+        elif action == "edit_channel" and st.selected:
+            self._edit_channel_color(st.selected[0])
+
+    def _edit_channel_color(self, obj):
+        st = self.st
+        channel_id = int(obj.get("channel", obj.get("col_idx", 0)))
+        cur = channel_color(channels_from_meta(st.level_meta), channel_id)
+        typed = self.ask_text(f"Channel {channel_id} color (R,G,B):",
+                              f"{cur[0]},{cur[1]},{cur[2]}")
+        if typed is None:
+            return
+        try:
+            parts = [int(p.strip()) for p in typed.split(",")]
+        except ValueError:
+            st.say("Color must be R,G,B (0-255 each)", 120)
+            return
+        if len(parts) != 3:
+            st.say("Color must be R,G,B (0-255 each)", 120)
+            return
+        rgb = tuple(max(0, min(255, v)) for v in parts)
+        if st.level_meta is None:
+            st.level_meta = {}
+        table = st.level_meta.setdefault("channels", {})
+        table[str(channel_id)] = [rgb[0], rgb[1], rgb[2], 255]
+        st.mark_dirty()
+        st.say(f"Channel {channel_id} set to {rgb}", 120)
 
     def _run_pending(self):
         st = self.st
@@ -818,9 +864,14 @@ class EditorSession:
                    + ("" if shift else " — click to repeat, Esc to cancel"), 120)
             return
         if st.mode == MODE_BUILD:
+            if st.is_layer_locked(st.active_layer):
+                st.say(f"Layer {st.active_layer} is locked", 90)
+                return
             st.push_undo()
-            ops.place_object(st.objects, gx, gy, st.selected_type, st.rotation,
-                             st.group_id_counter)
+            obj = ops.place_object(st.objects, gx, gy, st.selected_type, st.rotation,
+                                    st.group_id_counter)
+            if st.active_layer:
+                obj["layer"] = st.active_layer
             if st.selected_type in TELEPORT_LINK_TYPES:
                 st.group_id_counter = next_group_id(st.objects)
             st.last_brush_cell = (gx, gy)
@@ -830,7 +881,8 @@ class EditorSession:
         if st.mode == MODE_DELETE:
             st.push_undo()
             only = st.selected_type if st.delete_filter else None
-            ops.erase_at(st.objects, gx, gy, only)
+            ops.erase_at(st.objects, gx, gy, only,
+                         locked_layers=st.layer_locked)
             st.prune_selection()
             st.drag = ({"kind": "erase", "only": only} if st.swipe
                        else {"kind": "pan", "anchor": pos, "cam": (st.cam_x, st.cam_y)})
@@ -849,7 +901,7 @@ class EditorSession:
             st.bot_mirror_waypoints = []
             st.say(f"Bot path: {len(st.bot_waypoints)} pts (K runs, right-click removes)", 90)
             return
-        stack = ops.objects_at_cell(st.objects, gx, gy)
+        stack = st.filter_locked(ops.objects_at_cell(st.objects, gx, gy))
         top = stack[-1] if stack else None
         if shift:
             if top is not None:
@@ -907,7 +959,7 @@ class EditorSession:
                         st.say(f"Bot path: {len(st.bot_waypoints)} pts", 70)
                 elif st.mode == MODE_BUILD:
                     st.push_undo()
-                    ops.erase_at(st.objects, *cell)
+                    ops.erase_at(st.objects, *cell, locked_layers=st.layer_locked)
                     st.prune_selection()
         if ev.button in (2, 3):
             if drag and drag["kind"] == "pan":
@@ -926,7 +978,7 @@ class EditorSession:
             if abs(x1 - x0) >= 3 or abs(y1 - y0) >= 3:
                 gx0, gy0 = st.screen_to_cell(min(x0, x1), min(y0, y1))
                 gx1, gy1 = st.screen_to_cell(max(x0, x1), max(y0, y1))
-                hits = ops.objects_in_cells(st.objects, gx0, gy0, gx1, gy1)
+                hits = st.filter_locked(ops.objects_in_cells(st.objects, gx0, gy0, gx1, gy1))
                 if drag["add"]:
                     for h in hits:
                         existing = ops.index_by_id(st.selected, h)
@@ -998,15 +1050,19 @@ class EditorSession:
         drag = st.drag
         if held and drag is not None and self.in_canvas(self.mpos):
             gx, gy = st.screen_to_cell(mx, my)
-            if drag["kind"] == "paint" and (gx, gy) != st.last_brush_cell:
-                ops.place_object(st.objects, gx, gy, st.selected_type, st.rotation,
-                                 st.group_id_counter)
+            if (drag["kind"] == "paint" and (gx, gy) != st.last_brush_cell
+                    and not st.is_layer_locked(st.active_layer)):
+                obj = ops.place_object(st.objects, gx, gy, st.selected_type, st.rotation,
+                                        st.group_id_counter)
+                if st.active_layer:
+                    obj["layer"] = st.active_layer
                 if st.selected_type in TELEPORT_LINK_TYPES:
                     st.group_id_counter = next_group_id(st.objects)
                 st.last_brush_cell = (gx, gy)
                 st.mark_dirty()
             elif drag["kind"] == "erase":
-                if ops.erase_at(st.objects, gx, gy, drag["only"]):
+                if ops.erase_at(st.objects, gx, gy, drag["only"],
+                                locked_layers=st.layer_locked):
                     st.prune_selection()
                     st.mark_dirty()
         if held and st.curve_drag_idx is not None:

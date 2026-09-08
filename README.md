@@ -11,10 +11,11 @@ python -m venv .venv
 .venv/bin/python main.py
 ```
 
-Tests (custom check script, replays golden playthroughs and flags physics drift):
+Tests (headless movement contracts and game/editor/bot regressions):
 
 ```
 .venv/bin/python test_game.py
+.venv/bin/python -m unittest test_physics
 ```
 
 ## Layout
@@ -22,13 +23,16 @@ Tests (custom check script, replays golden playthroughs and flags physics drift)
 | Path | Purpose |
 |---|---|
 | `main.py` | Menu state machine |
-| `src/play.py`, `src/play_render.py` | `PlaySession`: fixed 60 Hz physics, interpolated rendering |
+| `src/play.py`, `src/play_render.py` | `PlaySession`: fixed 240 Hz physics, interpolated rendering |
 | `src/player/` | Player physics (`core`, `collision`, `triggers`, `body`, `draw`) |
 | `src/objects.py` | Object registry: one `ObjectSpec` per type drives palette, tooltips, property panel and save/load |
 | `src/editor/` | Level editor (`session`, `ui`, `ops`, `props`, `render`, `state`, `dialogs`) |
 | `src/geometry.py`, `src/sprites.py`, `src/graphics.py` | Hitbox maths, sprite baking, screen drawing |
 | `src/levels.py` | Level files and format migrations |
 | `src/bots/` (`human.py`, `loophole.py` + shared sim/search), `src/bot_menu.py` | Bots |
+| `docs/` | Physics guide, development notes, and research references |
+| `tests/fixtures/` | Sample input data used by regression tests |
+| `reports/benchmarks/` | Local benchmark reports and logs |
 
 ## Editor
 
@@ -40,4 +44,5 @@ Press `F1` inside the editor for the full shortcut sheet.
 - Delete: click or swipe, optional filter to the current object type.
 - `T` test, `Shift+T` test from cursor, `K` bot, `L` bot menu, `S` save, `Ctrl+Z`/`Ctrl+Y` undo/redo, wheel zooms on the cursor.
 
-See `AUDIT.md` for the change log, known issues and deferred ideas.
+See the [documentation index](docs/README.md), [physics guide](docs/PHYSICS.md),
+and [development audit](docs/development/AUDIT.md).

@@ -14,13 +14,14 @@ from collections import OrderedDict
 import pygame
 
 from .constants import (
-    ASSETS_DIR, CELL, _USER_DATA, TRIGGER_TYPES,
+    ASSETS_DIR, CELL, _USER_DATA, TRIGGER_TYPES, PHYSICS_TPS,
     C_WHITE, C_GRAY, C_BLOCK_H, C_BLOCK_D, C_SPIKE, C_SAW, C_ORB, C_DASH_ORB,
     C_DASH_ORB_GRAV, C_TELEPORT_ORB, C_TELEPORT_PORTAL,
     C_GREEN_ORB, C_SPIDER_ORB, C_RED_ORB,
     C_PINK_ORB, C_PAD, C_PINK_PAD, C_RED_PAD, C_BLUE_PAD, C_SPIDER_PAD,
     C_GPORTAL_UP, C_GPORTAL_DOWN, C_END, C_PLAYER, C_DECO_CRYSTAL,
     C_DECO_PILLAR, C_DECO_GLOW, C_COIN, C_CHECKPOINT,
+    C_JUMP_BLOCK, C_WAVE_BLOCK, C_BONK_BLOCK,
     SPEED_VALUES, MODE_FROM_TYPE,
     T_BLOCK, T_SLAB, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW, T_ORB, T_DASH_ORB,
     T_DASH_ORB_GRAV, T_TELEPORT_ORB, T_TELEPORT_PORTAL,
@@ -36,6 +37,8 @@ from .constants import (
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
     T_BLACKOUT_TRIGGER,
     T_JUMP_PREDICTOR, T_BOT_CHECKPOINT, T_DASH_STOP,
+    T_ITEM_PICKUP, T_ITEM_COUNTER, T_JUMP_BLOCK, T_WAVE_BLOCK, T_BONK_BLOCK,
+    T_KEYFRAME,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     T_SPEED_FASTEST,
 )
@@ -60,7 +63,7 @@ from .graphics import (
 # way that would make stale PNGs look wrong. On mismatch the user cache
 # is wiped and regenerated on demand.
 # ---------------------------------------------------------------------------
-SPRITE_CACHE_VERSION = "4"
+SPRITE_CACHE_VERSION = "5"
 BUNDLED_SPRITES_DIR = os.path.join(ASSETS_DIR, "sprites")
 SPRITES_DIR = os.path.join(_USER_DATA, "sprite_cache")
 _SPRITE_VERSION_MARKER = os.path.join(SPRITES_DIR, ".version")
@@ -1127,7 +1130,12 @@ def _render_trigger(surf, s, t):
         label = {T_BG_TRIGGER: "BG", T_MOVE_TRIGGER: "MV",
                  T_COLOR_TRIGGER: "CL", T_PULSE_TRIGGER: "PL",
                  T_ROTATE_TRIGGER: "RT", T_FOLLOW_TRIGGER: "FL",
-                 T_BLACKOUT_TRIGGER: "BK"}.get(t, "?")
+                 T_BLACKOUT_TRIGGER: "BK"}.get(t)
+        if label is None:
+            # Keep newer/extended trigger types identifiable instead of
+            # displaying a confusing question mark in the editor.
+            words = str(t).replace("_trigger", "").split("_")
+            label = "".join(w[:1].upper() for w in words)[:4] or "TR"
         txt(surf, label, cx, cy, max(10, s // 4), C_WHITE, True, shadow=True)
 
 
@@ -1177,6 +1185,12 @@ _DIRECT_RENDERERS = {
     T_JUMP_PREDICTOR: lambda s, b, f, v: _render_jump_predictor(s, b, f),
     T_BOT_CHECKPOINT: lambda s, b, f, v: _render_bot_checkpoint(s, b, f),
     T_DASH_STOP:   lambda s, b, f, v: _render_dash_stop(s, b, f),
+    T_KEYFRAME:    lambda s, b, f, v: _render_keyframe(s, b, f),
+    T_ITEM_PICKUP:  lambda s, b, f, v: _render_item_pickup(s, b, f),
+    T_ITEM_COUNTER: lambda s, b, f, v: _render_item_counter(s, b, f),
+    T_JUMP_BLOCK:   lambda s, b, f, v: _render_jump_block(s, b, f),
+    T_WAVE_BLOCK:   lambda s, b, f, v: _render_wave_block(s, b, f),
+    T_BONK_BLOCK:   lambda s, b, f, v: _render_bonk_block(s, b, f),
 }
 
 _TRIGGER_TYPES_SET = TRIGGER_TYPES
@@ -1210,6 +1224,58 @@ def _render_sprite(t, s, frame_t, variant=None):
         pygame.draw.rect(surf, col, (12, 12, big - 24, big - 24), border_radius=10)
     # Downsample for free AA
     return pygame.transform.smoothscale(surf, (s, s))
+
+
+def _render_keyframe(surf, s, frame_t):
+    _editor_glyph_panel(surf, pygame.Rect(0, 0, s, s), C_KEYFRAME)
+    cx = cy = s // 2
+    pygame.draw.polygon(surf, C_WHITE, [
+        (cx - s * 0.16, cy - s * 0.18),
+        (cx + s * 0.05, cy - s * 0.18),
+        (cx + s * 0.05, cy - s * 0.30),
+        (cx + s * 0.22, cy),
+        (cx + s * 0.05, cy + s * 0.30),
+        (cx + s * 0.05, cy + s * 0.18),
+        (cx - s * 0.16, cy + s * 0.18),
+    ])
+
+
+def _render_item_pickup(surf, s, frame_t):
+    _editor_glyph_panel(surf, pygame.Rect(0, 0, s, s), C_ITEM_PICKUP)
+    cx = cy = s // 2
+    pygame.draw.circle(surf, C_WHITE, (cx, cy), max(4, s // 5), 2)
+    pygame.draw.line(surf, C_WHITE, (cx, cy - s // 6), (cx, cy + s // 6), 2)
+    pygame.draw.line(surf, C_WHITE, (cx - s // 6, cy), (cx + s // 6, cy), 2)
+
+
+def _render_item_counter(surf, s, frame_t):
+    _editor_glyph_panel(surf, pygame.Rect(0, 0, s, s), C_ITEM_COUNTER)
+    cx = cy = s // 2
+    for dx in (-s * 0.12, 0, s * 0.12):
+        pygame.draw.circle(surf, C_WHITE, (int(cx + dx), cy), max(2, s // 14))
+
+
+def _render_jump_block(surf, s, frame_t):
+    _render_letter_block(surf, s, "J")
+
+
+def _render_wave_block(surf, s, frame_t):
+    _render_letter_block(surf, s, "D")
+
+
+def _render_bonk_block(surf, s, frame_t):
+    _render_letter_block(surf, s, "H")
+
+
+def _render_letter_block(surf, s, letter):
+    """Render GD-style utility blocks: hollow white square + letter."""
+    margin = max(4, int(s * 0.10))
+    rect = pygame.Rect(margin, margin, s - margin * 2, s - margin * 2)
+    width = max(2, int(s * 0.07))
+    pygame.draw.rect(surf, C_WHITE, rect, width,
+                     border_radius=max(2, int(s * 0.04)))
+    txt(surf, letter, s // 2, s // 2, max(12, int(s * 0.55)), C_WHITE,
+        True, shadow=True)
 
 
 def _load_or_render(t, s, frame, variant=None):
@@ -1254,8 +1320,14 @@ def _load_or_render(t, s, frame, variant=None):
 
 
 def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
-             scale=1.0, scale_y=None):
+             scale=1.0, scale_y=None, alpha=255):
     """Blit the pre-rendered sprite image for this object type.
+
+    ``alpha`` (Checkpoint 5's Alpha Trigger) is applied to a *copy* of
+    the cached sprite -- the cache is shared across every instance of a
+    type/frame/variant, so mutating it in place would leak one faded
+    object's transparency onto every other object using the same
+    cached surface.
 
     ``scale`` enlarges (or shrinks) the sprite around the cell center
     so scaled objects still occupy the same grid anchor. Accepts:
@@ -1311,6 +1383,10 @@ def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
         sh = max(1, int(round(s * sy)))
         if (sw, sh) != img.get_size():
             img = pygame.transform.scale(img, (sw, sh))
+        if alpha < 255:
+            if (sw, sh) == img.get_size():
+                img = img.copy()  # transform.scale already returned a copy
+            img.set_alpha(alpha)
         x = x + (s - sw) / 2.0
         y = y + (s - sh) / 2.0
         if rot:
@@ -1321,6 +1397,9 @@ def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
             surf.blit(img, (x, y))
         return
     img = _load_or_render(t, s, frame, variant)
+    if alpha < 255:
+        img = img.copy()
+        img.set_alpha(alpha)
     if rot:
         rotated = pygame.transform.rotate(img, -rot)
         rr = rotated.get_rect(center=(x + s / 2, y + s / 2))
@@ -1344,7 +1423,7 @@ def draw_end_wall(surf, screen_x, marker_screen_y, cell_size=CELL, pulse=0):
     a visual handle in the editor and pre-win flair in play.
     """
     surf_h = surf.get_height()
-    pulse_t = (pulse % 60) / 60.0
+    pulse_t = (pulse % PHYSICS_TPS) / PHYSICS_TPS  # `pulse` ticks once/tick
     pulse_a = int(70 + 50 * math.sin(pulse_t * math.tau))
     # Translucent inner column
     col_w = max(4, cell_size // 4)
@@ -1398,4 +1477,3 @@ def regenerate_sprite_assets(size=CELL):
             except OSError:
                 pass
             _load_or_render(t, size, f)
-

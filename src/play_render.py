@@ -15,16 +15,18 @@ import bisect
 import math
 import time as _time
 
+import numpy as np
 import pygame
 
 from .constants import (
-    WIDTH, HEIGHT, CELL, PLAYER_SIZE,
+    WIDTH, HEIGHT, CELL, PLAYER_SIZE, PHYSICS_TPS,
     C_DARK, C_PLAYER, C_GRAY, C_WHITE, C_BTN, C_COIN, C_SUCCESS, C_DANGER,
     BG_PRESETS, T_COIN, T_END, T_TELEPORT_ORB, T_TELEPORT_PORTAL, T_SPIDER_ORB,
+    T_ITEM_COUNTER,
 )
 from .graphics import (
     draw_bg, draw_obj, txt, btn, lighter, darker,
-    speaker_icon, icon_button, draw_end_wall, obj_scale,
+    speaker_icon, icon_button, draw_end_wall, obj_scale, obj_alpha,
 )
 from . import music
 from . import sfx
@@ -75,7 +77,7 @@ def render_world(screen, cam_x, cam_y, shake_x, shake_y, stars, mountains,
                      oy * CELL - cam_y + shake_y, CELL, pulse, o.get("r", 0),
                      o if o["t"] in (T_TELEPORT_ORB, T_TELEPORT_PORTAL,
                                      T_SPIDER_ORB) else None,
-                     scale=obj_scale(o))
+                     scale=obj_scale(o), alpha=obj_alpha(o))
             # Bot-only object marker: a translucent purple X overlay so
             # the level author can see at a glance that this hazard is
             # phantom (won't kill the live player) but is part of the Y
@@ -352,7 +354,7 @@ def render_player_and_particles(screen, player, particles, death_timer,
     if player.alive and death_timer == 0:
         player.draw(screen, cam_x + shake_x, cam_y + shake_y, alpha)
         if bot_click_flash > 0:
-            t = 1.0 - (bot_click_flash / 12.0)
+            t = 1.0 - (bot_click_flash / 48.0)  # matches play.bot_click_flash=48 (240 TPS)
             radius = int(26 + 28 * t)
             alpha = int(220 * (1.0 - t))
             # Center on the player's visual midpoint, which shrinks
@@ -373,7 +375,7 @@ def render_checkpoint_markers(screen, practice_mode, player, pulse,
     """Practice-mode checkpoint flags planted with the C key."""
     if not (practice_mode and player.checkpoints and not player.won):
         return
-    pulse_t = (pulse % 60) / 60.0
+    pulse_t = (pulse % PHYSICS_TPS) / PHYSICS_TPS  # `pulse` ticks once/tick
     glow = int(90 + 40 * math.sin(pulse_t * math.tau))
     for i, cp in enumerate(player.checkpoints):
         fx = int(cp["x"] - cam_x - shake_x)
@@ -406,7 +408,9 @@ def render_death_reason(screen, death_timer, player):
     """Short "Hit a spike" style readout shown right after death."""
     if not (death_timer > 0 and getattr(player, "death_reason", "")):
         return
-    fade = min(1.0, (45 - death_timer) / 12.0)
+    # DEATH_FRAMES=180 (was 45 pre-240TPS-migration): fade in over the first
+    # 48 ticks (was 12) of the death pause, same real-time duration as before.
+    fade = max(0.0, min(1.0, (180 - death_timer) / 48.0))
     reason = player.death_reason
     rtxt = f"☠  {reason}"
     reason_surf = pygame.Surface((WIDTH, 46), pygame.SRCALPHA)
@@ -429,7 +433,7 @@ def render_slowmo_vignette(screen, overlay_scratch, clear_color,
     """Bordered darkening while the punchy death slow-mo is active."""
     if death_slowmo_timer <= 0:
         return
-    alpha = int(120 * (death_slowmo_timer / 30.0))
+    alpha = int(120 * (death_slowmo_timer / 120.0))  # matches DEATH_SLOWMO_FRAMES=120 (240 TPS)
     if alpha <= 0:
         return
     border = 120
@@ -442,11 +446,13 @@ def render_slowmo_vignette(screen, overlay_scratch, clear_color,
     screen.blit(overlay_scratch, (0, 0))
 
 
-def render_pulse_flash(screen, overlay_scratch, pulse_amp):
-    """BPM-modulated screen tint from a level's pulse trigger."""
+def render_pulse_flash(screen, overlay_scratch, pulse_amp, color=(255, 240, 255)):
+    """BPM-modulated screen tint from a level's pulse trigger, optionally
+    tinted to a color-channel (see ``Player.pulse_color``)."""
     if pulse_amp <= 0.01:
         return
-    overlay_scratch.fill((255, 240, 255, int(60 * pulse_amp)))
+    r, g, b = color
+    overlay_scratch.fill((r, g, b, int(60 * pulse_amp)))
     screen.blit(overlay_scratch, (0, 0))
 
 
@@ -461,6 +467,145 @@ def render_blackout(screen, overlay_scratch, amount):
         return
     overlay_scratch.fill((0, 0, 0, int(255 * amount)))
     screen.blit(overlay_scratch, (0, 0))
+
+
+def _rgb_to_hsv_np(rgb):
+    """Vectorised RGB->HSV, ``rgb`` shape (..., 3) in [0, 1]."""
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    maxc = np.max(rgb, axis=-1)
+    minc = np.min(rgb, axis=-1)
+    v = maxc
+    delta = maxc - minc
+    delta_safe = np.where(delta == 0, 1.0, delta)
+    s = np.where(maxc == 0, 0.0, delta / np.where(maxc == 0, 1.0, maxc))
+    rc = (maxc - r) / delta_safe
+    gc = (maxc - g) / delta_safe
+    bc = (maxc - b) / delta_safe
+    h = np.zeros_like(maxc)
+    h = np.where(maxc == b, 4.0 + gc - rc, h)
+    h = np.where(maxc == g, 2.0 + rc - bc, h)
+    h = np.where(maxc == r, bc - gc, h)
+    h = (h / 6.0) % 1.0
+    h = np.where(delta == 0, 0.0, h)
+    return np.stack([h, s, v], axis=-1)
+
+
+def _hsv_to_rgb_np(hsv):
+    """Vectorised HSV->RGB, ``hsv`` shape (..., 3) in [0, 1]."""
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    i = np.floor(h * 6.0)
+    f = h * 6.0 - i
+    p = v * (1.0 - s)
+    q = v * (1.0 - s * f)
+    t = v * (1.0 - s * (1.0 - f))
+    i = (i.astype(np.int64)) % 6
+    conditions = [i == k for k in range(6)]
+    r = np.select(conditions, [v, q, p, p, t, v])
+    g = np.select(conditions, [t, v, v, q, p, p])
+    b = np.select(conditions, [p, p, t, v, v, q])
+    return np.stack([r, g, b], axis=-1)
+
+
+def build_screen_effects(active_effect_anims):
+    """Player.active_effect_anims -> the sparse ``effects`` dict
+    :func:`apply_screen_effects` consumes (near-zero intensities
+    dropped so an idle level pays no per-frame numpy cost)."""
+    out = {}
+    for name, anim in active_effect_anims.items():
+        cur = anim.get("cur", 0.0)
+        if cur <= 0.001:
+            continue
+        if name == "hue":
+            out["hue"] = (cur, anim.get("degrees", 60.0))
+        elif name == "pixelate":
+            out["pixelate"] = (cur, anim.get("pixel_size", 8))
+        else:
+            out[name] = cur
+    return out
+
+
+def apply_screen_effects(surf, effects):
+    """Checkpoint 6 (editor reference Sec 4, "Screen effects / shaders"):
+    best-effort subset feasible in pygame's surface pipeline (per-pixel
+    color remap + block resampling), applied in place on ``surf``.
+    Chromatic/glitch/blur/bulge/pinch/lens/split-screen/shock-wave need
+    real per-pixel displacement and are deliberately not implemented."""
+    if not effects:
+        return surf
+    if "pixelate" in effects:
+        amt, psize = effects["pixelate"]
+        psize = max(2, int(psize))
+        if amt > 0:
+            w, h = surf.get_size()
+            small = pygame.transform.scale(surf, (max(1, w // psize),
+                                                   max(1, h // psize)))
+            pixelated = pygame.transform.scale(small, (w, h))
+            if amt >= 0.999:
+                surf = pixelated
+            else:
+                a = pygame.surfarray.array3d(surf).astype(np.float32)
+                b = pygame.surfarray.array3d(pixelated).astype(np.float32)
+                blended = (a * (1 - amt) + b * amt).astype(np.uint8)
+                pygame.surfarray.blit_array(surf, blended)
+    color_effects = {k: v for k, v in effects.items() if k != "pixelate"}
+    if color_effects:
+        arr = pygame.surfarray.array3d(surf).astype(np.float32)
+        base = arr
+        result = arr.copy()
+        if "grayscale" in color_effects:
+            amt = color_effects["grayscale"]
+            gray = (base[..., 0] * 0.299 + base[..., 1] * 0.587
+                    + base[..., 2] * 0.114)
+            gray3 = np.repeat(gray[..., None], 3, axis=2)
+            result = result * (1 - amt) + gray3 * amt
+        if "sepia" in color_effects:
+            amt = color_effects["sepia"]
+            r, g, b = base[..., 0], base[..., 1], base[..., 2]
+            sr = r * 0.393 + g * 0.769 + b * 0.189
+            sg = r * 0.349 + g * 0.686 + b * 0.168
+            sb = r * 0.272 + g * 0.534 + b * 0.131
+            sepia = np.clip(np.stack([sr, sg, sb], axis=-1), 0, 255)
+            result = result * (1 - amt) + sepia * amt
+        if "invert" in color_effects:
+            amt = color_effects["invert"]
+            inv = 255.0 - base
+            result = result * (1 - amt) + inv * amt
+        if "hue" in color_effects:
+            amt, degrees = color_effects["hue"]
+            if amt > 0 and degrees:
+                norm = np.clip(result, 0, 255) / 255.0
+                hsv = _rgb_to_hsv_np(norm)
+                hsv[..., 0] = (hsv[..., 0] + (degrees * amt) / 360.0) % 1.0
+                rgb = _hsv_to_rgb_np(hsv)
+                result = rgb * 255.0
+        result = np.clip(result, 0, 255).astype(np.uint8)
+        pygame.surfarray.blit_array(surf, result)
+    return surf
+
+
+def apply_camera_post(screen, zoom, rotation, effects):
+    """Checkpoint 6: post-process the fully-drawn world frame (zoom/
+    rotate the whole view, then any active screen effects) — called once
+    per frame after every world-affecting draw but before the HUD, so
+    the HUD itself is never zoomed/rotated/tinted, matching real GD."""
+    if zoom == 1.0 and rotation == 0.0 and not effects:
+        return
+    w, h = screen.get_size()
+    surf = screen.copy()
+    if effects:
+        surf = apply_screen_effects(surf, effects)
+    if rotation != 0.0:
+        surf = pygame.transform.rotate(surf, rotation)
+    if zoom != 1.0:
+        new_w = max(1, int(surf.get_width() * zoom))
+        new_h = max(1, int(surf.get_height() * zoom))
+        surf = pygame.transform.smoothscale(surf, (new_w, new_h))
+    if rotation != 0.0 or zoom != 1.0:
+        rw, rh = surf.get_size()
+        screen.fill((0, 0, 0))
+        screen.blit(surf, ((w - rw) // 2, (h - rh) // 2))
+    else:
+        screen.blit(surf, (0, 0))
 
 
 def render_hud(screen, player, max_x, attempts, attempt_frames, meta,
@@ -497,13 +642,19 @@ def render_hud(screen, player, max_x, attempts, attempt_frames, meta,
     # so nothing visually collides with the coin HUD.
     hud_text_y = bar_y + bar_h + 10
     txt(screen, f"Attempt {attempts}", 20, hud_text_y, 17, C_GRAY, shadow=True)
-    cur_time_s = attempt_frames / 60.0
+    # `attempt_frames`/`best_time_frames` count physics ticks; converting
+    # to seconds via PHYSICS_TPS keeps this correct at the new 240 TPS
+    # rate. NOTE: any `best_time_frames` persisted from before the
+    # Checkpoint-3 tick-rate migration was recorded at 60 TPS and will
+    # now read ~4x too fast until the level is re-completed — same
+    # staleness the plan already flags for saved bot runs.
+    cur_time_s = attempt_frames / PHYSICS_TPS
     timer_label = f"Time {int(cur_time_s // 60):d}:{cur_time_s % 60:05.2f}"
     txt(screen, timer_label, 20, hud_text_y + 20, 14, C_GRAY, shadow=True)
     prev_best_time = int((meta or {}).get("best_time_frames", 0)) if meta else 0
     cps_baseline_y = hud_text_y + 38
     if prev_best_time > 0:
-        best_s = prev_best_time / 60.0
+        best_s = prev_best_time / PHYSICS_TPS
         best_label = f"Best {int(best_s // 60):d}:{best_s % 60:05.2f}"
         txt(screen, best_label, 20, hud_text_y + 38, 13, C_SUCCESS, shadow=True)
         cps_baseline_y = hud_text_y + 56
@@ -513,7 +664,7 @@ def render_hud(screen, player, max_x, attempts, attempt_frames, meta,
     # older than 1 second so the CPS number reads as instantaneous, not
     # session average.
     if is_sim_run:
-        cps_cutoff = attempt_frames - 60
+        cps_cutoff = attempt_frames - PHYSICS_TPS  # 1-second rolling window
         while bot_press_frames and bot_press_frames[0] < cps_cutoff:
             bot_press_frames.pop(0)
         cps_now = len(bot_press_frames)
@@ -521,7 +672,7 @@ def render_hud(screen, player, max_x, attempts, attempt_frames, meta,
             20, cps_baseline_y, 13, (255, 220, 160), shadow=True)
         if manual_takeover and player.alive and not player.won:
             grace_left = max(0, manual_takeover_grace - takeover_idle_frames)
-            txt(screen, f"TAKEOVER · {grace_left / 60.0:.1f}s",
+            txt(screen, f"TAKEOVER · {grace_left / PHYSICS_TPS:.1f}s",
                 20, cps_baseline_y + 18, 13, (255, 120, 120), shadow=True)
         elif is_sim_run and player.alive and not player.won:
             txt(screen, "Press P to take over",
@@ -546,6 +697,26 @@ def render_hud(screen, player, max_x, attempts, attempt_frames, meta,
                 pygame.draw.circle(screen, lighter(C_COIN, 70), (cx, coin_y), 6, 2)
         txt(screen, f"{got}/{total_coins}", WIDTH - 30 - total_coins * 28 - 8,
             coin_y - 8, 14, C_WHITE, shadow=True)
+
+    # Item Counter HUD (Checkpoint 7): a passive readout row per placed
+    # Item Counter object, stacked top-right below the coin HUD. Reuses
+    # the same `txt()` helper as every other HUD label rather than a new
+    # text-rendering pathway; placement position is unused (see the
+    # object's own tip in objects.py) since this is a HUD row, not a
+    # world-space overlay.
+    counter_y = 52 + (28 if total_coins > 0 else 0)
+    for o in player.objects:
+        if o.get("t") != T_ITEM_COUNTER:
+            continue
+        cid = int(o.get("item_id", 0))
+        if o.get("label") == "Timer":
+            val = player.timers.get(cid, 0.0)
+            label = f"Timer {cid}: {val:.2f}s"
+        else:
+            val = player.items.get(cid, 0.0)
+            label = f"Item {cid}: {val:g}"
+        txt(screen, label, WIDTH - 170, counter_y, 13, C_WHITE, shadow=True)
+        counter_y += 18
 
     if practice_mode:
         # Stack the CP chip ABOVE the PRACTICE label so the two never
@@ -819,13 +990,13 @@ def render_win_overlay(screen, player, mpos, win_sfx_played, level_music,
     txt(screen, "LEVEL COMPLETE!", WIDTH // 2, HEIGHT // 2 - 110, 54,
         C_PLAYER, True)
     # Stats panel: attempts, deaths, time, best time, coins.
-    cur_time_s_win = attempt_frames / 60.0
+    cur_time_s_win = attempt_frames / PHYSICS_TPS
     cur_time_str = (f"{int(cur_time_s_win // 60):d}:"
                     f"{cur_time_s_win % 60:05.2f}")
     best_t_frames = int((meta or {}).get("best_time_frames", 0)) if meta else 0
     best_str = "—"
     if best_t_frames > 0:
-        bts = best_t_frames / 60.0
+        bts = best_t_frames / PHYSICS_TPS
         best_str = f"{int(bts // 60):d}:{bts % 60:05.2f}"
     row_y = HEIGHT // 2 - 50
     txt(screen, f"Attempts: {attempts}", WIDTH // 2 - 130, row_y, 20,

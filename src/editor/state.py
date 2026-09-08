@@ -64,6 +64,14 @@ class EditorState:
         self.selected_type = PALETTE_CATEGORIES[0][1][0]
         self.rotation = 0                # brush rotation
         self.group_id_counter = 1
+        # ---- editor layers ---------------------------------------------
+        # Objects carry an optional "layer" int (default 0, un-persisted
+        # when 0 to keep saved levels lean). These three dicts are
+        # editor-session-only UI state, never saved with the level.
+        self.active_layer = 0
+        self.layer_hidden = {}            # {layer: True} for hidden layers
+        self.layer_locked = {}            # {layer: True} for locked layers
+        self.show_layers_panel = False
         # ---- selection / interaction ---------------------------------
         self.selected = []
         self.last_edit_cell = None
@@ -167,6 +175,34 @@ class EditorState:
         self.zoom = new_zoom
         self.cam_x = wx * eff_new - ax
         self.cam_y = wy * eff_new - ay
+
+    # ---- editor layers ---------------------------------------------------
+    def is_layer_locked(self, obj_or_layer):
+        layer = obj_or_layer if isinstance(obj_or_layer, int) else obj_or_layer.get("layer", 0)
+        return bool(self.layer_locked.get(layer))
+
+    def is_layer_hidden(self, obj_or_layer):
+        layer = obj_or_layer if isinstance(obj_or_layer, int) else obj_or_layer.get("layer", 0)
+        return bool(self.layer_hidden.get(layer))
+
+    def visible_objects(self, objects=None):
+        """``objects`` (default: the level) minus anything on a hidden
+        layer — what the editor canvas should actually draw."""
+        src = self.objects if objects is None else objects
+        if not self.layer_hidden:
+            return src
+        return [o for o in src if not self.is_layer_hidden(o)]
+
+    def filter_locked(self, objs):
+        """Drop objects on a locked layer — the single choke point every
+        selection assignment routes through, so move/rotate/scale/delete
+        (which all operate on ``st.selected``) can never touch one."""
+        if not self.layer_locked:
+            return list(objs)
+        return [o for o in objs if not self.is_layer_locked(o)]
+
+    def used_layers(self):
+        return sorted({o.get("layer", 0) for o in self.objects} | {0, self.active_layer})
 
     def palette_items(self):
         return PALETTE_CATEGORIES[self.active_cat][1]

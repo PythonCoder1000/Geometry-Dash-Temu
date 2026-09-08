@@ -8,7 +8,7 @@ thin entry point every caller uses.
 
 Timing model
 ------------
-Physics ticks at a fixed ``PHYSICS_RATE`` (60 Hz); every movement
+Physics ticks at a fixed ``PHYSICS_RATE`` (240 Hz); every movement
 constant is tuned for that rate.  The render loop runs at whatever FPS
 cap the user picked.  A wall-clock accumulator decides how many ticks to
 run per rendered frame, and the leftover fraction (``sim_accum``) is
@@ -23,7 +23,7 @@ import sys
 import pygame
 
 from .constants import (
-    WIDTH, HEIGHT, CELL, PLAYER_START_GX,
+    WIDTH, HEIGHT, CELL, PLAYER_START_GX, PHYSICS_TPS,
     C_PLAYER, C_BG_TOP, C_BG_BOT, C_DASH_ORB,
     DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES,
     T_COIN, T_ORB, T_DASH_ORB, T_DASH_ORB_GRAV, T_BLACK_ORB,
@@ -43,6 +43,7 @@ from . import prefs
 from .input_guard import ClickGuard
 from .particles import Particles
 from .physics import PhysicsParams
+from .channels import channels_from_meta
 from .player import Player
 from .levels import update_meta, get_group_id
 from .objects import cycle_active_start, start_objects
@@ -54,15 +55,24 @@ from .play_render import (
     render_blackout, render_toast,
     render_hud, render_debug_overlay, render_state_hud,
     render_pause_overlay, render_win_overlay,
+    build_screen_effects, apply_camera_post,
 )
 
-PHYSICS_RATE = 60          # physics ticks per second (fixed)
-CAMERA_LEAD_PX = 200.0     # player sits this far right of the left edge
-CAM_Y_EASE = 0.08
-CAM_Y_MAX_STEP = 14.0      # px per tick
-DEATH_FRAMES = 45
-DEATH_SLOWMO_FRAMES = 30
-MANUAL_TAKEOVER_GRACE = 60  # ticks of silence before a takeover dies
+# Checkpoint 3 tick-rate migration (60 -> 240 TPS, physics bible Part 0/
+# §2.7): PHYSICS_RATE itself moves to 240; every tick-count/rate literal
+# below is rescaled to preserve the same real-world duration/speed it
+# had at 60 TPS — see the per-constant comments for the conversion.
+PHYSICS_RATE = PHYSICS_TPS
+CAMERA_LEAD_PX = 200.0     # player sits this far right of the left edge (px, tick-rate independent)
+# Single-pole approach-to-target camera-Y smoothing: `cam_y += (target -
+# cam_y) * CAM_Y_EASE` is a per-tick decay of (1 - CAM_Y_EASE); at 4x the
+# tick rate the equivalent decay is decay_old ** (1/4), not decay_old/4:
+# (1 - 0.08) ** 0.25 == 0.97937..., so the new ease is 1 - that.
+CAM_Y_EASE = 0.0206296
+CAM_Y_MAX_STEP = 3.5       # px per tick (14.0 / 4 — linear speed cap)
+DEATH_FRAMES = 180         # 45 * 4 (same real-time duration)
+DEATH_SLOWMO_FRAMES = 120  # 30 * 4
+MANUAL_TAKEOVER_GRACE = 240  # 60 * 4 — ticks of silence before a takeover dies
 TEST_SPEEDS = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
 DESYNC_ALERT_PX = 24.0
 
@@ -114,13 +124,13 @@ def _speed_warp_events(objects, base_speed):
     """Sorted (x_px, value) event lists for speed portals and time-warp
     triggers, plus lookup closures for "the value in effect at x" —
     shared by :func:`real_time_to_x` and its inverse, :func:`x_at_time`."""
-    base_speed = max(1.0, float(base_speed))
+    base_speed = max(1e-9, float(base_speed))
     speed_events = sorted(
         ((int(o["x"]) * CELL, float(SPEED_VALUES[o["t"]]))
          for o in objects if o.get("t") in SPEED_VALUES),
         key=lambda e: e[0])
     warp_events = sorted(
-        ((int(o["x"]) * CELL, float(o.get("factor", 1.0)))
+        ((int(o["x"]) * CELL, max(0.01, min(10.0, float(o.get("factor", 1.0)))))
          for o in objects if o.get("t") == T_TIME_WARP),
         key=lambda e: e[0])
 
@@ -307,7 +317,8 @@ class PlaySession:
         rightmost_gx = (min(end_xs) if end_xs
                         else max((o["x"] for o in self.objects), default=10))
         self.max_x = rightmost_gx * CELL + CELL
-        self.player = Player(self.objects, params=PhysicsParams.from_meta(meta))
+        self.player = Player(self.objects, params=PhysicsParams.from_meta(meta),
+                            channels=channels_from_meta(meta))
         self.player.practice_mode = practice_mode
         self.player.noclip = noclip
         self.is_sim_run = bot_controller is not None or playback_inputs is not None
@@ -703,7 +714,8 @@ class PlaySession:
                 result = self._handle_key(ev.key)
                 if result is not None:
                     return result, None
-                if ev.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w):
+                if (ev.key in (pygame.K_SPACE, pygame.K_UP, pygame.K_w)
+                        and not getattr(ev, "repeat", False)):
                     new_presses += 1
             elif ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
                 if not self.guard.consume_click(ev):
@@ -829,7 +841,11 @@ class PlaySession:
         self.attempt_frames += 1
         if self.attempt_frames % 2 == 0:
             self.current_run.append((self.attempt_frames, p.x, p.y))
-        if not p.camera_locked:
+        if p.camera_locked and p.static_cam_group:
+            ctr = self._static_group_center()
+            if ctr is not None:
+                self.cam_x = ctr[0] - CAMERA_LEAD_PX
+        elif not p.camera_locked:
             self.cam_x = p.x - CAMERA_LEAD_PX
         after_passed = set(p.passed)
         _play_interaction_sounds(
@@ -856,7 +872,7 @@ class PlaySession:
         if click_now:
             if prefs.get("bot_click_sfx_enabled", True):
                 sfx.play("bot_click", 0.5)
-            self.bot_click_flash = 12
+            self.bot_click_flash = 48  # 12 * 4 (same real-time duration, 240 TPS)
             self.bot_press_frames.append(self.attempt_frames)
             self.bot_press_total += 1
         elif self.bot_click_flash > 0:
@@ -889,7 +905,7 @@ class PlaySession:
         drift = abs((p.y + p.size / 2) - exp_y)
         self.desync_max_px = max(self.desync_max_px, drift)
         if drift > DESYNC_ALERT_PX:
-            self.desync_alert_timer = 30
+            self.desync_alert_timer = 120  # 30 * 4 (same real-time duration, 240 TPS)
         elif self.desync_alert_timer > 0:
             self.desync_alert_timer -= 1
 
@@ -907,19 +923,40 @@ class PlaySession:
         self.deaths_this_session += 1
         self.pending_presses = 0
 
+    def _static_group_center(self):
+        """Checkpoint 6: world (x, y) centre of a Static camera trigger's
+        target_group, or None if the group has no members / doesn't
+        exist. Reaches into Player's group index directly — the same
+        internals TriggerMixin (mixed into Player) already reads."""
+        p = self.player
+        members = p._by_group.get(p.static_cam_group)
+        if not members:
+            return None
+        xs = [m.get("_fx", m["x"]) * CELL + CELL / 2 for m in members]
+        ys = [m.get("_fy", m["y"]) * CELL + CELL / 2 for m in members]
+        return sum(xs) / len(xs), sum(ys) / len(ys)
+
     def _tick_camera(self):
         p = self.player
-        if p.free_cam_mode:
-            p.target_cam_y = p.y + p.size / 2 - HEIGHT / 2
+        # p.target_cam_y is already kept current for free-cam sections by
+        # Player.update() itself (so the fall-off check tracks it too);
+        # this just eases the visual camera toward that target.
         self.prev_cam_y = self.cam_y
-        if not p.camera_locked:
+        if p.camera_locked and p.static_cam_group:
+            ctr = self._static_group_center()
+            if ctr is not None:
+                self._cam_pan_len = 1
+                self.cam_y = ctr[1] - HEIGHT / 2
+        elif not p.camera_locked:
             if p.free_cam_mode:
                 # Continuous tracking (e.g. resumed "follow" mode): the
                 # target moves every tick, so a fixed-duration ease has
                 # no fixed endpoint to aim at — keep the old responsive
-                # exponential chase.
+                # exponential chase. A Cam Guide Trigger (Checkpoint 6)
+                # overrides the smoothing constant while active.
                 self._cam_pan_len = 1
-                dy = (p.target_cam_y - self.cam_y) * CAM_Y_EASE
+                ease = p.cam_guide_ease if p.cam_guide_ease is not None else CAM_Y_EASE
+                dy = (p.target_cam_y - self.cam_y) * ease
                 self.cam_y += max(-CAM_Y_MAX_STEP, min(CAM_Y_MAX_STEP, dy))
             else:
                 # One-shot "pan" trigger: ease smoothly to the target
@@ -968,8 +1005,8 @@ class PlaySession:
         self.sim_accum += self.last_dt_sec * PHYSICS_RATE * self._step_scale()
         # Never try to catch up more than half a second (debugger stall).
         self.sim_accum = min(self.sim_accum, PHYSICS_RATE * 0.5)
-        while self.sim_accum >= 1.0:
-            self.sim_accum -= 1.0
+        while self.sim_accum >= 1.0 - 1e-9:
+            self.sim_accum = max(0.0, self.sim_accum - 1.0)
             self._tick()
 
     # ---- render ------------------------------------------------------------
@@ -983,6 +1020,15 @@ class PlaySession:
                  if self.death_timer == 0 and not p.camera_locked
                  else self.cam_x)
         cam_y = self.prev_cam_y + (self.cam_y - self.prev_cam_y) * alpha
+        # Checkpoint 6: a Cam Offset Trigger shifts the view away from
+        # its normal follow position; a Cam Edge Trigger then clamps the
+        # (already-offset) result to a rectangular bound.
+        cam_x += p.cam_offset_x
+        cam_y += p.cam_offset_y
+        if p.cam_edge:
+            min_x, max_x, min_y, max_y = p.cam_edge
+            cam_x = max(min_x, min(max_x, cam_x))
+            cam_y = max(min_y, min(max_y, cam_y))
         update_shake()
         shake_x, shake_y = shake_offset
         s = self.screen
@@ -1014,7 +1060,12 @@ class PlaySession:
         render_death_reason(s, self.death_timer, p)
         render_toast(s, self.toast_text, self.toast_timer)
         render_slowmo_vignette(s, os_, self.CLEAR, self.death_slowmo_timer)
-        render_pulse_flash(s, os_, p.pulse_intensity())
+        render_pulse_flash(s, os_, p.pulse_intensity(), p.pulse_color())
+        # Checkpoint 6: zoom/rotate/screen-effects post-process the fully
+        # drawn world frame, before the HUD is drawn on top of it (so the
+        # HUD itself never zooms/rotates/tints, matching real GD).
+        apply_camera_post(s, p.zoom, p.cam_rotation,
+                          build_screen_effects(p.active_effect_anims))
         if self.death_flash_timer > 0:
             self.death_flash_timer -= 1
         render_hud(s, p, self.max_x, self.attempts, self.attempt_frames,

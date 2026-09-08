@@ -125,14 +125,11 @@ def _draw_ball(surf, s, col, icon_index):
 
 
 def _draw_wave(surf, s, col):
-    # Classic dart: sharp nose, notched tail.
-    pts = _fpts(s, [(0.96, 0.50), (0.10, 0.06), (0.30, 0.50), (0.10, 0.94)])
+    # GD wave is a clean triangle, not the old diamond-with-tail shape.
+    pts = _fpts(s, [(0.96, 0.50), (0.08, 0.10), (0.08, 0.90)])
     draw_outlined_poly(surf, pts, col, max(2, int(s * 0.05)))
-    inner = _fpts(s, [(0.78, 0.50), (0.26, 0.24), (0.40, 0.50), (0.26, 0.76)])
+    inner = _fpts(s, [(0.76, 0.50), (0.18, 0.20), (0.18, 0.80)])
     pygame.draw.polygon(surf, lighter(col, 55), inner)
-    pygame.draw.line(surf, lighter(C_MODE_WAVE, 40),
-                     (s * 0.30, s * 0.50), (s * 0.92, s * 0.50),
-                     max(1, int(s * 0.02)))
 
 
 def _draw_ufo(surf, s, col, icon_index):

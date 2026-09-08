@@ -24,7 +24,7 @@ in :mod:`player`; the registry only describes *data*.
 from dataclasses import dataclass
 
 from .constants import (
-    BG_PRESETS, PLAYER_COLORS,
+    BG_PRESETS,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING, MODE_ROBOT,
     T_BLOCK, T_SLAB, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW,
@@ -42,7 +42,18 @@ from .constants import (
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
     T_BLACKOUT_TRIGGER,
+    T_SPAWN_TRIGGER, T_TOGGLE_TRIGGER, T_STOP_TRIGGER, T_SEQUENCE_TRIGGER,
+    T_SCALE_TRIGGER, T_ALPHA_TRIGGER,
+    T_ZOOM_TRIGGER, T_CAM_OFFSET_TRIGGER, T_CAM_ROTATE_TRIGGER,
+    T_CAM_EDGE_TRIGGER, T_CAM_GUIDE_TRIGGER,
+    T_GRAYSCALE_TRIGGER, T_SEPIA_TRIGGER, T_INVERT_TRIGGER, T_HUE_TRIGGER,
+    T_PIXELATE_TRIGGER,
     T_JUMP_PREDICTOR, T_BOT_CHECKPOINT, T_DASH_STOP,
+    T_JUMP_BLOCK, T_WAVE_BLOCK, T_BONK_BLOCK,
+    T_ITEM_PICKUP, T_COUNT_TRIGGER, T_INSTANT_COUNT_TRIGGER,
+    T_ITEM_EDIT_TRIGGER, T_ITEM_COMP_TRIGGER, T_ITEM_PERS_TRIGGER,
+    T_TIME_TRIGGER, T_TIME_EVENT_TRIGGER, T_ITEM_COUNTER,
+    T_KEYFRAME, T_KEYFRAME_TRIGGER,
     C_BLOCK, C_SLAB, C_SPIKE, C_SAW, C_ORB, C_PINK_ORB, C_RED_ORB,
     C_BLUE_ORB, C_GREEN_ORB, C_BLACK_ORB, C_DASH_ORB, C_DASH_ORB_GRAV,
     C_SPIDER_ORB, C_TELEPORT_ORB, C_TELEPORT_PORTAL,
@@ -56,6 +67,13 @@ from .constants import (
     C_COLOR_TRIGGER, C_PULSE_TRIGGER, C_ROTATE_TRIGGER, C_FOLLOW_TRIGGER,
     C_BLACKOUT_TRIGGER,
     C_TIME_WARP, C_JUMP_PREDICTOR, C_BOT_CHECKPOINT, C_DASH_STOP,
+    C_JUMP_BLOCK, C_WAVE_BLOCK, C_BONK_BLOCK,
+    C_ZOOM_TRIGGER, C_CAM_OFFSET_TRIGGER, C_CAM_ROTATE_TRIGGER,
+    C_CAM_EDGE_TRIGGER, C_CAM_GUIDE_TRIGGER,
+    C_GRAYSCALE_TRIGGER, C_SEPIA_TRIGGER, C_INVERT_TRIGGER, C_HUE_TRIGGER,
+    C_PIXELATE_TRIGGER,
+    C_ITEM_PICKUP, C_COUNT_TRIGGER, C_ITEM_EDIT_TRIGGER, C_ITEM_COMP_TRIGGER,
+    C_TIME_TRIGGER, C_ITEM_COUNTER, C_KEYFRAME, C_KEYFRAME_TRIGGER,
 )
 
 
@@ -186,6 +204,46 @@ _F_MULTI_ACTIVATE = Field("multi_activate", "Multi Activate", "bool", False)
 _F_DIR = Field("dir", "Direction", "choice", "auto",
                choices=("auto", "up", "down", "left", "right"))
 _F_FREE_MODE = Field("free_mode", "Free camera", "bool", False)
+# Checkpoint 5 (editor reference "Key trigger concepts"): every trigger
+# can target a whole group instead of/alongside a single oid, be fired
+# only by a Spawn/Sequence trigger instead of player touch, and either
+# fire once (default) or every touch (multi-activate, reusing the orb
+# field of the same name/meaning).
+# Deliberately NOT named "group": levels.get_groups() reads a bare
+# "group" int as legacy group MEMBERSHIP (which group this object
+# belongs to). A trigger's *target* is a different concept (which group
+# it ACTS ON) -- if it also called itself "group" a Spawn/Toggle/
+# Sequence trigger without an explicit "groups" list would become a
+# member of its own target group and self-refire without end the first
+# time it targeted that group (see triggers.py's TriggerMixin.
+# _resolve_targets docstring-comment for the mechanics).
+_F_GROUP = Field("target_group", "Target group", "int", 0, 0, None,
+                 persist="always")
+_F_SPAWN_TRIGGERED = Field("spawn_triggered", "Spawn Triggered (no touch)",
+                           "bool", False)
+_F_EASING = Field("easing", "Easing", "choice", "linear",
+                  choices=("linear", "ease_in", "ease_out", "ease_in_out"),
+                  persist="always")
+_TRIGGER_COMMON_FIELDS = (_F_GROUP, _F_SPAWN_TRIGGERED, _F_MULTI_ACTIVATE)
+# Checkpoint 7 (editor reference Sec 4, "Item/counter/timer system"): the
+# numbered item id every item-logic trigger reads/writes. Deliberately its
+# own field (not reusing _F_GROUP) -- an item id and a target group id are
+# different id-spaces that only happen to both be small ints.
+_F_ITEM_ID = Field("item_id", "Item id", "int", 0, 0, None, persist="always")
+_F_COMPARATOR = Field("comparator", "Comparator", "choice", ">=",
+                      choices=(">=", "<=", "==", "!=", ">", "<"),
+                      persist="always")
+# Checkpoint 8 (simplified keyframe system): which animation a Keyframe
+# belongs to / which animation a Keyframe Animation Trigger plays back.
+# Its own id-space, like _F_ITEM_ID -- deliberately not _F_GROUP, since an
+# animation id and a target group id mean different things that only
+# happen to both be small ints.
+_F_ANIMATION_ID = Field("animation_id", "Animation id", "int", 0, 0, None,
+                        persist="always")
+# Checkpoint 6: camera/screen-effect triggers act on the camera or the
+# whole screen, not on a targeted group of objects, so they skip
+# _F_GROUP but keep the spawn-triggered/multi-activate concepts.
+_CAMERA_COMMON_FIELDS = (_F_SPAWN_TRIGGERED, _F_MULTI_ACTIVATE)
 
 _MODE_CHOICES = (MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO,
                  MODE_SPIDER, MODE_SWING, MODE_ROBOT)
@@ -199,11 +257,16 @@ CAT_PORTALS = "Portals"
 CAT_SPEED = "Speed"
 CAT_DECO = "Deco"
 CAT_TRIGGERS = "Triggers"
+# Split out of CAT_TRIGGERS (Checkpoint 9, editor reference §5's category
+# list) purely for editor-tab organization — same ObjectSpec machinery,
+# just a less overloaded single "Triggers" tab.
+CAT_CAMERA = "Camera"
+CAT_ITEMS = "Items"
 CAT_MISC = "Misc"
 CAT_EDITOR_UTILS = "Utils"
 CATEGORY_ORDER = (CAT_BLOCKS, CAT_HAZARDS, CAT_ORBS, CAT_PADS, CAT_PORTALS,
-                  CAT_SPEED, CAT_DECO, CAT_TRIGGERS, CAT_MISC,
-                  CAT_EDITOR_UTILS)
+                  CAT_SPEED, CAT_DECO, CAT_TRIGGERS, CAT_CAMERA, CAT_ITEMS,
+                  CAT_MISC, CAT_EDITOR_UTILS)
 
 
 def _mode_portal(t, name, tip, col):
@@ -340,13 +403,16 @@ _SPEC_LIST = [
                              persist="always"),
                        Field("duration", "Duration (s)", "float", 1.0, 0.0,
                              10.0, step=0.1, decimals=2,
-                             persist="always"),)),
+                             persist="always"),
+                       *_TRIGGER_COMMON_FIELDS)),
     ObjectSpec(T_BG_TRIGGER, "BG Trigger", "Changes the background "
                "preset.", C_BG_TRIGGER, CAT_TRIGGERS,
                fields=(Field("bg", "BG preset", "int", 0, 0,
-                             len(BG_PRESETS) - 1, persist="always"),)),
-    ObjectSpec(T_MOVE_TRIGGER, "Move Trigger", "Moves target objects to "
-               "a destination.", C_MOVE_TRIGGER, CAT_TRIGGERS,
+                             len(BG_PRESETS) - 1, persist="always"),
+                       *_TRIGGER_COMMON_FIELDS)),
+    ObjectSpec(T_MOVE_TRIGGER, "Move Trigger", "Moves target objects (or a "
+               "whole Group) to a destination.", C_MOVE_TRIGGER,
+               CAT_TRIGGERS,
                fields=(_F_TARGET_OID,
                        Field("tx", "Dest x", "int", 0, default_from="x",
                              persist="always"),
@@ -355,27 +421,36 @@ _SPEC_LIST = [
                        Field("duration", "Duration (f)", "int", 30, 1, 600,
                              step=5, persist="always"),
                        Field("show_ghost", "Show ghost (editor)", "bool",
-                             False, persist="non_default"))),
-    ObjectSpec(T_COLOR_TRIGGER, "Color Trigger", "Sets the player "
-               "colour to the given palette index.", C_COLOR_TRIGGER, CAT_TRIGGERS,
-               fields=(Field("col_idx", "Color index", "int", 0, 0,
-                             len(PLAYER_COLORS) - 1, persist="always"),)),
-    ObjectSpec(T_PULSE_TRIGGER, "Pulse Trigger", "Screen pulse at a BPM.",
+                             False, persist="non_default"),
+                       _F_EASING, *_TRIGGER_COMMON_FIELDS)),
+    ObjectSpec(T_COLOR_TRIGGER, "Color Trigger", "Sets the player's color "
+               "to the given color channel (edit the channel's own RGB "
+               "from the panel below to restyle every user of it at "
+               "once).", C_COLOR_TRIGGER, CAT_TRIGGERS,
+               fields=(Field("channel", "Channel", "int", 0, 0, None,
+                             persist="always"),
+                       *_TRIGGER_COMMON_FIELDS)),
+    ObjectSpec(T_PULSE_TRIGGER, "Pulse Trigger", "Screen pulse at a BPM, "
+               "optionally tinted to a color channel (-1 = white).",
                C_PULSE_TRIGGER, CAT_TRIGGERS,
                fields=(Field("bpm", "BPM", "int", 128, 30, 300, step=4,
                              persist="always"),
                        Field("duration", "Duration (s)", "float", 2.0, 0.1,
                              20.0, step=0.5, decimals=1,
-                             persist="always"))),
-    ObjectSpec(T_ROTATE_TRIGGER, "Rotate Trigger", "Spins target objects.",
-               C_ROTATE_TRIGGER, CAT_TRIGGERS,
+                             persist="always"),
+                       Field("channel", "Channel (-1=white)", "int", -1, -1,
+                             None, persist="always"),
+                       *_TRIGGER_COMMON_FIELDS)),
+    ObjectSpec(T_ROTATE_TRIGGER, "Rotate Trigger", "Spins target objects "
+               "(or a whole Group).", C_ROTATE_TRIGGER, CAT_TRIGGERS,
                fields=(_F_TARGET_OID,
                        Field("spin", "Spin (deg/s)", "float", 90.0, -3600.0,
                              3600.0, step=15.0, decimals=1,
                              persist="always"),
                        Field("duration", "Duration (s)", "float", 4.0, 0.1,
                              60.0, step=0.5, decimals=1,
-                             persist="always"))),
+                             persist="always"),
+                       _F_EASING, *_TRIGGER_COMMON_FIELDS)),
     ObjectSpec(T_FOLLOW_TRIGGER, "Follow Trigger", "Links a target to a "
                "source so it moves with it.", C_FOLLOW_TRIGGER, CAT_TRIGGERS,
                fields=(Field("source_oid", "Source oid", "int", 0, 0, None,
@@ -389,7 +464,8 @@ _SPEC_LIST = [
     ObjectSpec(T_TIME_WARP, "Time Warp", "Rescales game time (<1 slow-mo, "
                ">1 fast forward).", C_TIME_WARP, CAT_TRIGGERS,
                fields=(Field("factor", "Factor", "float", 1.0, 0.0, 10.0,
-                             step=0.1, persist="always"),)),
+                             step=0.1, persist="always"),
+                       *_TRIGGER_COMMON_FIELDS)),
     ObjectSpec(T_BLACKOUT_TRIGGER, "Blackout Trigger", "Fades the whole "
                "screen to solid black (or back to clear) — hides "
                "everything, including the player and its trail.",
@@ -398,7 +474,279 @@ _SPEC_LIST = [
                              persist="always"),
                        Field("duration", "Duration (s)", "float", 1.0, 0.0,
                              10.0, step=0.1, decimals=2,
-                             persist="always"),)),
+                             persist="always"),
+                       *_TRIGGER_COMMON_FIELDS)),
+    ObjectSpec(T_SPAWN_TRIGGER, "Spawn Trigger", "Fires every trigger in "
+               "the target group after Delay seconds — the 'glue' trigger "
+               "that chains sequences together.", (150, 220, 255),
+               CAT_TRIGGERS,
+               fields=(_F_GROUP,
+                       Field("delay", "Delay (s)", "float", 0.0, 0.0, 60.0,
+                             step=0.1, decimals=2, persist="always"),
+                       _F_MULTI_ACTIVATE)),
+    ObjectSpec(T_TOGGLE_TRIGGER, "Toggle Trigger", "Enables or disables "
+               "every trigger in the target group (disabled triggers "
+               "ignore touch and Spawn until re-enabled).",
+               (255, 200, 90), CAT_TRIGGERS,
+               fields=(_F_GROUP,
+                       Field("state", "Enable", "bool", True,
+                             persist="always"),
+                       _F_MULTI_ACTIVATE)),
+    ObjectSpec(T_STOP_TRIGGER, "Stop Trigger", "Halts any in-progress Move/"
+               "Rotate/Scale/Alpha animation on the target group, freezing "
+               "it where it currently is.", (255, 120, 120), CAT_TRIGGERS,
+               fields=(_F_GROUP, _F_MULTI_ACTIVATE)),
+    ObjectSpec(T_SEQUENCE_TRIGGER, "Sequence Trigger", "Fires up to four "
+               "groups in order, Step Delay seconds apart.",
+               (200, 160, 255), CAT_TRIGGERS,
+               fields=(_F_GROUP,
+                       Field("target_group2", "Group 2", "int", 0, 0, None,
+                             persist="always"),
+                       Field("target_group3", "Group 3", "int", 0, 0, None,
+                             persist="always"),
+                       Field("target_group4", "Group 4", "int", 0, 0, None,
+                             persist="always"),
+                       Field("step_delay", "Step Delay (s)", "float", 0.5,
+                             0.0, 30.0, step=0.1, decimals=2,
+                             persist="always"),
+                       _F_MULTI_ACTIVATE)),
+    ObjectSpec(T_SCALE_TRIGGER, "Scale Trigger", "Resizes the target group "
+               "(optionally per-axis) over Duration.", (120, 255, 180),
+               CAT_TRIGGERS,
+               fields=(Field("sx", "Scale X", "float", 1.0, 0.1, 8.0,
+                             step=0.05, decimals=2, persist="always"),
+                       Field("sy", "Scale Y", "float", 1.0, 0.1, 8.0,
+                             step=0.05, decimals=2, persist="always"),
+                       Field("duration", "Duration (s)", "float", 0.5, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_TRIGGER_COMMON_FIELDS)),
+    ObjectSpec(T_ALPHA_TRIGGER, "Alpha Trigger", "Fades the target group's "
+               "transparency over Duration.", (200, 200, 200), CAT_TRIGGERS,
+               fields=(Field("alpha", "Alpha", "float", 1.0, 0.0, 1.0,
+                             step=0.05, decimals=2, persist="always"),
+                       Field("duration", "Duration (s)", "float", 0.5, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_TRIGGER_COMMON_FIELDS)),
+    # ---- Item / counter / timer family (Checkpoint 7) -----------------
+    ObjectSpec(T_COUNT_TRIGGER, "Count Trigger", "Continuously watches an "
+               "item id; the FIRST tick the comparison becomes true, fires "
+               "the target group once (re-arms if the comparison later "
+               "goes false again).", C_COUNT_TRIGGER, CAT_ITEMS,
+               fields=(_F_GROUP, _F_ITEM_ID, _F_COMPARATOR,
+                       Field("value", "Value", "float", 0.0, None, None,
+                             persist="always"),
+                       _F_MULTI_ACTIVATE)),
+    ObjectSpec(T_INSTANT_COUNT_TRIGGER, "Instant Count Trigger", "Checks an "
+               "item id against Value once, the instant it's touched/"
+               "spawned (no re-arming) — fires the target group if true.",
+               C_COUNT_TRIGGER, CAT_ITEMS,
+               fields=(_F_GROUP, _F_ITEM_ID, _F_COMPARATOR,
+                       Field("value", "Value", "float", 0.0, None, None,
+                             persist="always"),
+                       _F_MULTI_ACTIVATE)),
+    ObjectSpec(T_ITEM_EDIT_TRIGGER, "Item Edit Trigger", "Applies Operation "
+               "(with Operand, or a second item id) to Item id's stored "
+               "value.", C_ITEM_EDIT_TRIGGER, CAT_ITEMS,
+               fields=(_F_ITEM_ID,
+                       Field("operation", "Operation", "choice", "add",
+                             choices=("add", "subtract", "multiply",
+                                      "divide", "set"), persist="always"),
+                       Field("operand", "Operand", "float", 1.0, None, None,
+                             persist="always"),
+                       Field("operand_item_id", "Operand item id (0=none)",
+                             "int", 0, 0, None, persist="always"),
+                       *_TRIGGER_COMMON_FIELDS)),
+    ObjectSpec(T_ITEM_COMP_TRIGGER, "Item Comp Trigger", "Compares Item id "
+               "against Value (or Compare item id, if nonzero); fires the "
+               "target group if true.", C_ITEM_COMP_TRIGGER, CAT_ITEMS,
+               fields=(_F_GROUP, _F_ITEM_ID, _F_COMPARATOR,
+                       Field("value", "Value", "float", 0.0, None, None,
+                             persist="always"),
+                       Field("compare_item_id", "Compare item id (0=none)",
+                             "int", 0, 0, None, persist="always"),
+                       _F_MULTI_ACTIVATE)),
+    ObjectSpec(T_ITEM_PERS_TRIGGER, "Item Pers Trigger", "Snapshots Item "
+               "id's current value into persistent storage — the next "
+               "retry/respawn re-seeds that item from the snapshot instead "
+               "of resetting it to 0.", (255, 235, 255), CAT_ITEMS,
+               fields=(_F_ITEM_ID, _F_MULTI_ACTIVATE)),
+    ObjectSpec(T_TIME_TRIGGER, "Timer Trigger", "Starts, stops, or resets a "
+               "numbered timer (seconds, counts up while running).",
+               C_TIME_TRIGGER, CAT_ITEMS,
+               fields=(Field("timer_id", "Timer id", "int", 0, 0, None,
+                             persist="always"),
+                       Field("action", "Action", "choice", "start",
+                             choices=("start", "stop", "reset"),
+                             persist="always"),
+                       *_TRIGGER_COMMON_FIELDS)),
+    ObjectSpec(T_TIME_EVENT_TRIGGER, "Time Event Trigger", "Continuously "
+               "watches a timer; the FIRST tick it crosses Threshold "
+               "seconds, fires the target group once.", C_TIME_TRIGGER,
+               CAT_ITEMS,
+               fields=(_F_GROUP,
+                       Field("timer_id", "Timer id", "int", 0, 0, None,
+                             persist="always"),
+                       Field("threshold", "Threshold (s)", "float", 5.0, 0.0,
+                             None, step=0.5, decimals=2, persist="always"),
+                       _F_MULTI_ACTIVATE)),
+    # ---- Keyframe animation (Checkpoint 8, simplified) -----------------
+    # A Keyframe is data, not a trigger: place several sharing one
+    # Animation id, give each a distinct Order (ascending = playback
+    # order -- explicit, not inferred from placement position, so
+    # reordering never requires moving the object), and a Keyframe
+    # Animation Trigger with the same Animation id plays a target group
+    # through them in Order, one segment per keyframe.
+    ObjectSpec(T_KEYFRAME, "Keyframe", "Marks one pose (position/rotation/"
+               "scale) in an animation. Give matching Keyframes the same "
+               "Animation id; Order picks playback sequence (ascending).",
+               C_KEYFRAME, CAT_TRIGGERS,
+               fields=(_F_ANIMATION_ID,
+                       Field("order", "Order", "int", 0, 0, None,
+                             persist="always"),
+                       Field("tx", "Pos x", "int", 0, default_from="x",
+                             persist="always"),
+                       Field("ty", "Pos y", "int", 0, default_from="y",
+                             persist="always"),
+                       Field("rotation", "Rotation (deg)", "float", 0.0,
+                             None, None, step=15.0, decimals=1,
+                             persist="always"),
+                       Field("sx", "Scale X", "float", 1.0, 0.1, 8.0,
+                             step=0.05, decimals=2, persist="always"),
+                       Field("sy", "Scale Y", "float", 1.0, 0.1, 8.0,
+                             step=0.05, decimals=2, persist="always"),
+                       Field("time", "Time (s, Time mode)", "float", 0.5,
+                             0.0, 30.0, step=0.1, decimals=2,
+                             persist="always"),
+                       _F_EASING)),
+    ObjectSpec(T_KEYFRAME_TRIGGER, "Keyframe Animation Trigger", "Plays "
+               "the target group through every Keyframe sharing Animation "
+               "id, in Order — position moves relative to the group's "
+               "current formation, rotation/scale snap the whole group to "
+               "each keyframe's absolute value.", C_KEYFRAME_TRIGGER,
+               CAT_TRIGGERS,
+               # NOTE: don't add _F_GROUP here -- _TRIGGER_COMMON_FIELDS
+               # already includes it. (Scale/Alpha Trigger, Checkpoint 5,
+               # list it a second time on top of *_TRIGGER_COMMON_FIELDS,
+               # which duplicates the "Target group" row in the edit
+               # panel -- a real pre-existing bug, flagged for Checkpoint
+               # 10's audit, not fixed here since it's out of this
+               # checkpoint's scope.)
+               fields=(_F_ANIMATION_ID,
+                       Field("timing_mode", "Timing", "choice", "time",
+                             choices=("time", "even", "dist"),
+                             persist="always"),
+                       Field("total_duration", "Total duration (s, Even/"
+                             "Dist)", "float", 2.0, 0.0, 60.0, step=0.1,
+                             decimals=2, persist="always"),
+                       *_TRIGGER_COMMON_FIELDS)),
+    # ---- Camera family (Checkpoint 6) ---------------------------------
+    ObjectSpec(T_ZOOM_TRIGGER, "Zoom Trigger", "Dollies the camera in/out "
+               "to Zoom over Duration.", C_ZOOM_TRIGGER, CAT_CAMERA,
+               fields=(Field("zoom", "Zoom", "float", 1.5, 0.1, 5.0,
+                             step=0.1, decimals=2, persist="always"),
+                       Field("duration", "Duration (s)", "float", 1.0, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_CAMERA_COMMON_FIELDS)),
+    ObjectSpec(T_CAM_OFFSET_TRIGGER, "Cam Offset Trigger", "Shifts the "
+               "camera away from its normal follow position by (Offset x, "
+               "Offset y) over Duration.", C_CAM_OFFSET_TRIGGER,
+               CAT_CAMERA,
+               fields=(Field("offset_x", "Offset x", "int", 0, -2000, 2000,
+                             step=20, persist="always"),
+                       Field("offset_y", "Offset y", "int", 0, -2000, 2000,
+                             step=20, persist="always"),
+                       Field("duration", "Duration (s)", "float", 1.0, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_CAMERA_COMMON_FIELDS)),
+    ObjectSpec(T_CAM_ROTATE_TRIGGER, "Cam Rotate Trigger", "Spins the "
+               "whole camera view to Angle degrees over Duration.",
+               C_CAM_ROTATE_TRIGGER, CAT_CAMERA,
+               fields=(Field("angle", "Angle (deg)", "float", 15.0, -360.0,
+                             360.0, step=5.0, decimals=1,
+                             persist="always"),
+                       Field("duration", "Duration (s)", "float", 2.0, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_CAMERA_COMMON_FIELDS)),
+    ObjectSpec(T_CAM_EDGE_TRIGGER, "Cam Edge Trigger", "Clamps camera "
+               "travel to a rectangular bound in px (Enable off clears "
+               "the clamp).", C_CAM_EDGE_TRIGGER, CAT_CAMERA,
+               fields=(Field("state", "Enable", "bool", True,
+                             persist="always"),
+                       Field("min_x", "Min x (px)", "int", -100000,
+                             -100000, 100000, step=50, persist="always"),
+                       Field("max_x", "Max x (px)", "int", 100000,
+                             -100000, 100000, step=50, persist="always"),
+                       Field("min_y", "Min y (px)", "int", -100000,
+                             -100000, 100000, step=50, persist="always"),
+                       Field("max_y", "Max y (px)", "int", 100000,
+                             -100000, 100000, step=50, persist="always"),
+                       *_CAMERA_COMMON_FIELDS)),
+    ObjectSpec(T_CAM_GUIDE_TRIGGER, "Cam Guide Trigger", "Overrides how "
+               "smoothly the camera eases toward the player (lower = "
+               "smoother); Enable off restores the default.",
+               C_CAM_GUIDE_TRIGGER, CAT_CAMERA,
+               fields=(Field("state", "Enable", "bool", True,
+                             persist="always"),
+                       Field("smoothing", "Smoothing", "float", 0.5, 0.001,
+                             1.0, step=0.05, decimals=3,
+                             persist="always"),
+                       *_CAMERA_COMMON_FIELDS)),
+    # ---- Screen effects (Checkpoint 6, best-effort subset) ------------
+    ObjectSpec(T_GRAYSCALE_TRIGGER, "Grayscale Trigger", "Desaturates the "
+               "screen toward Intensity over Duration.",
+               C_GRAYSCALE_TRIGGER, CAT_CAMERA,
+               fields=(Field("state", "Enable", "bool", True,
+                             persist="always"),
+                       Field("intensity", "Intensity", "float", 1.0, 0.0,
+                             1.0, step=0.1, decimals=2, persist="always"),
+                       Field("duration", "Duration (s)", "float", 1.0, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_CAMERA_COMMON_FIELDS)),
+    ObjectSpec(T_SEPIA_TRIGGER, "Sepia Trigger", "Tints the screen sepia "
+               "toward Intensity over Duration.", C_SEPIA_TRIGGER,
+               CAT_CAMERA,
+               fields=(Field("state", "Enable", "bool", True,
+                             persist="always"),
+                       Field("intensity", "Intensity", "float", 1.0, 0.0,
+                             1.0, step=0.1, decimals=2, persist="always"),
+                       Field("duration", "Duration (s)", "float", 1.0, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_CAMERA_COMMON_FIELDS)),
+    ObjectSpec(T_INVERT_TRIGGER, "Invert Trigger", "Inverts screen colors "
+               "toward Intensity over Duration.", C_INVERT_TRIGGER,
+               CAT_CAMERA,
+               fields=(Field("state", "Enable", "bool", True,
+                             persist="always"),
+                       Field("intensity", "Intensity", "float", 1.0, 0.0,
+                             1.0, step=0.1, decimals=2, persist="always"),
+                       Field("duration", "Duration (s)", "float", 1.0, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_CAMERA_COMMON_FIELDS)),
+    ObjectSpec(T_HUE_TRIGGER, "Hue Trigger", "Rotates screen hue by Hue "
+               "Shift degrees, scaled by Intensity, over Duration.",
+               C_HUE_TRIGGER, CAT_CAMERA,
+               fields=(Field("state", "Enable", "bool", True,
+                             persist="always"),
+                       Field("hue_shift", "Hue Shift (deg)", "float", 60.0,
+                             -360.0, 360.0, step=10.0, decimals=1,
+                             persist="always"),
+                       Field("intensity", "Intensity", "float", 1.0, 0.0,
+                             1.0, step=0.1, decimals=2, persist="always"),
+                       Field("duration", "Duration (s)", "float", 1.0, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_CAMERA_COMMON_FIELDS)),
+    ObjectSpec(T_PIXELATE_TRIGGER, "Pixelate Trigger", "Pixelates the "
+               "screen to Pixel Size blocks, blended by Intensity, over "
+               "Duration.", C_PIXELATE_TRIGGER, CAT_CAMERA,
+               fields=(Field("state", "Enable", "bool", True,
+                             persist="always"),
+                       Field("pixel_size", "Pixel Size", "int", 8, 2, 64,
+                             step=2, persist="always"),
+                       Field("intensity", "Intensity", "float", 1.0, 0.0,
+                             1.0, step=0.1, decimals=2, persist="always"),
+                       Field("duration", "Duration (s)", "float", 1.0, 0.0,
+                             30.0, step=0.1, decimals=2, persist="always"),
+                       _F_EASING, *_CAMERA_COMMON_FIELDS)),
     # ---- Misc --------------------------------------------------------
     ObjectSpec(T_START, "Start Pos", "Player spawn point. A level may hold "
                "several; the active one is where every attempt begins.",
@@ -411,6 +759,21 @@ _SPEC_LIST = [
                CAT_MISC, animated=True,
                fields=(Field("coin_id", "Coin id", "int", 0, 0, None,
                              persist="always"),)),
+    ObjectSpec(T_ITEM_PICKUP, "Item Pickup", "Touch to add Amount to Item "
+               "id's stored value (like a coin, but feeds the item/counter "
+               "system instead of the coin tally).", C_ITEM_PICKUP, CAT_ITEMS,
+               animated=True,
+               fields=(Field("item_id", "Item id", "int", 0, 0, None,
+                             persist="always"),
+                       Field("amount", "Amount", "float", 1.0, None, None,
+                             persist="always"))),
+    ObjectSpec(T_ITEM_COUNTER, "Item Counter", "HUD readout of a live item "
+               "(or timer) value — placement position is unused, this is a "
+               "top-left HUD row.", C_ITEM_COUNTER, CAT_ITEMS,
+               fields=(Field("label", "Label", "choice", "Item",
+                             choices=("Item", "Timer"), persist="always"),
+                       Field("item_id", "Item/timer id", "int", 0, 0, None,
+                             persist="always"))),
     ObjectSpec(T_JUMP_PREDICTOR, "Jump Probe", "Editor probe: previews the "
                "arc of a click here.", C_JUMP_PREDICTOR, CAT_MISC,
                single_instance=True, editor_only=True,
@@ -432,6 +795,16 @@ _SPEC_LIST = [
     ObjectSpec(T_DASH_STOP, "S Block", "Stops an active dash — invisible "
                "by default.", C_DASH_STOP, CAT_EDITOR_UTILS,
                invisible_by_default=True),
+    ObjectSpec(T_JUMP_BLOCK, "J Block", "Suppresses the one auto-jump that "
+               "fires on landing after holding through an orb — invisible "
+               "by default.", C_JUMP_BLOCK, CAT_EDITOR_UTILS,
+               invisible_by_default=True),
+    ObjectSpec(T_WAVE_BLOCK, "D Block", "Lets Wave slide on top of this "
+               "block instead of dying on contact — invisible by default.",
+               C_WAVE_BLOCK, CAT_EDITOR_UTILS, invisible_by_default=True),
+    ObjectSpec(T_BONK_BLOCK, "H Block", "Cube/Robot bonk off this block's "
+               "underside or side instead of dying — invisible by default.",
+               C_BONK_BLOCK, CAT_EDITOR_UTILS, invisible_by_default=True),
     # ---- Transient (never placeable) ---------------------------------
     ObjectSpec(T_CHECKPOINT, "Checkpoint", "Practice-mode save spot.",
                C_CHECKPOINT, None, animated=True),

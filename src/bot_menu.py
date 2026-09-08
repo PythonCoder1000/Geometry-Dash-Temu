@@ -109,6 +109,7 @@ _last_mirror_waypoints = None
 _last_inputs = None
 _last_status = ""
 _last_note = ""
+_last_context_key = None
 # Which Start Pos was active when the cached result above was produced.
 # A level with 2+ Start Positions can be solved from any of them, and a
 # run for one is meaningless — often unwinnable outright — replayed from
@@ -185,12 +186,25 @@ def clear_last_solve():
     """Discard the cached solution. Call after edits invalidate the path."""
     global _last_waypoints, _last_mirror_waypoints, _last_inputs
     global _last_status, _last_note, _last_start_key
+    global _last_context_key
     _last_waypoints = None
     _last_mirror_waypoints = None
     _last_inputs = None
     _last_status = ""
     _last_note = ""
     _last_start_key = None
+    _last_context_key = None
+
+
+def _sync_solve_context(objects, params):
+    """A cached win is only comparable within the same level and physics."""
+    global _last_context_key
+    key = (bot_saves.level_key_from_objects(_strip_internal(objects)), params)
+    changed = _last_context_key is not None and _last_context_key != key
+    if changed:
+        clear_last_solve()
+    _last_context_key = key
+    return changed
 
 
 def _strip_internal(objects):
@@ -437,14 +451,16 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
     if _last_start_key is not None and current_start_key != _last_start_key:
         clear_last_solve()
 
+    from .physics import PhysicsParams
+    params = PhysicsParams.from_meta(meta)
+    if _sync_solve_context(objects, params):
+        precomputed_path = None
+
     target_path = drawn_path if drawn_path is not None else precomputed_path
     if precomputed_path is not None and not _last_waypoints:
         _last_waypoints = list(precomputed_path)
         _last_status = "ok"
         _last_start_key = current_start_key
-
-    from .physics import PhysicsParams
-    params = PhysicsParams.from_meta(meta)
 
     level_key = (bot_saves.level_key_from_filename(level_filename)
                  or bot_saves.level_key_from_objects(_strip_internal(objects)))

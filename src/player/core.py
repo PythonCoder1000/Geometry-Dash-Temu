@@ -23,7 +23,9 @@ import pygame
 
 from ..constants import (
     CELL, HEIGHT, PLAYER_SIZE, MINI_PLAYER_SIZE, PLAYER_START_GX,
-    TRAIL_MAX_DISTANCE,
+    TRAIL_MAX_DISTANCE, PHYSICS_TPS, INPUT_BUFFER_TICKS,
+    WAVE_ANGLE_SMOOTHING,
+    TELEPORT_COOLDOWN_TICKS,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING, MODE_ROBOT, MODE_FROM_TYPE, SPEED_VALUES, PLAYER_COLORS,
     PLAYER_ICONS,
@@ -33,19 +35,20 @@ from ..constants import (
     T_PINK_PAD, T_RED_PAD, T_BLUE_PAD, T_SPIDER_PAD,
     T_GRAV_UP, T_GRAV_DOWN, T_END, T_START, T_COIN,
     T_MODE_MINI, T_MODE_BIG, T_MODE_DUAL, T_MODE_SOLO,
-    T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
-    T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
-    T_BLACKOUT_TRIGGER,
+    TRIGGER_TYPES, CONTROL_TRIGGER_TYPES,
     PAD_TYPES, ORB_TYPES, DASH_ORB_TYPES, T_DASH_STOP,
+    T_JUMP_BLOCK, T_WAVE_BLOCK, T_BONK_BLOCK,
+    T_ITEM_PICKUP, T_COUNT_TRIGGER, T_TIME_EVENT_TRIGGER, T_KEYFRAME,
     COLLISION_SUBSTEP_PX, DASH_TIMER_INFINITE,
     ORB_PINK_SCALE, ORB_RED_SCALE, PAD_PINK_SCALE, PAD_RED_SCALE,
-    MAX_FALL_BOX, MAX_FALL_UFO, MAX_FALL_SWING, SHIP_MAX_RISE, SHIP_MAX_FALL,
+    MAX_FALL_BOX, MAX_FALL_UFO, MAX_RISE_UFO, MAX_FALL_SWING,
     SWING_VY_MULTIPLIER,
 )
 from ..geometry import cell_rect, pad_trigger_rect, obj_scale, clamp
-from ..levels import get_group_id
+from ..levels import get_group_id, get_groups
 from ..objects import active_start
 from ..physics import DEFAULT_PARAMS
+from ..channels import channel_color
 from .. import settings
 from .body import MirrorBody
 from .collision import CollisionMixin, obb_corners, invalidate_pose_caches
@@ -102,8 +105,10 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
     # is a measurable win.  Subclasses (``SimPlayer`` in bots/sim.py)
     # declare their own __slots__ for extra fields.
     __slots__ = (
-        "objects", "params",
-        "_teleport_index", "_by_oid", "_by_group", "_end_walls_x",
+        "objects", "params", "channels",
+        "_teleport_index", "_by_oid", "_by_group", "_by_animation",
+        "_end_walls_x",
+        "_count_watchers",
         "practice_mode", "noclip", "checkpoints", "attempt_count", "_has_slopes",
         "hitbox_trace", "mirror_hitbox_trace",
         "_nearby_cache_key", "_nearby_cache_result",
@@ -123,20 +128,52 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         "_mirror", "mirror_passed", "passed", "held_orbs",
         "coins_collected", "frame",
         "_checkpoint_request", "_x_at_frame_start",
-        "_hold_consumed", "_was_on_ground",
+        "_hold_consumed", "_was_on_ground", "_jump_block_armed",
         "move_animations", "active_rotations", "active_pulses",
         "active_follows", "time_warp", "_bot_visibility",
+        # Checkpoint 5 (editor reference Sec 4, logic/group family):
+        # Scale/Alpha animations, Spawn/Sequence's delayed-fire queue, and
+        # the set of group ids a Toggle Trigger has disabled.
+        "active_scales", "active_alphas", "pending_spawns",
+        "_trigger_disabled",
         "blackout_value", "blackout_target", "blackout_start",
         "blackout_start_frame", "blackout_frames",
         "cam_pan_duration",
+        # Checkpoint 6 (editor reference Sec 4, camera family + screen
+        # effects): zoom/offset/rotate are eased animations like
+        # scale/alpha above; edge/guide are immediate mode switches;
+        # static_cam_group lets a Static camera trigger track a moving
+        # group instead of freezing in place; active_effect_anims holds
+        # one entry per screen-effect type (grayscale/sepia/invert/hue/
+        # pixelate), keyed by name, so re-triggering resumes from the
+        # current blend instead of snapping.
+        "zoom", "active_zooms", "cam_offset_x", "cam_offset_y",
+        "active_cam_offsets", "cam_rotation", "active_cam_rotations",
+        "cam_edge", "cam_guide_ease", "static_cam_group",
+        "active_effect_anims",
+        # Checkpoint 8 (simplified keyframe system): one running-animation
+        # entry per Keyframe Animation Trigger fired, each carrying its own
+        # segment list + progress -- see triggers.py's _start_keyframe_
+        # trigger/_step_keyframe_animations.
+        "active_keyframe_anims",
+        # Checkpoint 7 (editor reference Sec 4, "Item/counter/timer
+        # system"): ``items`` resets every attempt in reset(); ``items_pers``
+        # is seeded once in __init__ and only ever written by an Item Pers
+        # Trigger, so it survives every reset() (retry/respawn) within this
+        # Player instance's lifetime -- reset() reseeds ``items`` FROM
+        # ``items_pers`` rather than clearing to empty, so a persisted
+        # item id starts each attempt at its last snapshot. ``timers``/
+        # ``timers_running`` are plain per-attempt state (no persistence).
+        "items", "items_pers", "timers", "timers_running",
         # render interpolation
         "prev_x", "prev_y", "prev_angle",
         "_trail_cache",
     )
 
-    def __init__(self, objects, params=None):
+    def __init__(self, objects, params=None, channels=None):
         self.objects = objects
         self.params = params if params is not None else DEFAULT_PARAMS
+        self.channels = channels or {}
         for o in self.objects:
             o.setdefault("_orig_x", o["x"])
             o.setdefault("_orig_y", o["y"])
@@ -154,20 +191,38 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self._rebuild_teleport_index()
         self._by_oid = {}
         self._by_group = {}
+        # Checkpoint 8: keyframes are data, never touched by oid/group
+        # indexing above -- a Keyframe Animation Trigger looks its
+        # animation id up here directly, pre-sorted by Order once rather
+        # than on every trigger fire.
+        self._by_animation = {}
         for o in self.objects:
             oid = o.get("oid")
             if oid:
                 self._by_oid[oid] = o
-            g = o.get("group")
-            if g:
+            for g in get_groups(o):
                 self._by_group.setdefault(g, []).append(o)
+            if o.get("t") == T_KEYFRAME:
+                anim = o.get("animation_id", 0)
+                self._by_animation.setdefault(anim, []).append(o)
+        for anim, kfs in self._by_animation.items():
+            kfs.sort(key=lambda k: k.get("order", 0))
         # End walls span the full screen height: collision is x-only.
         self._end_walls_x = sorted({
             o["x"] * CELL for o in self.objects if o["t"] == T_END})
+        # Checkpoint 7: Count / Time Event triggers watch continuously
+        # (edge-triggered on their own object dict, see triggers.py's
+        # _step_count_watchers) rather than only on touch/spawn, so the
+        # candidate list is precomputed once instead of filtered per tick.
+        self._count_watchers = [o for o in self.objects
+                                if o["t"] in (T_COUNT_TRIGGER,
+                                              T_TIME_EVENT_TRIGGER)]
         self.practice_mode = False
         self.noclip = False
         self.checkpoints = []
         self.attempt_count = 0
+        # Survives every reset() (see the __slots__ comment above).
+        self.items_pers = {}
         self._has_slopes = any(o["t"] == T_SLOPE for o in self.objects)
         # Optional per-frame hitbox recorders (editor "Hitbox" view).
         # Left untouched by reset() so the caller's list survives.
@@ -222,11 +277,22 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             o.pop("_fx", None)
             o.pop("_fy", None)
             o.pop("_cell", None)
+            o.pop("_count_armed", None)
             invalidate_pose_caches(o)
         self.move_animations = []
         self.active_follows = []
         self.active_rotations = []
         self.active_pulses = []
+        self.active_scales = []
+        self.active_alphas = []
+        self.active_keyframe_anims = []
+        self.pending_spawns = []
+        self._trigger_disabled = set()
+        # Checkpoint 7: non-persistent items start at 0; a persisted item
+        # id (Item Pers Trigger) re-seeds from its last snapshot instead.
+        self.items = dict(self.items_pers)
+        self.timers = {}
+        self.timers_running = set()
         # portable index (see _oid_index) -> obj for everything a trigger
         # ever moved this session (the bots' restore needs the candidate
         # set, across whichever SimPlayer instance is being restored).
@@ -262,6 +328,17 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.free_cam_mode = False
         self.camera_locked = False
         self.cam_pan_duration = 1.0
+        self.zoom = 1.0
+        self.active_zooms = []
+        self.cam_offset_x = 0.0
+        self.cam_offset_y = 0.0
+        self.active_cam_offsets = []
+        self.cam_rotation = 0.0
+        self.active_cam_rotations = []
+        self.cam_edge = None
+        self.cam_guide_ease = None
+        self.static_cam_group = None
+        self.active_effect_anims = {}
         self.bg_preset = 0
         self.blackout_value = 0.0
         self.blackout_target = 0.0
@@ -278,13 +355,16 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # Hold-after-spider gate: a spider warp consumes the held button
         # until release so the cube doesn't auto-jump off the new surface.
         self._hold_consumed = False
+        # J Block (bible Sec 4.1): armed by touching one, consumed at the
+        # next landing auto-jump to suppress it.
+        self._jump_block_armed = False
         self.size = PLAYER_SIZE
         self.coins_collected = set()
         self._mirror = None
         # Portals the mirror consumed independently (mode / size / grav).
         self.mirror_passed = set()
         self.time_warp = 1.0
-        self.flight_budget = int(self.params.robot_flight_seconds * 60)
+        self.flight_budget = int(self.params.robot_flight_seconds * PHYSICS_TPS)
         self.thrust_disabled = False
         self._bot_visibility = False
         self.prev_x = self.x
@@ -383,6 +463,9 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             "size": self.size,
             "coins": set(self.coins_collected),
             "passed": set(self.passed),
+            "items": dict(self.items),
+            "timers": dict(self.timers),
+            "timers_running": set(self.timers_running),
         })
 
     def load_checkpoint(self):
@@ -406,10 +489,13 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.blackout_start_frame = self.frame
         self.blackout_frames = 1
         self.color_index = cp.get("color_index", 0)
-        self.player_color = PLAYER_COLORS[self.color_index % len(PLAYER_COLORS)]
+        self.player_color = channel_color(self.channels, self.color_index)[:3]
         self.size = int(cp.get("size", PLAYER_SIZE))
         self.coins_collected = set(cp.get("coins", set()))
         self.passed = set(cp.get("passed", set()))
+        self.items = dict(cp.get("items", self.items_pers))
+        self.timers = dict(cp.get("timers", {}))
+        self.timers_running = set(cp.get("timers_running", set()))
         self.held_orbs = set()
         self.on_ground = False
         self.alive = True
@@ -528,7 +614,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.x = dest["x"] * CELL + (CELL - self.size) / 2
         self.y = dest["y"] * CELL + (CELL - self.size) / 2
         self.vy *= 0.25
-        self.teleport_cooldown = 10
+        self.teleport_cooldown = TELEPORT_COOLDOWN_TICKS
         self.trail = []
         if self._mirror is not None:
             self._mirror.trail = []
@@ -576,7 +662,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         elif mode in (MODE_WAVE, MODE_SWING):
             b.vy = 0.0
         elif mode == MODE_ROBOT:
-            b.flight_budget = int(self.params.robot_flight_seconds * 60)
+            b.flight_budget = int(self.params.robot_flight_seconds * PHYSICS_TPS)
             b.thrust_disabled = False
 
     def set_mode(self, mode):
@@ -667,45 +753,48 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         mini = b.size < PLAYER_SIZE
         gmul = p.mini_gravity_scale if mini else 1.0
         jmul = p.mini_jump_scale if mini else 1.0
+        buffered_ground_press = mode_pressed or (
+            mode_held and (self.input_buffer if main else self.mirror_input_buffer) > 0)
+        # Portal labels aren't literal speed multiples; cube-derived jump
+        # impulses also vary slightly between the five documented tiers.
+        speed_ratio = self.move_speed / max(1e-9, p.base_move_speed)
+        jump_tier = min(((0.807, 10.62), (1.0, 11.18), (1.243, 11.42),
+                         (1.502, 11.23), (1.849, 11.23)),
+                        key=lambda tier: abs(tier[0] - speed_ratio))[1] / 11.18
         if mode == MODE_SHIP:
-            b.vy += p.ship_gravity * gmul * b.grav
-            if mode_held:
-                b.vy -= p.ship_thrust * gmul * b.grav
-            # Bible §1.3/1.4: ship has two distinct maxima, 8G holding
-            # (up, against grav) / -6.4G released (down, with grav) —
-            # asymmetric relative to whichever way "down" currently is.
-            if b.grav >= 0:
-                b.vy = clamp(b.vy, -SHIP_MAX_RISE, SHIP_MAX_FALL)
-            else:
-                b.vy = clamp(b.vy, -SHIP_MAX_FALL, SHIP_MAX_RISE)
+            b.vy = p.ship_velocity(b.vy, b.grav, mini, mode_held)
         elif mode == MODE_WAVE:
-            wave_mul = p.mini_wave_vy_scale if mini else 1.0
-            target_vy = self.move_speed * wave_mul * (-1 if mode_held else 1) * b.grav
-            b.vy = b.vy * 0.6 + target_vy * 0.4
+            b.vy = p.wave_velocity(self.move_speed, b.grav, mini, mode_held)
         elif mode == MODE_UFO:
-            b.vy += p.gravity * gmul * b.grav
-            b.vy = clamp(b.vy, -MAX_FALL_UFO, MAX_FALL_UFO)
+            falling = b.vy * b.grav > 0
+            flying_scale = (0.9582 / 0.864) / (0.85 if mini else 1.0)
+            b.vy += p.gravity * flying_scale * (0.4 if falling else 0.6) * gmul * b.grav
+            size_factor = 1.0 / 0.85 if mini else 1.0
+            b.vy = clamp(b.vy * b.grav, -MAX_RISE_UFO * size_factor,
+                         MAX_FALL_UFO * size_factor) * b.grav
+            flap_scale = (8.0 * 0.85 / 7.0) if mini else 1.0
             # Bible §1.4: UFO's click velocity is "a constant 7G at every
             # speed portal" for every click — grounded launch and midair
             # flap alike, so both branches use ufo_jump_force.
-            if mode_held and b.on_ground:
+            if mode_pressed and b.on_ground:
                 if main:
                     self._record_jump_timing("ufo", input_pressed)
-                b.vy = p.ufo_jump_force * jmul * b.grav
+                b.vy = p.ufo_jump_force * flap_scale * b.grav
                 b.on_ground = False
+                self._consume_hold(main)
             elif mode_pressed and not b.on_ground:
-                b.vy = p.ufo_jump_force * jmul * b.grav
+                b.vy = p.ufo_jump_force * flap_scale * b.grav
                 self._consume_hold(main)
         elif mode == MODE_SPIDER:
-            b.vy += p.gravity * gmul * b.grav
+            b.vy += p.gravity * (0.9582 / 0.864) * 0.6 * gmul * b.grav
             b.vy = clamp(b.vy, -MAX_FALL_BOX, MAX_FALL_BOX)
-            if mode_pressed and b.on_ground:
+            if buffered_ground_press and b.on_ground:
                 if main:
                     self._record_jump_timing("spider", input_pressed)
                 self._spider_teleport(b)
                 self._consume_hold(main)
         elif mode == MODE_SWING:
-            b.vy += p.gravity * gmul * b.grav
+            b.vy += p.gravity * (0.9582 / 0.864) * (0.6 if mini else 0.4) * gmul * b.grav
             b.vy = clamp(b.vy, -MAX_FALL_SWING, MAX_FALL_SWING)
             if mode_pressed:
                 if main:
@@ -723,68 +812,106 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             # gravity only resumes once released or the budget runs out.
             if not raw_held and not b.on_ground:
                 b.thrust_disabled = True
-            holding_thrust = (mode_held and b.flight_budget > 0
+            holding_thrust = (mode_held and (b.on_ground or b.vy * b.grav < 0)
+                              and b.flight_budget > 0
                               and not b.thrust_disabled)
+            if holding_thrust and b.on_ground and main and self._jump_block_armed:
+                # J Block: suppress this one landing re-launch, then let
+                # the button need a fresh press (bible Sec 4.1).
+                self._jump_block_armed = False
+                self._hold_consumed = True
+                holding_thrust = False
             if holding_thrust:
                 if b.on_ground:
                     if main:
                         self._record_jump_timing("robot", input_pressed)
                     b.on_ground = False
-                b.vy = -p.robot_thrust * gmul * b.grav
+                b.vy = -p.robot_thrust * jump_tier * jmul * b.grav
                 b.flight_budget -= 1
             else:
-                b.vy += p.gravity * gmul * b.grav
+                b.vy += p.gravity * 0.9 * gmul * b.grav
             b.vy = clamp(b.vy, -MAX_FALL_BOX, MAX_FALL_BOX)
         elif mode == MODE_BALL:
-            b.vy += p.gravity * gmul * b.grav
+            b.vy += p.gravity * (0.9582 / 0.864) * 0.6 * gmul * b.grav
             b.vy = clamp(b.vy, -MAX_FALL_BOX, MAX_FALL_BOX)
-            if mode_pressed and b.on_ground:
+            if buffered_ground_press and b.on_ground:
                 if main:
                     self._record_jump_timing("ball", input_pressed)
                 b.grav *= -1
-                b.vy = p.ball_flip_force * jmul * b.grav
+                b.vy = p.ball_flip_force * jump_tier * jmul * b.grav
                 b.on_ground = False
+                self._consume_hold(main)
         else:  # cube
             b.vy += p.gravity * gmul * b.grav
             b.vy = clamp(b.vy, -MAX_FALL_BOX, MAX_FALL_BOX)
             if mode_held and b.on_ground:
-                if main:
-                    self._record_jump_timing("cube", input_pressed)
-                b.vy = p.jump_force * jmul * b.grav
-                b.on_ground = False
+                if main and self._jump_block_armed:
+                    # J Block: suppress this one landing auto-jump, then
+                    # require a fresh press (bible Sec 4.1).
+                    self._jump_block_armed = False
+                    self._hold_consumed = True
+                else:
+                    if main:
+                        self._record_jump_timing("cube", input_pressed)
+                    b.vy = p.jump_force * jump_tier * jmul * b.grav
+                    if input_pressed:
+                        b.vy += p.gravity * gmul * b.grav
+                    b.on_ground = False
 
+    # Checkpoint-3 tick-rate migration (60 -> 240 TPS): the visual-angle
+    # code below has two families of per-tick constant that don't rescale
+    # automatically the way the physics constants in constants.py do
+    # (those are expressed via PHYSICS_TPS formulas; these are bare
+    # literals tuned by feel at the old 60 TPS), so they're converted by
+    # hand here to preserve the exact same real-time rotation behavior:
+    #   - vy-to-angle multipliers (4.2/2.8/3.0/2.5): b.vy is itself 4x
+    #     smaller per tick at 240 TPS for the same real velocity (it's
+    #     built from PHYSICS_TPS-scaled accel/impulse constants), so the
+    #     multiplier that converts it back to a steady-state angle must
+    #     scale up by 4x to land on the same angle for the same speed.
+    #   - flat degrees-per-tick spins (10/6/5): these represent a fixed
+    #     real angular velocity (e.g. 10 deg per 1/60s = 600 deg/s), so at
+    #     240 TPS the same real rate is old/4 deg per tick.
+    #   - exponential smoothing coefficients (0.55/0.45, 0.6, 0.7/0.3):
+    #     these are single-pole IIR decay factors applied once per tick;
+    #     since 240 TPS packs 4 ticks into the time one 60 TPS tick used
+    #     to cover, the equivalent decay is k_new = k_old ** (1/4), not
+    #     k_old/4 (a linear scale would decay far too slowly).
     def _apply_rotation(self, b):
         mode = b.mode
         if mode == MODE_SHIP:
-            b.angle = clamp(-b.vy * 4.2, -55, 55)
+            b.angle = clamp(-b.vy * 16.8, -55, 55)          # 4.2 * 4
         elif mode == MODE_UFO:
-            b.angle = clamp(-b.vy * 2.8, -30, 30)
+            b.angle = clamp(-b.vy * 11.2, -30, 30)          # 2.8 * 4
         elif mode == MODE_WAVE:
-            # Low-pass vy so rapid taps don't jitter the nose.
-            b.wave_vy_smooth = b.wave_vy_smooth * 0.55 + b.vy * 0.45
-            commit = clamp(b.wave_vy_smooth / max(1.0, self.move_speed),
-                           -1.0, 1.0)
-            angle_mul = (self.params.mini_wave_angle_scale
-                         if b.size < PLAYER_SIZE else 1.0)
-            wave_angle = clamp(self.params.wave_angle * angle_mul, 0.0, 89.0)
-            b.angle = b.angle * 0.55 + (-commit * wave_angle) * 0.45
+            # Keep wave movement deterministic/instant, but ease the icon's
+            # visual heading.  Applying the filter to velocity (rather than
+            # degrees) avoids a harsh snap through the horizontal at input
+            # transitions and remains stable at the fixed 240 Hz tick rate.
+            retain = WAVE_ANGLE_SMOOTHING
+            b.wave_vy_smooth = (b.wave_vy_smooth * retain
+                                + b.vy * (1.0 - retain))
+            b.angle = math.degrees(math.atan2(
+                -b.wave_vy_smooth, abs(self.move_speed)))
         elif mode == MODE_BALL:
             if b.on_ground:
                 b.angle = round(b.angle / 90) * 90
             else:
-                b.angle -= 10 * b.grav
+                b.angle -= 2.5 * b.grav                     # 10 / 4
         elif mode == MODE_SPIDER:
-            b.angle = 0 if b.on_ground else b.angle - 6 * b.grav
+            b.angle = 0 if b.on_ground else b.angle - 1.5 * b.grav  # 6 / 4
         elif mode == MODE_SWING:
-            b.angle = clamp(-b.vy * 3.0, -45, 45)
+            b.angle = clamp(-b.vy * 12.0, -45, 45)          # 3.0 * 4
         elif mode == MODE_ROBOT:
             if b.on_ground:
-                b.angle = b.angle * 0.6
+                b.angle = b.angle * 0.8801117                # 0.6 ** 0.25
             else:
-                b.angle = b.angle * 0.7 + clamp(-b.vy * 2.5, -35, 35) * 0.3
+                b.angle = (b.angle * 0.9146912
+                           + clamp(-b.vy * 10.0, -35, 35) * 0.0853088)
+                # 0.7 ** 0.25 decay; vy-mult 2.5*4=10.0; gain = 1-decay
         else:
             if not b.on_ground:
-                b.angle -= 5 * b.grav
+                b.angle -= 1.25 * b.grav                     # 5 / 4
             else:
                 b.angle = round(b.angle / 90) * 90
 
@@ -901,11 +1028,33 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 if cid and cid not in self.coins_collected:
                     self.coins_collected.add(cid)
                 continue
+            if t == T_ITEM_PICKUP:
+                # Item Pickup (editor reference Sec 4): touched once per
+                # attempt like a coin/orb (``passed``-gated), grants
+                # Amount to Item id's stored value.
+                if main and key not in self.passed:
+                    iid = int(o.get("item_id", 0))
+                    try:
+                        amt = float(o.get("amount", 1.0))
+                    except (TypeError, ValueError):
+                        amt = 1.0
+                    self.items[iid] = self.items.get(iid, 0.0) + amt
+                    self.passed.add(key)
+                continue
             if t == T_DASH_STOP:
                 # S Block: ends the dash it lands in, every time it is
                 # touched, so it is never recorded in ``passed``.
                 if main and self.dash_timer > 0:
                     self._end_dash()
+                continue
+            if t == T_JUMP_BLOCK:
+                # J Block (bible Sec 4.1): flags the next landing so the
+                # buffered auto-jump (holding through a fall/orb until
+                # grounded, see mode_held checks in _apply_mode_physics)
+                # is suppressed once. Touched every frame it overlaps, so
+                # it is never recorded in ``passed`` either.
+                if main:
+                    self._jump_block_armed = True
                 continue
             if t in ORB_TYPES:
                 if (key in self.passed or key in self.held_orbs
@@ -958,15 +1107,18 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             elif t in MODE_FROM_TYPE:
                 if key not in body_passed:
                     self._set_body_mode(b, MODE_FROM_TYPE[t])
+                    self._sync_prev_pose()
                     self.free_cam_mode = bool(o.get("free_mode", False))
                     body_passed.add(key)
             elif t == T_MODE_MINI:
                 if key not in body_passed:
                     self._set_body_size(b, MINI_PLAYER_SIZE)
+                    self._sync_prev_pose()
                     body_passed.add(key)
             elif t == T_MODE_BIG:
                 if key not in body_passed:
                     self._set_body_size(b, PLAYER_SIZE)
+                    self._sync_prev_pose()
                     body_passed.add(key)
             elif t == T_MODE_DUAL:
                 if key not in self.passed:
@@ -985,56 +1137,24 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 if key not in self.passed:
                     self.set_speed(t)
                     self.passed.add(key)
+            elif t in TRIGGER_TYPES:
+                # Checkpoint 5 (editor reference Sec 4, "Key trigger
+                # concepts"): Spawn-Triggered triggers never fire from a
+                # touch, only when a Spawn/Sequence trigger names their
+                # group; a Toggle-disabled group's triggers are inert
+                # (except Toggle/Stop/Spawn/Sequence themselves, which
+                # must stay reachable to re-enable a chain); Multi
+                # Activate re-arms every touch instead of firing once.
+                if o.get("spawn_triggered"):
+                    continue
+                if t not in CONTROL_TRIGGER_TYPES and not self._trigger_active(o):
+                    continue
+                if key in self.passed and not o.get("multi_activate"):
+                    continue
+                self._execute_trigger_effect(o)
+                self.passed.add(key)
             elif key in self.passed:
                 continue
-            elif t == T_CAMERA_TRIGGER:
-                mode = o.get("cam_mode", "pan")
-                if mode == "static":
-                    # Freeze the camera exactly where it is; play.py's
-                    # per-frame camera update skips both axes while this
-                    # is set, until a "follow" trigger clears it.
-                    self.camera_locked = True
-                elif mode == "follow":
-                    self.camera_locked = False
-                    self.free_cam_mode = True
-                else:  # "pan" — one-shot vertical pan to a target row
-                    self.camera_locked = False
-                    row = o.get("cy", o["y"])
-                    self.target_cam_y = row * CELL + CELL / 2 - HEIGHT / 2
-                    try:
-                        self.cam_pan_duration = max(0.0, float(o.get("duration", 1.0)))
-                    except (TypeError, ValueError):
-                        self.cam_pan_duration = 1.0
-                self.passed.add(key)
-            elif t == T_BG_TRIGGER:
-                self.bg_preset = int(o.get("bg", 0))
-                self.passed.add(key)
-            elif t == T_MOVE_TRIGGER:
-                self._start_move_trigger(o)
-                self.passed.add(key)
-            elif t == T_COLOR_TRIGGER:
-                self.color_index = int(o.get("col_idx", 0)) % len(PLAYER_COLORS)
-                self.player_color = PLAYER_COLORS[self.color_index]
-                self.passed.add(key)
-            elif t == T_PULSE_TRIGGER:
-                self._start_pulse_trigger(o)
-                self.passed.add(key)
-            elif t == T_ROTATE_TRIGGER:
-                self._start_rotate_trigger(o)
-                self.passed.add(key)
-            elif t == T_FOLLOW_TRIGGER:
-                if not o.get("always_on"):
-                    self._start_follow_trigger(o)
-                self.passed.add(key)
-            elif t == T_TIME_WARP:
-                try:
-                    self.time_warp = float(o.get("factor", 1.0))
-                except (TypeError, ValueError):
-                    self.time_warp = 1.0
-                self.passed.add(key)
-            elif t == T_BLACKOUT_TRIGGER:
-                self._start_blackout_trigger(o)
-                self.passed.add(key)
         if activated_orb_cell is not None:
             if main:
                 self.input_buffer = 0
@@ -1056,51 +1176,58 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         if self._mirror is None or not m.alive:
             return
         m.on_ground = False
-        # The shared x already moved for this frame (resolved against the
-        # main body's own y). The mirror sits at a different y, so it needs
-        # its own wall check against the same displacement or it can
-        # tunnel through a block the main body's height never touched.
-        self._resolve_slopes(m)
-        if self._resolve_x_collision(m, dx_step):
-            return
-        prev_y = m.y
-        steps = max(1, int(math.ceil(abs(m.vy) / COLLISION_SUBSTEP_PX)))
-        dy_step = m.vy / steps
-        for _ in range(steps):
-            m.y += dy_step
-            self._resolve_y_collision(m, dy_step)
-        self._resolve_slopes(m)
-        if self._inner_in_block_dies(m) and not self.noclip:
-            return
+        # Sweep both axes, as the main body does. Checking only the final
+        # x and a single y-spanning rectangle missed fast horizontal
+        # hazards and created false hits away from the diagonal path.
+        final_x = self.x
+        steps = max(1, int(math.ceil(max(abs(dx_step), abs(m.vy)) / COLLISION_SUBSTEP_PX)))
+        input_active = input_pressed or self.mirror_input_buffer > 0
+        try:
+            self.x = final_x - dx_step
+            for _ in range(steps):
+                old_x, old_y = round(self.x), round(m.y)
+                self.x += dx_step / steps
+                self._resolve_slopes(m)
+                if self._resolve_x_collision(m, dx_step / steps):
+                    return
+                dy = m.vy / steps
+                m.y += dy
+                self._resolve_y_collision(m, dy)
+                if not m.alive:
+                    return
+                self._resolve_slopes(m)
+                if self._inner_in_block_dies(m) and not self.noclip:
+                    return
+                size = m.size
+                shrink = max(2, int(6 * size / PLAYER_SIZE))
+                x, y = round(self.x), round(m.y)
+                trigger_rect = pygame.Rect(min(old_x, x) - 3, min(old_y, y) - 3,
+                                           abs(x - old_x) + size + 6,
+                                           abs(y - old_y) + size + 6)
+                hazard_rect = pygame.Rect(x + shrink, y + shrink,
+                                          size - shrink * 2, size - shrink * 2)
+                if self._handle_interactions(m, trigger_rect, hazard_rect, input_active):
+                    return
+                input_active = self.mirror_input_buffer > 0
+        finally:
+            self.x = final_x
         cam_y = self.target_cam_y
         if m.y > cam_y + HEIGHT + 300 or m.y < cam_y - 500:
             self._kill(m, "Fell off the screen")
             return
         self._check_ground_adjacency(m)
         if m.mode == MODE_ROBOT and m.on_ground:
-            m.flight_budget = int(self.params.robot_flight_seconds * 60)
+            m.flight_budget = int(self.params.robot_flight_seconds * PHYSICS_TPS)
             m.thrust_disabled = False
-        # Sweep the whole vertical travel so fast falls can't tunnel a spike.
-        size = m.size
-        shrink = max(2, int(6 * size / PLAYER_SIZE))
-        x_int = round(self.x)
-        y0 = min(round(prev_y), round(m.y))
-        y1 = max(round(prev_y), round(m.y))
-        hazard_rect = pygame.Rect(x_int + shrink, y0 + shrink,
-                                  size - shrink * 2, y1 - y0 + size - shrink * 2)
-        trigger_rect = pygame.Rect(x_int - 3, y0 - 3, size + 6, y1 - y0 + size + 6)
-        # Click-edge, not sustained hold: a single click fires at most one
-        # orb (real GD requires release + re-press between orbs in a
-        # chain). See update()'s matching comment.
-        input_active = input_pressed or self.mirror_input_buffer > 0
-        if self._handle_interactions(m, trigger_rect, hazard_rect, input_active):
-            return
         self._apply_rotation(m)
 
     # ---- per-frame update ------------------------------------------------
     def update(self, input_held, input_pressed):
         if not self.alive or self.won:
             return
+        # A complete tap can arrive between render frames. Its press must
+        # still last one simulation tick for cube, robot, ship and wave.
+        input_held = input_held or input_pressed
         self.frame += 1
         self.prev_x = self.x
         self.prev_y = self.y
@@ -1118,6 +1245,16 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             self.grounded_frames = 0
         self._step_move_animations()
         self._step_rotate_triggers()
+        self._step_scale_animations()
+        self._step_alpha_animations()
+        self._step_keyframe_animations()
+        self._step_zoom_animations()
+        self._step_cam_offset_animations()
+        self._step_cam_rotation_animations()
+        self._step_screen_effects()
+        self._step_pending_spawns()
+        self._step_timers()
+        self._step_count_watchers()
         self._step_follow_triggers()
         self._step_blackout()
         if self.active_pulses:
@@ -1127,8 +1264,8 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             self.teleport_cooldown -= 1
         self._sample_trails()
         if input_pressed:
-            self.input_buffer = 6
-            self.mirror_input_buffer = 6
+            self.input_buffer = INPUT_BUFFER_TICKS
+            self.mirror_input_buffer = INPUT_BUFFER_TICKS
         elif not input_held:
             # Only decay while released — a still-held press stays "fresh"
             # for orb purposes until it either fires something (consumed,
@@ -1185,6 +1322,9 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             dy_step = self.vy / steps
             self.y += dy_step
             self._resolve_y_collision(self, dy_step)
+            if not self.alive:
+                self._record_hitbox()
+                return
             self._resolve_slopes(self)
             if self._inner_in_block_dies(self) and not self.noclip:
                 self._record_hitbox()
@@ -1206,16 +1346,27 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 self._check_ground_adjacency(self)
                 self._record_hitbox()
                 return
+            input_active = self.input_buffer > 0
             size = self.size  # portals may have resized us mid-frame
+            haz_shrink = max(2, int(6 * size / PLAYER_SIZE))
         self._check_ground_adjacency(self)
         if self.mode == MODE_ROBOT and self.on_ground:
-            self.flight_budget = int(self.params.robot_flight_seconds * 60)
+            self.flight_budget = int(self.params.robot_flight_seconds * PHYSICS_TPS)
             self.thrust_disabled = False
+        if self.free_cam_mode:
+            # Continuous camera tracking (e.g. a "follow" camera trigger):
+            # the fall-off band rides with the player, so free-cam sections
+            # never have a screen edge. play.py's _tick_camera derives the
+            # same target for the *visual* eased camera; this keeps the
+            # physics check (bots, jump predictor, headless sims — none of
+            # which run _tick_camera) in sync without needing that call.
+            self.target_cam_y = self.y + self.size / 2 - HEIGHT / 2
         cam_y = self.target_cam_y
         if self.y > cam_y + HEIGHT + 300 or self.y < cam_y - 500:
             self._kill(self, "Fell off the screen")
             return
         if self._mirror is not None:
+            dx_step = self.x - self.prev_x
             # A dash consumes input for its whole window; don't let the
             # mirror re-react to the mechanical hold.
             if dashing:

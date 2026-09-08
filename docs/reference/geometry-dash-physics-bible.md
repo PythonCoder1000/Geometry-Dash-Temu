@@ -1,4 +1,6 @@
 # The Complete Geometry Dash Physics Bible (Update 2.2)
+> Research archive. Some estimates conflict; see [current calibration](../PHYSICS.md)
+> for the values used by this project and their limitations.
 ### Gamemodes • Buffering • Hitboxes • Special Blocks — Full Combined Reference
 
 ---

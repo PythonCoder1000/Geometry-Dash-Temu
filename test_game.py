@@ -252,7 +252,7 @@ check("Player near start x",
 
 # Step a few frames: player should walk forward
 x0 = p.x
-for _ in range(10):
+for _ in range(40):
     p.update(False, False)
 check("Player moves forward on flat ground", p.x > x0)
 check("Player stays alive on flat ground", p.alive)
@@ -260,7 +260,7 @@ check("Player stays alive on flat ground", p.alive)
 # Jump on cube mode
 p2 = Player(make_flat_level())
 # Ensure on_ground after a step
-for _ in range(3):
+for _ in range(12):
     p2.update(False, False)
 y_before = p2.y
 p2.update(True, True)  # hold jump
@@ -275,7 +275,7 @@ section("Coin & checkpoint interaction")
 # Coin directly in front of spawn
 objs = make_flat_level(extras=[{"t": T_COIN, "x": 4, "y": 9, "r": 0, "coin_id": 1}])
 p = Player(objs)
-for _ in range(30):
+for _ in range(120):
     p.update(False, False)
 check("Coin collected after walking over it", 1 in p.coins_collected)
 
@@ -284,7 +284,7 @@ check("Coin collected after walking over it", 1 in p.coins_collected)
 # directly. Verify the save/load helpers still work.
 p = Player(make_flat_level())
 p.practice_mode = True
-for _ in range(20):
+for _ in range(80):
     p.update(False, False)
 p.save_checkpoint()
 check("save_checkpoint stores a snapshot", len(p.checkpoints) == 1)
@@ -305,7 +305,7 @@ for gx in range(30):
     objs.append({"t": T_SLAB, "x": gx, "y": 10, "r": 0})
 objs.append({"t": T_END, "x": 25, "y": 9, "r": 0})
 p = Player(objs)
-for _ in range(20):
+for _ in range(80):
     p.update(False, False)
 check("Player stands on slabs", p.alive and p.on_ground)
 
@@ -317,7 +317,7 @@ section("Green orb + Blue pad")
 objs = make_flat_level(extras=[{"t": T_GREEN_ORB, "x": 6, "y": 8, "r": 0}])
 p = Player(objs)
 # Walk, then activate with a press while near the orb
-for _ in range(22):
+for _ in range(88):
     p.update(False, False)
 p.update(True, True)
 check("Green orb flips gravity when walked into", p.grav == -1)
@@ -336,9 +336,11 @@ for gx in range(10, 16):
 objs.append({"t": T_MODE_SPIDER, "x": 8, "y": 9, "r": 0})
 objs.append({"t": T_END, "x": 35, "y": 9, "r": 0})
 p = Player(objs)
-# Walk into spider portal (gx=8 from spawn gx=3, ~5 cells @ 5px/frame)
-for _ in range(80):
+# Walk under the ceiling; tick counts change with the default run speed.
+for _ in range(320):
     p.update(False, False)
+    if p.x >= 10 * CELL:
+        break
 check("Spider portal switched mode", p.mode == MODE_SPIDER)
 y_before = p.y
 # A press while on ground should teleport upward to ceiling
@@ -724,8 +726,8 @@ try:
     check("non-whitelisted fps_cap falls back to default",
           _settings_mod.get_fps_cap() == _settings_mod.GAME_RATE)
     _prefs_mod.set("fps_cap", _settings_mod.GAME_RATE)  # restore baseline
-    check("get_tps is the fixed physics rate (60)",
-          _settings_mod.get_tps() == _settings_mod.PHYSICS_RATE == 60)
+    check("get_tps agrees with the player physics rate",
+          _settings_mod.get_tps() == _settings_mod.PHYSICS_RATE == C.PHYSICS_TPS)
 
     # Volume coercion clamps to [0, 1].
     _settings_mod.set_music_vol(2.5)
@@ -1044,9 +1046,9 @@ _before_x, _before_grav = _dp.x, _dp.grav
 # Run until we hit the orb; orb at cell 10 ~ x=500.
 _saw_jump = False
 _pre_tp_x = _dp.x
-for _f in range(120):
+for _f in range(480):
     _pre_tp_x = _dp.x
-    _dp.update(False, True)
+    _dp.update(False, _dp.x + _dp.size >= 10 * CELL - 3)
     if _dp.x - _pre_tp_x > 100:  # instant horizontal jump = teleport
         _saw_jump = True
         break
@@ -1065,8 +1067,8 @@ _vert_objs.append({"t": _TSOrb, "x": 10, "y": 9, "r": 0})
 _vp = Player(_vert_objs)
 _vp_grav_before = _vp.grav
 _saw_flip = False
-for _f in range(150):
-    _vp.update(False, True)
+for _f in range(600):
+    _vp.update(False, _vp.x + _vp.size >= 10 * CELL - 3)
     if _vp.grav != _vp_grav_before:
         _saw_flip = True
         break
@@ -1162,7 +1164,7 @@ def _dash_level(extras):
     return make_flat_level(40, extras=extras)
 
 
-def _run_to_dash(p, orb_gx, max_frames=60):
+def _run_to_dash(p, orb_gx, max_frames=240):
     """Step until the orb at ``orb_gx`` has started a dash."""
     for _ in range(max_frames):
         over = p.x + p.size > orb_gx * 50 and p.x < (orb_gx + 1) * 50
@@ -1194,7 +1196,7 @@ _sp_dash = Player(_dash_level([{"t": _TDOG, "x": 6, "y": 9, "r": 0},
 check("gravity dash orb starts a dash", _run_to_dash(_sp_dash, 6))
 _grav_before = _sp_dash.grav
 _stopped = False
-for _ in range(150):
+for _ in range(600):
     _sp_dash.update(True, False)
     if _sp_dash.dash_timer == 0:
         _stopped = True
@@ -1232,7 +1234,7 @@ _bp = Player(_buf_level)
 # buffering from that unrelated ground-jump mechanic.
 _bp.mode = MODE_SHIP
 _pressed_once = False
-for _ in range(150):
+for _ in range(600):
     orb1_left = _orb1_gx * CELL
     about_to_touch = (orb1_left - (_bp.x + _bp.size)) <= 25
     press_now = about_to_touch and not _pressed_once
@@ -1258,7 +1260,7 @@ _portal_level = make_flat_level(40, extras=[
      "dest": True},
 ])
 _tpp = Player(_portal_level)
-for _ in range(80):
+for _ in range(320):
     _tpp.update(False, False)   # never clicked — auto-run only
 check("teleport portal fires without any click",
       _tpp.x > 20 * CELL)
@@ -1269,7 +1271,7 @@ _orb_level = make_flat_level(40, extras=[
      "dest": True},
 ])
 _tpo = Player(_orb_level)
-for _ in range(80):
+for _ in range(320):
     _tpo.update(False, False)   # never clicked — teleport orb needs one
 check("teleport orb (unlike the portal) does NOT fire without a click",
       _tpo.x < 20 * CELL)
@@ -1312,7 +1314,11 @@ def _orb_double_touch(multi):
         p.on_ground = False
         before = p.vy
         p.update(True, True)
-        fired.append(p.vy < before - 5)
+        # Threshold scaled with the Checkpoint-3 tick-rate migration:
+        # JUMP_FORCE (and other per-tick velocities) is ~4x smaller at
+        # 240 TPS than at the old 60 TPS, so the "did a jump fire" drop
+        # threshold shrinks with it (was 5, now 5/4).
+        fired.append(p.vy < before - 1.25)
         p.update(False, False)
     return fired
 
@@ -1333,8 +1339,10 @@ check("multi_activate orb stays out of `passed`",
       and ("orb", 6, 9) in _ma_p.held_orbs)
 _ma_p.x, _ma_p.y, _ma_p.vy = _ma_pose
 _ma_p.update(True, False)
+# Threshold scaled 5 -> 1.25 for the same reason as _orb_double_touch's
+# 5 -> 1.25 (JUMP_FORCE shrank ~4x under the 240 TPS tick-rate migration).
 check("multi_activate orb does not refire during the same hold",
-      _ma_p.vy > -5)
+      _ma_p.vy > -1.25)
 _ma_p.update(False, False)
 check("releasing clears the multi-activate hold gate", not _ma_p.held_orbs)
 check("every orb type exposes the multi_activate field",
@@ -1377,9 +1385,9 @@ _dir_lvl.append({"t": T_END, "x": 35, "y": 9, "r": 0})
 _dp_dir = Player(_dir_lvl)
 _pre_x_dir = None
 _post_x_dir = None
-for _f in range(200):
+for _f in range(800):
     _pre_x_dir = _dp_dir.x
-    _dp_dir.update(False, True)
+    _dp_dir.update(False, _dp_dir.x + _dp_dir.size >= 10 * CELL - 3)
     if _dp_dir.x - _pre_x_dir > 100:
         _post_x_dir = _dp_dir.x
         break
@@ -1540,7 +1548,7 @@ dual_objs = make_flat_level(length=40,
     extras=[{"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0}])
 _dp = Player(dual_objs)
 # Walk forward until we cross the portal (at gx=8, ~5 cells past spawn).
-for _ in range(60):
+for _ in range(240):
     _dp.update(False, False)
     if _dp.mirror is not None:
         break
@@ -1588,7 +1596,7 @@ check("Mid-jump dual entry: mirror angle is sign-flipped",
 _sp = _SimPlayer([dict(o) for o in dual_objs])
 _build_obj_index(_sp)
 # Step until past the portal so a mirror exists.
-for _ in range(60):
+for _ in range(240):
     _sp.update(False, False)
     if _sp.mirror is not None:
         break
@@ -1653,7 +1661,7 @@ _collapse_objs = _make_dual_corridor(60, extras=[
 ])
 _cp = Player(_collapse_objs)
 _saw_mirror = False
-for _ in range(400):
+for _ in range(1600):
     _cp.update(False, False)
     if _cp.mirror is not None:
         _saw_mirror = True
@@ -1677,7 +1685,7 @@ _mirror_coin_objs = _make_dual_corridor(60, extras=[
     {"t": T_BG_TRIGGER, "x": 14, "y": 3, "r": 0, "bg": 3},
 ])
 _mp = Player(_mirror_coin_objs)
-for _ in range(180):
+for _ in range(720):
     _mp.update(False, False)
     if 7 in _mp.coins_collected and _mp.bg_preset == 3:
         break
@@ -1703,7 +1711,7 @@ _mirror_mode_objs = _make_dual_corridor(60, extras=[
     {"t": T_MODE_WAVE, "x": 14, "y": 3, "r": 0},
 ])
 _mp = Player(_mirror_mode_objs)
-for _ in range(180):
+for _ in range(720):
     _mp.update(False, False)
     if _mp.mirror is not None and _mp.mirror.get("mode") == _MW:
         break
@@ -1720,7 +1728,7 @@ _main_mode_objs = _make_dual_corridor(60, extras=[
     {"t": T_MODE_WAVE, "x": 14, "y": 9, "r": 0},
 ])
 _mp = Player(_main_mode_objs)
-for _ in range(180):
+for _ in range(720):
     _mp.update(False, False)
     if _mp.mode == _MW:
         break
@@ -1737,7 +1745,7 @@ _mirror_mini_objs = _make_dual_corridor(60, extras=[
     {"t": T_MODE_MINI, "x": 14, "y": 3, "r": 0},
 ])
 _mp = Player(_mirror_mini_objs)
-for _ in range(180):
+for _ in range(720):
     _mp.update(False, False)
     if _mp.mirror is not None and _mp.mirror.get("size") == _MINI:
         break
@@ -1755,7 +1763,7 @@ _mp = Player(_make_dual_corridor(60, extras=[
     {"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0},
     {"t": T_MODE_WAVE, "x": 14, "y": 3, "r": 0},
 ]))
-for _ in range(180):
+for _ in range(720):
     _mp.update(False, False)
     if _mp.mirror is not None and _dup_key in _mp.mirror_passed:
         break
@@ -1788,7 +1796,7 @@ _mirror_orb_key = (T_ORB, 18, 4)
 _clicked = False
 _main_jumped = False
 _mirror_jumped = False
-for _frame in range(220):
+for _frame in range(880):
     # Click only when the player is roughly under both orbs (cell x≈18).
     do_click = (not _clicked) and 17 * CELL <= _op.x <= 18.5 * CELL
     pressed = do_click and not _clicked
@@ -1979,6 +1987,7 @@ _objs = ([{"t": _TS, "x": 1, "y": 9, "r": 0}]
          + [{"t": _TE, "x": 38, "y": 9, "r": 0}])
 _p = _PB(_objs)
 _p.mode = _MW
+_p.y -= 3 * CELL  # Trail rendering requires room to fly above the floor.
 for _ in range(20):
     _p.update(False, False)
 check("Wave produces non-empty trail before draw",
@@ -2006,7 +2015,7 @@ check("Ship trail draws without crash", _ship_drew)
 from src.constants import MODE_CUBE as _MC
 _p.mode = _MW
 _p.trail = []
-for _ in range(30):
+for _ in range(120):
     _p.update(False, False)
 _wave_pts = len(_p.trail)
 _surf.fill((0, 0, 0))
@@ -2020,9 +2029,13 @@ check("mode switch keeps every recorded trail sample", len(_p.trail) == _wave_pt
 
 
 def _trail_pixels(shot, col):
+    # Step 2, not 4: a default (non-per-mode) trail is only
+    # _LINE_THICKNESS_DEFAULT=3px thick, so a coarser 4px-aligned grid can
+    # miss it entirely depending on exactly which px row the ribbon lands
+    # on (a spatial coincidence, not something that should gate the test).
     hits = 0
-    for _sx in range(0, 1200, 4):
-        for _sy in range(0, 700, 4):
+    for _sx in range(0, 1200, 2):
+        for _sy in range(0, 700, 2):
             if shot.get_at((_sx, _sy))[:3] == col:
                 hits += 1
     return hits
@@ -2161,7 +2174,7 @@ _spider_objs.append({'t': _TE, 'x': 39, 'y': 0, 'r': 0})
 _sp = _PCls(_spider_objs)
 _sp.mode = _MSP
 _sp.hitbox_trace = []
-for _ in range(40):
+for _ in range(160):
     _sp.update(False, False)
 _pre_len = len(_sp.hitbox_trace)
 _pre_y = _sp.y
@@ -2192,7 +2205,7 @@ _slab_objs += [{'t': _TSL, 'x': i, 'y': 12, 'r': 180} for i in range(40)]
 _slab_objs.append({'t': _TE, 'x': 39, 'y': 0, 'r': 0})
 _spslab = _PCls(_slab_objs)
 _spslab.mode = _MSP
-for _ in range(40):
+for _ in range(160):
     _spslab.update(False, False)
 _spslab.update(True, True)
 # Slabs span the whole row at y=12, so whichever column the spider is
@@ -2220,7 +2233,7 @@ _inv_floor = [{'t': _TB, 'x': i, 'y': 12, 'r': 0, 'invisible': True}
               for i in range(10)]
 _inv_floor.append({'t': _TE, 'x': 9, 'y': 0, 'r': 0})
 _ip = _PCls(_inv_floor)
-for _ in range(60):
+for _ in range(240):
     _ip.update(False, False)
 check("invisible blocks still collide (player lands, stays alive)",
       _ip.alive and _ip.on_ground)
@@ -2238,7 +2251,7 @@ check("play.py skips draw_obj when o.get('invisible')",
 
 
 # ---------------------------------------------------------------------------
-# Regression tests (TEST.md §1.1) — every prior-round bug fixed in CR1–CR3
+# Regression tests — every prior-round bug fixed in CR1–CR3
 # gets a test that would have caught it. If one of these fails in the
 # future, the corresponding bug is back.
 # ---------------------------------------------------------------------------
@@ -2439,6 +2452,10 @@ check("Player.update feeds the mirror the SAME input it got",
       "self._step_mirror(input_held, input_pressed, dx_step)" in _core_src)
 _dual_lvl = make_flat_level(length=30,
                             extras=[{"t": T_MODE_DUAL, "x": 8, "y": 9, "r": 0}])
+# An inverted cube needs a ceiling: the old fixture relied on a phantom
+# grounded mirror jumping in empty air before falling off screen.
+_dual_lvl.extend({"t": T_BLOCK, "x": gx, "y": 3, "r": 0}
+                 for gx in range(30))
 _dual_bot = _HintBot([dict(o) for o in _dual_lvl])
 _, _, _dual_in, _dual_won = _dual_bot.solve(screen=None, clock=None,
                                             max_frames=2000, time_budget=15)
@@ -2645,7 +2662,7 @@ check("loophole bot without a drawn path fails loudly",
 
 
 # ---------------------------------------------------------------------------
-# Physics determinism (TEST.md §1.2) — same inputs must produce
+# Physics determinism — same inputs must produce
 # bit-identical trajectories across runs. This is the property the
 # the bots' replay-verify relies on.
 # ---------------------------------------------------------------------------
@@ -2711,16 +2728,15 @@ check("Player under low gravity accumulates less downward vy per frame",
 
 
 # ---------------------------------------------------------------------------
-# Golden playthrough (TEST.md §1.11) — level_bot_inputs.txt is an existing
-# recorded run; replaying it through a fresh Player must still win. Any
-# physics regression that breaks the recorded solution fails here.
+# Legacy input parsing smoke test. This fixture has no corresponding
+# level and does not establish that any particular level is completable.
 # ---------------------------------------------------------------------------
-section("Golden playthrough")
+section("Legacy replay parsing")
 
 import os as _os_gp
 _gp_inputs_path = _os_gp.path.join(
     _os_gp.path.dirname(_os_gp.path.abspath(__file__)),
-    "level_bot_inputs.txt")
+    "tests", "fixtures", "legacy_bot_inputs.txt")
 if _os_gp.path.exists(_gp_inputs_path):
     with open(_gp_inputs_path) as _gf:
         _gp_raw = [ln.strip() for ln in _gf
@@ -2756,7 +2772,7 @@ else:
 
 
 # ---------------------------------------------------------------------------
-# Fuzz (TEST.md §1.10) — random valid levels don't crash the Player
+# Fuzz — random valid levels don't crash the Player
 # across 1000 simulation frames. Cheap and catches long-tail issues.
 # ---------------------------------------------------------------------------
 section("Fuzz — random levels don't crash")
@@ -2800,7 +2816,7 @@ if _fuzz_crashes:
 
 
 # ---------------------------------------------------------------------------
-# Performance contract (TEST.md §1.12) — dense 3000-object level must
+# Performance contract — dense 3000-object level must
 # step at well over 60fps so there's headroom for rendering. If this
 # fails, someone's accidentally introduced O(N²) behavior.
 # ---------------------------------------------------------------------------
@@ -2839,7 +2855,7 @@ check(f"Per-frame sim time {_per_frame_ms:.2f}ms well under 16.6ms budget",
 
 
 # ---------------------------------------------------------------------------
-# Save / load round-trip (TEST.md §1.8) — a saved level must load back
+# Save / load round-trip — a saved level must load back
 # to equivalent objects (order-insensitive).
 # ---------------------------------------------------------------------------
 section("Save/load round-trip")
@@ -2892,8 +2908,7 @@ finally:
 
 
 # ---------------------------------------------------------------------------
-# Hitbox cache correctness (TEST.md §1.9 adapted — our cache is for static
-# hitboxes, not sprites).
+# Hitbox cache correctness (static hitboxes, not sprites).
 # ---------------------------------------------------------------------------
 section("Static hitbox cache")
 

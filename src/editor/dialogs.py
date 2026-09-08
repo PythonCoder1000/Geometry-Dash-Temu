@@ -144,6 +144,158 @@ def confirm_exit(screen, clock, *, unsaved):
         clock.tick(60)
 
 
+def layers_dialog(screen, clock, st):
+    """Editor Layers panel (GD reference doc §5): per-layer visibility
+    and lock, plus which layer new placements land on. Minimal list UI,
+    not GD's full panel — matches the plan's scoped-down ambition."""
+    guard = ClickGuard()
+    row_h = 34
+    while True:
+        layers = st.used_layers()
+        pw = 480
+        ph = 90 + row_h * len(layers) + 60
+        box = pygame.Rect((WIDTH - pw) // 2, (HEIGHT - ph) // 2, pw, ph)
+        r_add = pygame.Rect(box.centerx - 70, box.bottom - 46, 140, 32)
+        r_close = pygame.Rect(box.right - 90, box.y + 10, 70, 26)
+        rows = []
+        y = box.y + 56
+        for layer in layers:
+            r_active = pygame.Rect(box.x + 20, y, 90, row_h - 6)
+            r_hide = pygame.Rect(box.x + 220, y, 90, row_h - 6)
+            r_lock = pygame.Rect(box.x + 320, y, 90, row_h - 6)
+            rows.append((layer, r_active, r_hide, r_lock))
+            y += row_h
+        guard.tick()
+        mpos = pygame.mouse.get_pos()
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                return
+            if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                return
+            if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1 and guard.consume_click(ev):
+                if r_close.collidepoint(ev.pos):
+                    return
+                if r_add.collidepoint(ev.pos):
+                    st.active_layer = (max(layers) + 1) if layers else 1
+                    continue
+                for layer, r_active, r_hide, r_lock in rows:
+                    if r_active.collidepoint(ev.pos):
+                        st.active_layer = layer
+                    elif r_hide.collidepoint(ev.pos):
+                        if st.layer_hidden.get(layer):
+                            st.layer_hidden.pop(layer, None)
+                        else:
+                            st.layer_hidden[layer] = True
+                    elif r_lock.collidepoint(ev.pos):
+                        if st.layer_locked.get(layer):
+                            st.layer_locked.pop(layer, None)
+                        else:
+                            st.layer_locked[layer] = True
+        ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 170))
+        screen.blit(ov, (0, 0))
+        pygame.draw.rect(screen, C_DARK, box, border_radius=10)
+        pygame.draw.rect(screen, (90, 110, 190), box, 2, border_radius=10)
+        txt(screen, "EDITOR LAYERS", box.x + 20, box.y + 22, 18, C_WHITE, False, shadow=True)
+        for r, lab in ((r_close, "Close"),):
+            pygame.draw.rect(screen, C_BTN, r, border_radius=6)
+            txt(screen, lab, r.centerx, r.centery, 13, C_WHITE, True)
+        for layer, r_active, r_hide, r_lock in rows:
+            is_active = layer == st.active_layer
+            hidden = bool(st.layer_hidden.get(layer))
+            locked = bool(st.layer_locked.get(layer))
+            txt(screen, f"Layer {layer}", box.x + 20, r_active.y - 2, 13, (200, 210, 255))
+            active_col = C_SUCCESS if is_active else C_BTN
+            pygame.draw.rect(screen, active_col, r_active, border_radius=6)
+            txt(screen, "Active" if is_active else "Use", r_active.centerx, r_active.centery, 12, C_WHITE, True)
+            hide_col = C_DANGER if hidden else C_BTN
+            pygame.draw.rect(screen, hide_col, r_hide, border_radius=6)
+            txt(screen, "Hidden" if hidden else "Visible", r_hide.centerx, r_hide.centery, 12, C_WHITE, True)
+            lock_col = C_DANGER if locked else C_BTN
+            pygame.draw.rect(screen, lock_col, r_lock, border_radius=6)
+            txt(screen, "Locked" if locked else "Unlocked", r_lock.centerx, r_lock.centery, 12, C_WHITE, True)
+        c = tuple(min(255, v + 30) for v in C_BTN) if r_add.collidepoint(mpos) else C_BTN
+        pygame.draw.rect(screen, c, r_add, border_radius=6)
+        txt(screen, "+ New Layer", r_add.centerx, r_add.centery, 14, C_WHITE, True)
+        pygame.display.flip()
+        clock.tick(60)
+
+
+def select_filter_dialog(screen, clock, st):
+    """Select Filter (GD reference doc §5's most-cited pain point): pick
+    a type or a group id and select every matching, unlocked object —
+    a first-class dialog instead of real GD's buried pause-menu control."""
+    from ..objects import TYPE_NAMES
+    guard = ClickGuard()
+    types = sorted({o["t"] for o in st.objects}, key=lambda t: TYPE_NAMES.get(t, t))
+    groups = sorted({g for o in st.objects for g in (o.get("groups") or [])})
+    pw, ph = 560, 460
+    box = pygame.Rect((WIDTH - pw) // 2, (HEIGHT - ph) // 2, pw, ph)
+    col_w = (pw - 60) // 2
+    r_close = pygame.Rect(box.right - 90, box.y + 10, 70, 26)
+
+    def type_rows():
+        y = box.y + 70
+        out = []
+        for t in types:
+            out.append((t, pygame.Rect(box.x + 20, y, col_w, 26)))
+            y += 28
+        return out
+
+    def group_rows():
+        y = box.y + 70
+        out = []
+        for g in groups:
+            out.append((g, pygame.Rect(box.x + 40 + col_w, y, col_w - 20, 26)))
+            y += 28
+        return out
+
+    while True:
+        guard.tick()
+        mpos = pygame.mouse.get_pos()
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                return
+            if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                return
+            if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1 and guard.consume_click(ev):
+                if r_close.collidepoint(ev.pos):
+                    return
+                for t, r in type_rows():
+                    if r.collidepoint(ev.pos):
+                        st.selected = st.filter_locked([o for o in st.objects if o["t"] == t])
+                        st.say(f"Selected all {TYPE_NAMES.get(t, t)} ({len(st.selected)})", 100)
+                        return
+                for g, r in group_rows():
+                    if r.collidepoint(ev.pos):
+                        st.selected = st.filter_locked(
+                            [o for o in st.objects if g in (o.get("groups") or [])])
+                        st.say(f"Selected group {g} ({len(st.selected)})", 100)
+                        return
+        ov = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        ov.fill((0, 0, 0, 170))
+        screen.blit(ov, (0, 0))
+        pygame.draw.rect(screen, C_DARK, box, border_radius=10)
+        pygame.draw.rect(screen, (90, 110, 190), box, 2, border_radius=10)
+        txt(screen, "SELECT FILTER", box.x + 20, box.y + 22, 18, C_WHITE, False, shadow=True)
+        pygame.draw.rect(screen, C_BTN, r_close, border_radius=6)
+        txt(screen, "Close", r_close.centerx, r_close.centery, 13, C_WHITE, True)
+        txt(screen, "By type", box.x + 20, box.y + 48, 13, (150, 190, 255))
+        for t, r in type_rows():
+            hov = r.collidepoint(mpos)
+            pygame.draw.rect(screen, (46, 50, 90) if not hov else (66, 72, 130), r, border_radius=4)
+            txt(screen, TYPE_NAMES.get(t, t), r.x + 8, r.centery, 12, C_WHITE)
+        txt(screen, "By group", box.x + 40 + col_w, box.y + 48, 13, (150, 190, 255))
+        if not groups:
+            txt(screen, "(no grouped objects)", box.x + 40 + col_w, box.y + 70, 12, C_GRAY)
+        for g, r in group_rows():
+            hov = r.collidepoint(mpos)
+            pygame.draw.rect(screen, (46, 50, 90) if not hov else (66, 72, 130), r, border_radius=4)
+            txt(screen, f"Group {g}", r.x + 8, r.centery, 12, C_WHITE)
+        pygame.display.flip()
+        clock.tick(60)
+
+
 def show_error_modal(screen, clock, exc, *, where="editor"):
     """Crash notice: the traceback is already on stdout; this tells the
     user their autosave is safe.  Dismissed with Enter / Space / click."""

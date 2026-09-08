@@ -152,9 +152,15 @@ def list_runs(level_key):
                 data = json.load(f)
         except (OSError, ValueError):
             continue
+        if not isinstance(data, dict) or not isinstance(data.get("inputs", []), list):
+            continue
+        try:
+            saved_at = int(data.get("saved_at", 0))
+        except (TypeError, ValueError, OverflowError):
+            continue
         out.append({
             "name": data.get("name") or fn[len(prefix):-5],
-            "saved_at": int(data.get("saved_at", 0)),
+            "saved_at": saved_at,
             "status": data.get("status", ""),
             "bot": data.get("bot", ""),
             "input_frames": len(data.get("inputs", [])),
@@ -173,13 +179,20 @@ def load_run(level_key, name):
     except (OSError, ValueError):
         return None
     # Normalise list-of-lists back into the tuple shapes the callers want.
-    data["inputs"] = [(bool(h), bool(p)) for h, p in data.get("inputs", [])]
-    data["waypoints"] = [(float(x), float(y))
-                         for x, y in data.get("waypoints", [])]
-    data["mirror_waypoints"] = [(float(x), float(y))
-                                for x, y in data.get("mirror_waypoints", [])]
-    sk = data.get("start_key")
-    data["start_key"] = (sk[0], sk[1]) if sk else None
+    if not isinstance(data, dict):
+        return None
+    try:
+        data["inputs"] = [(bool(h), bool(p)) for h, p in data.get("inputs", [])]
+        data["waypoints"] = [(float(x), float(y))
+                             for x, y in data.get("waypoints", [])]
+        data["mirror_waypoints"] = [(float(x), float(y))
+                                    for x, y in data.get("mirror_waypoints", [])]
+        sk = data.get("start_key")
+        if sk is not None and (not isinstance(sk, (list, tuple)) or len(sk) != 2):
+            return None
+        data["start_key"] = tuple(sk) if sk is not None else None
+    except (TypeError, ValueError, OverflowError):
+        return None
     return data
 
 

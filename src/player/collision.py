@@ -10,7 +10,8 @@ import math
 from ..constants import (
     CELL, PLAYER_SIZE, SOLID_HITBOX_FRACTION, HITBOX_SOLID_FRACTION,
     T_BLOCK, T_SLAB, T_SLOPE, T_START, T_SPIKE, T_HALF_SPIKE, T_SAW,
-    SOLID_TYPES,
+    SOLID_TYPES, MODE_WAVE, MODE_CUBE, MODE_ROBOT,
+    T_WAVE_BLOCK, T_BONK_BLOCK,
 )
 from ..geometry import (
     cell_rect, slab_rect, spike_hitboxes, saw_hitbox, obj_scale,
@@ -214,6 +215,25 @@ class CollisionMixin:
 
     _invalidate_solid_rect = staticmethod(invalidate_pose_caches)
 
+    def _letter_block_nearby(self, px, py, size, block_type):
+        """D/H Block (bible Sec 4.3/4.4): true when a marker of
+        ``block_type`` overlaps this pixel box. Both blocks are inert,
+        non-solid objects (never returned by ``_solid_rect``) placed at
+        or near the solid the player would otherwise die against, so
+        this is a separate presence check, not a collision one."""
+        for o in self._nearby_for_aabb(px, py, px + size, py + size):
+            if o["t"] != block_type:
+                continue
+            cr = o.get("_caabb")
+            if cr is None:
+                r = cell_rect(o["x"], o["y"], obj_scale(o))
+                cr = (r.left, r.top, r.right, r.bottom)
+                o["_caabb"] = cr
+            cl, ct, crr, cb = cr
+            if px < crr and px + size > cl and py < cb and py + size > ct:
+                return True
+        return False
+
     @staticmethod
     def _inner_bounds(x, y, size, mode=None):
         frac = solid_hitbox_fraction(mode, size)
@@ -245,6 +265,17 @@ class CollisionMixin:
                 continue
             bl, bt, brr, bb = br
             if il < brr and ir > bl and it < bb and ib > bt:
+                if ((b.mode == MODE_WAVE
+                     and self._letter_block_nearby(px, py, size, T_WAVE_BLOCK))
+                        or (b.mode in (MODE_CUBE, MODE_ROBOT)
+                            and self._letter_block_nearby(
+                                px, py, size, T_BONK_BLOCK))):
+                    if dx_step > 0:
+                        self.x = bl - size
+                    elif dx_step < 0:
+                        self.x = brr
+                    b.vy = 0.0
+                    return False
                 if self.noclip:
                     self._kill(b, "Crashed into a wall")
                     return False
@@ -257,8 +288,12 @@ class CollisionMixin:
         return False
 
     def _resolve_y_collision(self, b, dy_step):
-        """Snap the body's outer rect onto the block surface its inner
-        hitbox just entered.  Landing sets ``on_ground``."""
+        """Resolve a crossed surface using the outer feet/head and inner
+        horizontal span. Side penetration is handled by the lethal box.
+
+        Waiting for the inner vertical box to enter the floor makes the
+        icon sink, then pop upward by a third of its height every landing.
+        """
         size = b.size
         px = round(self.x)
         py = round(b.y)
@@ -270,16 +305,28 @@ class CollisionMixin:
             if br is None:
                 continue
             bl, bt, brr, bb = br
-            if il < brr and ir > bl and it < bb and ib > bt:
+            old_y = b.y - dy_step
+            crossed = ((dy_step > 0 and old_y + size <= bt + 1e-7
+                        and b.y + size >= bt)
+                       or (dy_step < 0 and old_y >= bb - 1e-7
+                           and b.y <= bb))
+            if il < brr and ir > bl and crossed:
                 hits.append(br)
         if not hits:
             return
         if len(hits) > 1:
             hits.sort(key=(lambda r: r[1]) if dy_step > 0 else (lambda r: -r[1]))
         for bl, bt, brr, bb in hits:
-            if not (il < brr and ir > bl and it < bb and ib > bt):
-                continue
             landing = (dy_step >= 0) if b.grav == 1 else (dy_step <= 0)
+            exempt = self._letter_block_nearby(
+                px, py, size, T_WAVE_BLOCK if b.mode == MODE_WAVE else T_BONK_BLOCK)
+            if ((b.mode == MODE_WAVE or
+                 (b.mode in (MODE_CUBE, MODE_ROBOT) and not landing))
+                    and not exempt):
+                self._kill(b, "Hit a solid surface" if b.mode == MODE_WAVE
+                           else "Hit the underside of a block")
+                if not self.noclip:
+                    return
             if (b.grav == 1) == landing:
                 b.y = bt - size  # feet on top (grav 1) / head hits top (grav -1 rising)
             else:
@@ -287,7 +334,7 @@ class CollisionMixin:
             b.vy = 0.0
             if landing:
                 b.on_ground = True
-            il, it, ir, ib = self._inner_bounds(self.x, b.y, size, b.mode)
+            break
 
     def _inner_in_block_dies(self, b):
         """Belt-and-braces wall death for the rare case a teleport / pad
@@ -305,34 +352,54 @@ class CollisionMixin:
                 continue
             bl, bt, brr, bb = br
             if il < brr and ir > bl and it < bb and ib > bt:
+                if ((b.mode == MODE_WAVE
+                     and self._letter_block_nearby(px, py, size, T_WAVE_BLOCK))
+                        or (b.mode in (MODE_CUBE, MODE_ROBOT)
+                            and self._letter_block_nearby(
+                                px, py, size, T_BONK_BLOCK))):
+                    # D/H Block: bonk/slide instead of dying. Push the
+                    # body back out along whichever axis it's less deeply
+                    # embedded on, so it doesn't stay stuck inside.
+                    pen_x = min(brr - il, ir - bl)
+                    pen_y = min(bb - it, ib - bt)
+                    if pen_x < pen_y:
+                        self.x = bl - size if (il - bl) < (brr - ir) else brr
+                    else:
+                        b.y = bt - size if (it - bt) < (bb - ib) else bb
+                        b.vy = 0.0
+                    return False
                 self._kill(b, "Crashed into a wall")
                 return True
         return False
 
     def _check_ground_adjacency(self, b):
-        """Sticky grounding: if the outer rect's gravity-facing edge is in
-        contact with a block, snap to it and zero vy."""
+        """Preserve support only while the gravity-facing edge touches."""
         if not b.alive:
             return
         size = b.size
-        frac = solid_hitbox_fraction(b.mode, size)
-        gap = max(2, int(size * (1.0 - frac) * 0.5))
+        # Only preserve real contact. A hitbox-sized magnetic gap used to
+        # shorten falls and permit jumps before reaching the platform.
+        gap = 1e-6
         px = round(self.x)
-        py = round(b.y)
-        p_top = py + size - 1 if b.grav == 1 else py - gap
-        p_bottom = p_top + gap + 1
+        edge = b.y + size if b.grav == 1 else b.y
+        p_top = math.floor(edge - 1)
+        p_bottom = math.ceil(edge + 1)
+        il, _, ir, _ = self._inner_bounds(self.x, b.y, size, b.mode)
         solid_rect = self._solid_rect
         for o in self._nearby_for_aabb(px, p_top, px + size, p_bottom):
             br = o.get("_srect") or solid_rect(o)
             if br is None:
                 continue
             bl, bt, brr, bb = br
-            if px < brr and px + size > bl and p_top < bb and p_bottom > bt:
-                b.on_ground = True
+            surface = bt if b.grav == 1 else bb
+            if il < brr and ir > bl and abs(edge - surface) <= gap:
+                # Never cancel a jump that is departing the surface.
                 if b.grav == 1 and b.vy >= 0:
+                    b.on_ground = True
                     b.y = bt - size
                     b.vy = 0.0
                 elif b.grav == -1 and b.vy <= 0:
+                    b.on_ground = True
                     b.y = bb
                     b.vy = 0.0
                 return
@@ -399,6 +466,10 @@ class CollisionMixin:
         if best_floor is not None:
             bottom = b.y + size
             if best_floor < bottom <= best_floor + CELL + 4:
+                if b.mode == MODE_WAVE and not self._letter_block_nearby(px, py, size, T_WAVE_BLOCK):
+                    self._kill(b, "Hit a slope")
+                    if not self.noclip:
+                        return
                 b.y = best_floor - size
                 if b.vy * b.grav > 0:
                     b.vy = 0.0
@@ -406,6 +477,10 @@ class CollisionMixin:
                     b.on_ground = True
         if best_ceiling is not None:
             if best_ceiling - CELL - 4 <= b.y < best_ceiling:
+                if b.mode == MODE_WAVE and not self._letter_block_nearby(px, py, size, T_WAVE_BLOCK):
+                    self._kill(b, "Hit a slope")
+                    if not self.noclip:
+                        return
                 b.y = best_ceiling
                 if b.vy * b.grav > 0:
                     b.vy = 0.0

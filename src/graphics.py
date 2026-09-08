@@ -18,9 +18,9 @@ from .constants import (
     C_BTN, C_DANGER,
 )
 from .geometry import (  # noqa: F401  (re-exported)
-    clamp, lerp, normalize_rotation, obj_scale, cell_rect, slab_rect,
-    rotate_local_rect, spike_hitboxes, pad_trigger_rect, slope_polygon,
-    saw_hitbox,
+    clamp, lerp, normalize_rotation, obj_scale, obj_alpha, cell_rect,
+    slab_rect, rotate_local_rect, spike_hitboxes, pad_trigger_rect,
+    slope_polygon, saw_hitbox,
 )
 
 # ---------------------------------------------------------------------------
@@ -180,9 +180,12 @@ def draw_cube_icon_glyph(surf, x, y, size, color, icon_index):
     Unknown indices fall back to Classic so a stale prefs value never
     leaves the player invisible.
     """
-    cx = x + size // 2
-    cy = y + size // 2
-    s = size
+    pad = max(1, int(size * 0.10))
+    x += pad
+    y += pad
+    s = max(1, size - 2 * pad)
+    cx = x + s // 2
+    cy = y + s // 2
     # Strong contrast: GD icon glyphs read as a near-black cut-out of
     # the body, not a slightly darker tint.
     inset = darker(color, 110)

@@ -87,18 +87,27 @@ def render_canvas(screen, st, stars, mountains):
     # Several Start Pos objects may sit in a level; only one spawns the
     # player, so it gets a ring the inactive ones do not have.
     live_start = active_start(st.objects)
-    for o in st.objects:
+    objs = sorted(st.objects, key=lambda o: (o.get("layer", 0), o.get("y", 0), o.get("x", 0)))
+    for o in objs:
         if not _in_view(o, left, right, top, bot):
+            continue
+        if st.is_layer_hidden(o):
             continue
         sx = o["x"] * e - st.cam_x
         sy = o["y"] * e - st.cam_y
+        layer = o.get("layer", 0)
+        alpha = 255
+        if layer < st.active_layer:
+            alpha = 77
+        elif layer > st.active_layer:
+            alpha = 160
         if o["t"] == T_END:
             draw_end_wall(screen, sx, sy, e, pulse)
             continue
         if st.show_hitboxes:
             continue
         draw_obj(screen, o["t"], sx, sy, e, pulse, o.get("r", 0), o,
-                 scale=obj_scale(o))
+                 scale=obj_scale(o), alpha=alpha)
         if o.get("invisible"):
             dim = pygame.Surface((e, e), pygame.SRCALPHA)
             dim.fill((0, 0, 0, 140))

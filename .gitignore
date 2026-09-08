@@ -273,3 +273,5 @@ exports/
 # Bot benchmark output (scripts/bench_bots.py) — generated, regeneratable.
 bench_output.txt
 bench_results.json
+reports/benchmarks/*.json
+reports/benchmarks/*.txt

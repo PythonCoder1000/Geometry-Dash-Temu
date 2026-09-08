@@ -13,13 +13,19 @@ import sys
 # Window / grid / timing
 # ---------------------------------------------------------------------------
 WIDTH, HEIGHT = 1200, 700
+# Internal editor/world cell.  Gameplay and level files are authored against
+# this stable value; presentation zoom is handled by the camera/editor.
 CELL = 50
-# Canonical physics tick rate.  Every velocity / acceleration constant
-# below is in "px per (1/60)s" units, so this must stay 60 unless all of
-# them are rescaled.  The renderer runs at any FPS and interpolates
-# between ticks (see play.PlaySession).
-FPS = 60
-PHYSICS_TPS = 60
+# Canonical physics tick rate. Physics bible Part 0 / §2.7: real GD
+# standardized its physics loop to 240 TPS in Update 2.2 (Dec 19, 2023);
+# this engine now matches. Every "per tick" constant below is expressed
+# in terms of PHYSICS_TPS (see VEL_PX_PER_TICK / GRAVITY's formulas), so
+# most of them rescale automatically when this changes — the ones that
+# don't (BASE_MOVE_SPEED, INPUT_BUFFER_TICKS, and any literal frame count
+# elsewhere) are called out at their own definition. The renderer runs at
+# any FPS and interpolates between ticks (see play.PlaySession).
+FPS = 240
+PHYSICS_TPS = 240
 GROUND_Y = 550
 
 # Maximum motion (px) covered by a single inner collision substep.
@@ -35,7 +41,8 @@ COLLISION_SUBSTEP_PX = 1.0
 # ---------------------------------------------------------------------------
 # Player tunables (physics)
 #
-# Source of truth: geometry-dash-physics-bible.md.  The bible states
+# Calibration: docs/PHYSICS.md; archived research under docs/reference/.
+# The reference states
 # gamemode speeds in "Vels" (1 Vel = 60 GD units/second) and distances in
 # GD units (1 editor block = 30 units = one CELL on screen).  We convert
 # through this engine's existing px/CELL scale so every constant below is
@@ -44,35 +51,24 @@ COLLISION_SUBSTEP_PX = 1.0
 #     PX_PER_UNIT     = CELL / 30          (px per GD unit)
 #     VEL_PX_PER_TICK = 60 * PX_PER_UNIT / PHYSICS_TPS   (px/tick per 1 Vel)
 #
-# PHYSICS_TPS is intentionally kept at 60, NOT the real game's 240 —
-# SPEED_VALUES below (px/tick horizontal scroll speed) is "baked into"
-# every saved level's move-trigger curves and timing (see this module's
-# own historical comment on SPEED_VALUES), and a tick-rate change would
-# silently redefine what those saved levels mean. That migration is
-# deferred as a separate, dedicated pass — see AUDIT.md follow-up.
+# Horizontal and vertical quantities must use the SAME unit conversion.
+# Keeping the old 300 px/s scroll with GD jump velocities made arcs narrow.
 # ---------------------------------------------------------------------------
 PLAYER_SIZE = 44
 MINI_PLAYER_SIZE = 24
-BASE_MOVE_SPEED = 5.0
 
 PX_PER_UNIT = CELL / 30.0
 VEL_PX_PER_TICK = 60.0 * PX_PER_UNIT / PHYSICS_TPS  # == PX_PER_UNIT at 60 TPS
+BASE_MOVE_SPEED = 5.193 * VEL_PX_PER_TICK
 
-# Cube: base gravity accel. Bible §1.4 single-source estimate (lily-pi/
-# GeometryPhysics, not a verified decompiled constant): ~72 blocks/s^2.
-# 72 blocks/s^2 * CELL(px/block) / PHYSICS_TPS^2 == 1.0 exactly at 60 TPS,
-# which is what this constant already was — kept as-is, now sourced.
-GRAVITY = 72.0 * CELL / (PHYSICS_TPS ** 2)
+# 0.216 velocity units per 240 Hz tick (reference §1.3). The old
+# 72 blocks/s² estimate contradicted that and produced a 3.5-block jump.
+GRAVITY = 0.864 * 60.0 ** 2 * PX_PER_UNIT / PHYSICS_TPS ** 2
 
-# Ship: bible §1.4 calls ship acceleration "genuinely unresolved... don't
-# rely on it," citing lily-pi/GeometryPhysics's single-source estimate of
-# ~25 blocks/s^2 (~1/3 of cube's rate). SHIP_THRUST has no bible figure at
-# all (only the two *resulting* max velocities, 8G up / -6.4G down, are
-# documented — see SHIP_MAX_RISE/SHIP_MAX_FALL below) so its magnitude
-# keeps the old SHIP_THRUST/SHIP_GRAVITY ratio (~1.694) from before this
-# retune, applied to the new gravity value.
-SHIP_GRAVITY = 25.0 * CELL / (PHYSICS_TPS ** 2)  # single-source estimate
-SHIP_THRUST = SHIP_GRAVITY * 1.694444  # ratio-preserved; no bible figure
+# Flying modes use 0.9582 base acceleration in updateJump's decompilation.
+# Ship's baseline ascent factor is 0.4; release depends on momentum.
+SHIP_GRAVITY = 0.9582 * 0.4 * 60.0 ** 2 * PX_PER_UNIT / PHYSICS_TPS ** 2
+SHIP_THRUST = SHIP_GRAVITY * 2.0
 
 # Cube jump velocity, 1x speed portal: bible §1.4 table, 11.18G.
 JUMP_FORCE = -11.18 * VEL_PX_PER_TICK
@@ -84,13 +80,22 @@ PAD_FORCE = JUMP_FORCE * 1.125
 BALL_FLIP_FORCE = 3.354 * VEL_PX_PER_TICK
 DASH_SPEED = 16.0
 # Dash duration: not given numerically anywhere in the bible (only
-# qualitative orb-buffering behavior around dash orbs, §2.4) — unchanged.
+# qualitative orb-buffering behavior around dash orbs, §2.4). Also dead
+# in practice: a dash's `dash_timer` is only ever set to 0 or
+# DASH_TIMER_INFINITE at the call sites in player/core.py, never to this
+# value, so DASH_TIME/PhysicsParams.dash_time is unused — a dash now runs
+# until something stops it (S Block / wall / death), not for a fixed
+# tick count. Left unscaled since no live code reads it.
 DASH_TIME = 9
 # A dash now runs until something stops it (an S Block, a wall, death),
 # so the per-tick countdown is seeded with a value it can never reach.
 DASH_TIMER_INFINITE = 10 ** 9
 # Wave: bible §1.4, "Normal trail = 45 degrees" — already matched, kept.
 WAVE_ANGLE = 45.0
+# The wave's movement direction changes on button edges, but its icon does
+# not visually snap to the new diagonal in one 240 Hz tick.  This is the
+# per-tick retention used by the render-facing angle filter.
+WAVE_ANGLE_SMOOTHING = 0.96
 PLAYER_START_GX = 3
 # UFO: bible §1.4, "constant 7G at every speed portal" — this single
 # value is now used for BOTH the grounded launch and the midair flap
@@ -102,13 +107,16 @@ SPIDER_TELEPORT_RANGE = 6  # cells (legacy; teleports are now unbounded)
 # against gravity into the fixed hold velocity itself (gravity is now
 # skipped entirely while the hold is active — see core.py).
 ROBOT_THRUST = 5.59 * VEL_PX_PER_TICK
-ROBOT_FLIGHT_SECONDS = 1.5
+# The decompiled timer advances by dt/10 with dt in 60 Hz units:
+# its 1.5 limit represents 15/60 seconds, not 1.5 seconds.
+ROBOT_FLIGHT_SECONDS = 0.25
 
 # Per-mode max-fall / max-rise magnitudes (bible §1.3 table). Modes not
 # listed here (Wave has no gravity; Spider's fall is defined by its
 # instant teleport, not acceleration, per §1.4) don't use a fall clamp.
 MAX_FALL_BOX = 15.0 * VEL_PX_PER_TICK      # Cube / Ball / Robot / Spider: -15G
 MAX_FALL_UFO = 6.4 * VEL_PX_PER_TICK       # UFO: -6.4G
+MAX_RISE_UFO = 8.0 * VEL_PX_PER_TICK
 MAX_FALL_SWING = 8.0 * VEL_PX_PER_TICK     # Swing: -8G
 SHIP_MAX_RISE = 8.0 * VEL_PX_PER_TICK      # Ship (holding): 8G
 SHIP_MAX_FALL = 6.4 * VEL_PX_PER_TICK      # Ship (released): -6.4G
@@ -116,22 +124,16 @@ SHIP_MAX_FALL = 6.4 * VEL_PX_PER_TICK      # Ship (released): -6.4G
 # toggles the gravity" — applied in core.py's MODE_SWING branch.
 SWING_VY_MULTIPLIER = 0.8
 
-# Mini icon (size == MINI_PLAYER_SIZE): bible §1.6 states mini's *hitbox*
-# scale numerically (0.6x hazard box — see the hitbox checkpoint) but
-# says its per-gamemode physics multiplier "beyond hitbox scale is
-# undocumented... described only qualitatively." These two scales are
-# therefore retained as pre-retune, qualitative-only tuning, not sourced
-# to a bible number: GD's mini isn't floatier — it falls/rises FASTER
-# while its jump/flip impulses are a touch weaker.
-MINI_GRAVITY_SCALE = 1.12
-MINI_JUMP_SCALE = 0.94
+# Mini ground modes scale jump velocity by 0.8. Flying modes have their
+# own acceleration factors in core.py; extra per-level scaling stays optional.
+MINI_GRAVITY_SCALE = 1.0
+MINI_JUMP_SCALE = 0.8
 # Bible §1.6: "Wave takes sharper diagonals (~63.43 degrees vs 45)" in
 # mini mode — an exact 2:1-slope figure, so this scale is now sourced:
 # 63.43 / WAVE_ANGLE(45).
 MINI_WAVE_ANGLE_SCALE = 63.43 / 45.0
-# No bible figure for how much faster mini's wave vy ramps — qualitative
-# only, retained from pre-retune tuning.
-MINI_WAVE_VY_SCALE = 1.15
+# Mini wave travels at twice the vertical speed, with no ramp.
+MINI_WAVE_VY_SCALE = 2.0
 
 # Player trail: solid (no fade) while on screen; samples further behind
 # the player than this (world px) are dropped so the list doesn't grow
@@ -146,6 +148,26 @@ ORB_PINK_SCALE = 0.75
 ORB_RED_SCALE = 1.35
 PAD_PINK_SCALE = 0.75
 PAD_RED_SCALE = 1.35
+
+# ---------------------------------------------------------------------------
+# Input buffering (physics bible Part 2)
+# ---------------------------------------------------------------------------
+# player.core.Player pre-remembers a click for this many *ticks* so a
+# press slightly before landing / before entering an orb's hitbox still
+# fires the instant it becomes valid (bible §2.2-§2.5: a real, code-level
+# mechanic, not just a player habit). Bible §2.6 is explicit that "no
+# numeric orb buffer window is published anywhere" — this engine's own
+# window predates the bible and was 6 frames at the old 60 TPS (0.1s);
+# rescaled here to the same real-world duration at the new 240 TPS
+# (6 * 240/60 = 24) rather than invented from the bible, which has no
+# figure to invent from.
+INPUT_BUFFER_TICKS = 24
+
+# Teleport-orb re-trigger cooldown: was 10 ticks at 60 TPS (~0.167s); no
+# bible figure exists for this (it's an engine-internal debounce, not a
+# documented GD mechanic), so it's rescaled to preserve the same real
+# duration at 240 TPS: 10 * 240/60 = 40.
+TELEPORT_COOLDOWN_TICKS = 40
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -211,7 +233,14 @@ _BUNDLED_LEVELS_DIR = os.path.join(_ROOT, "levels")
 
 # v7: blue/green orb semantics aligned with Geometry Dash (see
 # levels._migrate_objects), speed_fastest + new pads added.
-LEVEL_FORMAT_VERSION = 7
+# v8: arbitrary multi-membership object groups (``groups: [int, ...]``,
+# generalizing the old single ``group`` int) and a level-level color-
+# channel table (see channels.py) replacing the Color/Pulse Trigger's
+# direct ``col_idx`` palette lookup with a ``channel`` reference — both
+# migrated transparently in levels.normalize_object, no version-gated
+# migration function needed (same pattern as the teleport ``link`` ->
+# ``group_id`` shim already there).
+LEVEL_FORMAT_VERSION = 8
 
 # ---------------------------------------------------------------------------
 # Object type names (strings stored in level JSON — do not rename casually)
@@ -276,19 +305,131 @@ T_ROTATE_TRIGGER = "rotate_trigger"
 T_FOLLOW_TRIGGER = "follow_trigger"
 T_TIME_WARP = "time_warp"
 T_BLACKOUT_TRIGGER = "blackout_trigger"
+# Checkpoint 5 (editor reference Sec 4, "logic/spawn family"): the
+# "glue" triggers that chain other triggers together via group ids.
+T_SPAWN_TRIGGER = "spawn_trigger"
+T_TOGGLE_TRIGGER = "toggle_trigger"
+T_STOP_TRIGGER = "stop_trigger"
+T_SEQUENCE_TRIGGER = "sequence_trigger"
+T_SCALE_TRIGGER = "scale_trigger"
+T_ALPHA_TRIGGER = "alpha_trigger"
 # Editor-only helpers (inert at play time).
 T_JUMP_PREDICTOR = "jump_predictor"
 T_BOT_CHECKPOINT = "bot_checkpoint"
 # Editor utility: stops an active dash on contact (invisible by default).
 T_DASH_STOP = "dash_stop"
+# Letter blocks (physics bible Part 4) -- invisible-by-default editor
+# utilities, same "checked directly by type" pattern as T_DASH_STOP (S
+# Block) above, not part of any collision-shape frozenset.
+# J Block: suppresses the one landing auto-jump that fires when the
+# player held input through an orb (bible Sec 4.1).
+T_JUMP_BLOCK = "jump_block"
+# D Block: lets Wave slide along a block's top surface instead of dying
+# on contact (bible Sec 4.3).
+T_WAVE_BLOCK = "wave_block"
+# H Block: Cube/Robot bonk off a block's underside/side instead of dying
+# (bible Sec 4.4).
+T_BONK_BLOCK = "bonk_block"
+
+# Checkpoint 6 (editor reference Sec 4, "Camera" family): expands the
+# existing pan/static/follow T_CAMERA_TRIGGER with dedicated zoom,
+# detached-offset, view-rotate, travel-bound, and follow-smoothing
+# triggers.
+T_ZOOM_TRIGGER = "zoom_trigger"
+T_CAM_OFFSET_TRIGGER = "cam_offset_trigger"
+T_CAM_ROTATE_TRIGGER = "cam_rotate_trigger"
+T_CAM_EDGE_TRIGGER = "cam_edge_trigger"
+T_CAM_GUIDE_TRIGGER = "cam_guide_trigger"
+# Checkpoint 6 (editor reference Sec 4, "Screen effects / shaders"): the
+# best-effort subset feasible in pygame's surface pipeline without a GPU
+# shader stage (per-pixel color remaps + block resampling). Chromatic,
+# Chromatic Glitch, Radial Blur, Motion Blur, Bulge, Pinch, Lens Circle,
+# Split Screen, Shock Wave and Shock Line need real per-pixel
+# displacement/convolution and are deliberately NOT implemented — see
+# docs/development/AUDIT.md.
+T_GRAYSCALE_TRIGGER = "grayscale_trigger"
+T_SEPIA_TRIGGER = "sepia_trigger"
+T_INVERT_TRIGGER = "invert_trigger"
+T_HUE_TRIGGER = "hue_trigger"
+T_PIXELATE_TRIGGER = "pixelate_trigger"
+
+# Checkpoint 7 (editor reference Sec 4, "Item / counter / timer system"):
+# a touch-collectible that grants/removes a value from a numbered item id
+# (self.items on Player), plus the logic triggers that read/write it and
+# an on-screen display object. Item Pickup is collectible-shaped (touched
+# at its own position, like a coin), not a trigger-volume, so it is NOT
+# in TRIGGER_TYPES; Item Counter is a passive HUD display, also not a
+# trigger.
+T_ITEM_PICKUP = "item_pickup"
+T_COUNT_TRIGGER = "count_trigger"
+T_INSTANT_COUNT_TRIGGER = "instant_count_trigger"
+T_ITEM_EDIT_TRIGGER = "item_edit_trigger"
+T_ITEM_COMP_TRIGGER = "item_comp_trigger"
+T_ITEM_PERS_TRIGGER = "item_pers_trigger"
+T_TIME_TRIGGER = "time_trigger"
+T_TIME_EVENT_TRIGGER = "time_event_trigger"
+T_ITEM_COUNTER = "item_counter"
+
+# Checkpoint 8 (editor reference Sec 4, simplified keyframe system): a
+# data-only marker object (position/rotation/scale target + per-keyframe
+# timing/easing), grouped by an ``animation_id`` the same way a group id
+# groups objects a trigger acts on, plus the trigger that plays a target
+# group through an animation's keyframes in order -- replaces chaining
+# separate Move+Rotate+Scale triggers for a complex sequence. A Keyframe
+# is never touch-activated (pure data, read by whichever Keyframe
+# Animation Trigger names its animation id), so it is NOT in
+# TRIGGER_TYPES -- same reasoning as Item Pickup above.
+T_KEYFRAME = "keyframe"
+T_KEYFRAME_TRIGGER = "keyframe_trigger"
 
 # ---------------------------------------------------------------------------
 # Logical type sets
 # ---------------------------------------------------------------------------
+LETTER_BLOCK_TYPES = frozenset({T_DASH_STOP, T_JUMP_BLOCK, T_WAVE_BLOCK,
+                                T_BONK_BLOCK})
 DECORATION_TYPES = frozenset({T_DECO_CRYSTAL, T_DECO_PILLAR, T_DECO_GLOW})
 TRIGGER_TYPES = frozenset({T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER,
                            T_COLOR_TRIGGER, T_PULSE_TRIGGER, T_ROTATE_TRIGGER,
-                           T_TIME_WARP, T_FOLLOW_TRIGGER, T_BLACKOUT_TRIGGER})
+                           T_TIME_WARP, T_FOLLOW_TRIGGER, T_BLACKOUT_TRIGGER,
+                           T_SPAWN_TRIGGER, T_TOGGLE_TRIGGER, T_STOP_TRIGGER,
+                           T_SEQUENCE_TRIGGER, T_SCALE_TRIGGER,
+                           T_ALPHA_TRIGGER, T_ZOOM_TRIGGER,
+                           T_CAM_OFFSET_TRIGGER, T_CAM_ROTATE_TRIGGER,
+                           T_CAM_EDGE_TRIGGER, T_CAM_GUIDE_TRIGGER,
+                           T_GRAYSCALE_TRIGGER, T_SEPIA_TRIGGER,
+                           T_INVERT_TRIGGER, T_HUE_TRIGGER,
+                           T_PIXELATE_TRIGGER,
+                           T_COUNT_TRIGGER, T_INSTANT_COUNT_TRIGGER,
+                           T_ITEM_EDIT_TRIGGER, T_ITEM_COMP_TRIGGER,
+                           T_ITEM_PERS_TRIGGER, T_TIME_TRIGGER,
+                           T_TIME_EVENT_TRIGGER, T_KEYFRAME_TRIGGER})
+# Checkpoint 7: item/counter-family triggers that fire a target group by
+# reading the item-value store, rather than animating an object.
+ITEM_LOGIC_TRIGGER_TYPES = frozenset({
+    T_COUNT_TRIGGER, T_INSTANT_COUNT_TRIGGER, T_ITEM_EDIT_TRIGGER,
+    T_ITEM_COMP_TRIGGER, T_ITEM_PERS_TRIGGER, T_TIME_TRIGGER,
+    T_TIME_EVENT_TRIGGER,
+})
+# Triggers whose effect is "run other triggers" (or, for the item-logic
+# family, "read/write the item store and maybe fire a group") rather than
+# animating an object directly -- Toggle/Stop/item-logic triggers always
+# execute even while their own group is disabled (so a disabled chain can
+# be re-enabled, and a Count trigger deciding whether to re-enable a
+# chain must itself remain live), and their own touch is never gated by
+# _trigger_active.
+CONTROL_TRIGGER_TYPES = frozenset({T_SPAWN_TRIGGER, T_TOGGLE_TRIGGER,
+                                   T_STOP_TRIGGER, T_SEQUENCE_TRIGGER}
+                                  ) | ITEM_LOGIC_TRIGGER_TYPES
+COLLECTIBLE_ITEM_TYPES = frozenset({T_ITEM_PICKUP})
+# Checkpoint 8: data-only keyframe markers, indexed by animation id
+# (Player._by_animation) rather than executed as a trigger themselves.
+KEYFRAME_TYPES = frozenset({T_KEYFRAME})
+# Checkpoint 6: screen-effect triggers, for render code that needs to
+# iterate "every effect type" without listing them by name.
+SCREEN_EFFECT_TRIGGER_TYPES = frozenset({
+    T_GRAYSCALE_TRIGGER, T_SEPIA_TRIGGER, T_INVERT_TRIGGER, T_HUE_TRIGGER,
+    T_PIXELATE_TRIGGER,
+})
 SOLID_TYPES = frozenset({T_BLOCK, T_SLAB})
 # Slopes have diagonal collision handled by a dedicated pass.
 SLOPE_TYPES = frozenset({T_SLOPE})
@@ -330,6 +471,25 @@ MODE_FROM_TYPE = {
 MODE_PORTAL_TYPES = frozenset(MODE_FROM_TYPE.keys())
 ALL_MODES = (MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO,
              MODE_SPIDER, MODE_SWING, MODE_ROBOT)
+
+# Bible §2.6/§1.3's "Ticks Held" column: 1 tick for Cube/Ball/Robot/Spider
+# (one-shot actions — jump, flip, hold-launch, teleport), 2 ticks for
+# Ship/UFO/Wave/Swing (continuous hold-while-held actions). Retained here
+# as sourced documentation only — it is NOT wired in as an artificial
+# action-delay gate. Reading bible §2.1 closely, "Ticks Held" describes
+# an *internal* tick-ordering detail (why a buffered second jump lands
+# fractionally higher than a fresh one, because gravity is applied
+# before vs. after the velocity is set within the same tick) rather than
+# a player-visible hold-before-acting delay; Ship/UFO/Wave/Swing already
+# act every tick they're held in this engine, which is the correct
+# player-facing behavior, so adding a literal 1/2-tick wait here would
+# introduce input lag real GD does not have. Left as a reference table
+# for any future, more faithful modeling of the tick-ordering quirk
+# itself (not attempted in this pass — see docs/development/AUDIT.md follow-up).
+TICKS_HELD = {
+    MODE_CUBE: 1, MODE_BALL: 1, MODE_ROBOT: 1, MODE_SPIDER: 1,
+    MODE_SHIP: 2, MODE_UFO: 2, MODE_WAVE: 2, MODE_SWING: 2,
+}
 
 # ---------------------------------------------------------------------------
 # Hitboxes (physics bible §3.2)
@@ -515,6 +675,27 @@ C_TIME_WARP = (200, 140, 255)
 C_JUMP_PREDICTOR = (255, 235, 120)
 C_BOT_CHECKPOINT = (120, 230, 255)
 C_DASH_STOP = (255, 255, 255)
+C_JUMP_BLOCK = (255, 210, 60)
+C_WAVE_BLOCK = (90, 190, 255)
+C_BONK_BLOCK = (255, 140, 90)
+C_ZOOM_TRIGGER = (255, 190, 60)
+C_CAM_OFFSET_TRIGGER = (255, 205, 90)
+C_CAM_ROTATE_TRIGGER = (255, 170, 40)
+C_CAM_EDGE_TRIGGER = (230, 160, 255)
+C_CAM_GUIDE_TRIGGER = (160, 200, 255)
+C_GRAYSCALE_TRIGGER = (150, 150, 150)
+C_SEPIA_TRIGGER = (170, 120, 80)
+C_INVERT_TRIGGER = (240, 240, 240)
+C_HUE_TRIGGER = (200, 80, 220)
+C_PIXELATE_TRIGGER = (100, 220, 200)
+C_ITEM_PICKUP = (255, 235, 80)
+C_COUNT_TRIGGER = (140, 255, 210)
+C_ITEM_EDIT_TRIGGER = (255, 170, 210)
+C_ITEM_COMP_TRIGGER = (170, 210, 255)
+C_TIME_TRIGGER = (210, 255, 140)
+C_ITEM_COUNTER = (255, 255, 255)
+C_KEYFRAME = (255, 190, 255)
+C_KEYFRAME_TRIGGER = (220, 150, 255)
 
 # Mode colours keyed by mode string (HUD, state panel).
 MODE_COLORS = {

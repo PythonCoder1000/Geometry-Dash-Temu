@@ -14,7 +14,9 @@ Level JSON schema (``LEVEL_FORMAT_VERSION`` in ``constants.py``;
       "music": null, "attempts": 0, "best_progress": 0,
       "coins_collected": 0, "best_time_frames": 0, "deaths": 0,
       "physics": {...optional PhysicsParams overrides...},
-      "objects": [{"t": "block", "x": 0, "y": 10, "r": 0, ...}, ...]
+      "channels": {...optional color-channel table, see channels.py...},
+      "objects": [{"t": "block", "x": 0, "y": 10, "r": 0,
+                   "groups": [1, 2], ...}, ...]
     }
 
 Per-object fields are declared in :mod:`objects`; :func:`normalize_object`
@@ -31,7 +33,7 @@ from .constants import (
     LEVELS_DIR, LEVEL_FORMAT_VERSION, DIFFICULTIES, LEGACY_DEMON_TARGET,
     T_TELEPORT_ORB, T_TELEPORT_PORTAL, TELEPORT_LINK_TYPES,
     T_COIN, T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_CHECKPOINT,
-    T_ORB, T_BLUE_ORB, T_GREEN_ORB,
+    T_ORB, T_BLUE_ORB, T_GREEN_ORB, T_COLOR_TRIGGER,
 )
 from . import objects as _registry
 
@@ -136,6 +138,20 @@ def _oid_list(raw):
     return out
 
 
+def get_groups(o):
+    """An object's group memberships as a list of positive ints, reading
+    the current ``groups`` list or (falling back) the legacy singular
+    ``group`` int a level may still carry."""
+    groups = _oid_list(o.get("groups"))
+    if groups:
+        return sorted(set(groups))
+    try:
+        g = int(o.get("group", 0))
+    except (TypeError, ValueError):
+        g = 0
+    return [g] if g > 0 else []
+
+
 def normalize_object(o):
     """Produce a clean canonical object dict: known keys only, typed and
     clamped through the :mod:`objects` field schema."""
@@ -146,6 +162,12 @@ def normalize_object(o):
         "y": int(o.get("y", 0)),
         "r": _normalize_rotation(o.get("r", 0)),
     }
+    # v8 legacy shim: Color Trigger's old palette-index field renamed to
+    # ``channel`` (still means the same thing — DEFAULT_CHANNEL_COLORS in
+    # channels.py is seeded 1:1 from the same PLAYER_COLORS palette).
+    if t == T_COLOR_TRIGGER and "channel" not in o and "col_idx" in o:
+        o = dict(o)
+        o["channel"] = o["col_idx"]
     # Scale: legacy uniform ``scale`` or per-axis ``sx``/``sy``.
     legacy = _clamp_scale(o["scale"]) if o.get("scale") is not None else None
     sx = _clamp_scale(o["sx"]) if o.get("sx") is not None else legacy
@@ -180,8 +202,15 @@ def normalize_object(o):
                 pass
     if o.get("oid"):
         out["oid"] = int(o["oid"])
-    if o.get("group"):
-        out["group"] = int(o["group"])
+    groups = get_groups(o)
+    if groups:
+        out["groups"] = groups
+    layer = o.get("layer", 0)
+    if layer:
+        try:
+            out["layer"] = int(layer)
+        except (TypeError, ValueError):
+            pass
     if o.get("invisible"):
         out["invisible"] = True
     if o.get("_bot_only"):

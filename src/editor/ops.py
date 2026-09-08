@@ -134,13 +134,15 @@ def place_object(objects, gx, gy, selected_type, rotation, group_id_counter=0):
     return obj
 
 
-def erase_at(objects, gx, gy, only_type=None):
-    """Remove every object at a cell (or only those of ``only_type``).
-    Returns the number removed."""
+def erase_at(objects, gx, gy, only_type=None, locked_layers=None):
+    """Remove every object at a cell (or only those of ``only_type``),
+    skipping anything on a layer in ``locked_layers``. Returns the number
+    removed."""
     before = len(objects)
     objects[:] = [o for o in objects
                   if not (o["x"] == gx and o["y"] == gy
-                          and (only_type is None or o["t"] == only_type))]
+                          and (only_type is None or o["t"] == only_type)
+                          and not (locked_layers and locked_layers.get(o.get("layer", 0))))]
     return before - len(objects)
 
 

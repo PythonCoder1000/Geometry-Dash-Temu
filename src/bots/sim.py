@@ -17,7 +17,7 @@ pruning.
 from typing import NamedTuple
 
 from ..constants import (
-    CELL, PLAYER_SIZE, ORB_TYPES, T_TELEPORT_PORTAL,
+    CELL, PLAYER_SIZE, ORB_TYPES, T_TELEPORT_PORTAL, PHYSICS_TPS,
     MODE_CUBE, MODE_SHIP, MODE_WAVE, MODE_UFO, MODE_ROBOT,
 )
 
@@ -56,6 +56,7 @@ class SnapVals(NamedTuple):
     robot_thrust_disabled: bool
     wave_vy_smooth: float = 0.0
     time_warp: float = 1.0
+    jump_block_armed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +351,7 @@ def snapshot(player):
         player.thrust_disabled,
         player.wave_vy_smooth,
         player.time_warp,
+        player._jump_block_armed,
     )
     passed = frozenset(player.passed)
     anims = player.move_animations
@@ -449,7 +451,7 @@ def restore(player, snap):
     if len(vals) >= 24:
         player.flight_budget = int(vals[23])
     else:
-        player.flight_budget = int(player.params.robot_flight_seconds * 60)
+        player.flight_budget = int(player.params.robot_flight_seconds * PHYSICS_TPS)
     if len(vals) >= 25:
         player.thrust_disabled = bool(vals[24])
     else:
@@ -460,6 +462,10 @@ def restore(player, snap):
     else:
         player.wave_vy_smooth = 0.0
         player.time_warp = 1.0
+    if len(vals) >= 28:
+        player._jump_block_armed = bool(vals[27])
+    else:
+        player._jump_block_armed = False
     player.passed = set(passed)
     player.held_orbs = set(held_orbs)
     player.mirror_passed = set(mirror_passed)
@@ -529,11 +535,11 @@ def restore(player, snap):
             my, mvy, mgrav, mog, mang, malive = mirror
             mmode = MODE_CUBE
             msize = PLAYER_SIZE
-            mfb = int(player.params.robot_flight_seconds * 60)
+            mfb = int(player.params.robot_flight_seconds * PHYSICS_TPS)
             mtd = False
         elif len(mirror) == 8:
             my, mvy, mgrav, mog, mang, malive, mmode, msize = mirror
-            mfb = int(player.params.robot_flight_seconds * 60)
+            mfb = int(player.params.robot_flight_seconds * PHYSICS_TPS)
             mtd = False
         elif len(mirror) == 9:
             (my, mvy, mgrav, mog, mang, malive, mmode, msize,

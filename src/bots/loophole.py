@@ -27,26 +27,33 @@ import os
 
 from ..constants import (
     BOT_RUNS_DIR,
-    CELL, PLAYER_SIZE,
+    CELL, PLAYER_SIZE, BASE_MOVE_SPEED, PHYSICS_TPS,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING,
     HAZARD_TYPES, SOLID_TYPES,
     T_DASH_ORB, T_DASH_ORB_GRAV,
 )
+
+# LOOKAHEAD_BY_MODE below is authored in ticks at a 60 TPS baseline; scale
+# it so the same real-world lookahead window holds at the engine's actual
+# tick rate (240 TPS post physics-bible retune -> 4 ticks per old tick).
+_TICK_SCALE = max(1, round(PHYSICS_TPS / 60.0))
 from .action_space import HUMAN, DWELL_CAP
 from .human import HumanBot
 from .sim import SimPlayer
+from ..player import Player
+from ..player.body import MirrorBody
 
 # Frames of lookahead per mode — roughly one input-to-effect cycle
 # (a cube jump arc, a ship thrust arc).
 LOOKAHEAD_BY_MODE = {
-    MODE_CUBE:   6,
-    MODE_SHIP:   8,
-    MODE_UFO:    5,
-    MODE_BALL:   5,
-    MODE_WAVE:   3,
-    MODE_SPIDER: 4,
-    MODE_SWING:  4,
+    MODE_CUBE:   6 * _TICK_SCALE,
+    MODE_SHIP:   8 * _TICK_SCALE,
+    MODE_UFO:    5 * _TICK_SCALE,
+    MODE_BALL:   5 * _TICK_SCALE,
+    MODE_WAVE:   3 * _TICK_SCALE,
+    MODE_SPIDER: 4 * _TICK_SCALE,
+    MODE_SWING:  4 * _TICK_SCALE,
 }
 
 # Dead-zone (pixels) per mode — how far off the line the controller
@@ -163,6 +170,8 @@ class PathFollowController:
 
         self._hold_state = False
         self._hold_flip_confirm = 0
+        self._last_mode = None
+        self._motion_probe = None
 
     # ---- level geometry ------------------------------------------------
 
@@ -223,40 +232,25 @@ class PathFollowController:
             return False
         if not self._hazard_cells or frames <= 0:
             return False
-        mmode = m.get("mode", MODE_CUBE)
-        mgrav = m["grav"]
         msize = int(m.get("size", PLAYER_SIZE))
-        speed = max(1.0, player.move_speed)
-        params = player.params
-        mvy = m["vy"]
-        if mmode == MODE_SHIP:
-            mvy += params.ship_gravity * mgrav
-            if held:
-                mvy -= params.ship_thrust * mgrav
-        elif mmode == MODE_WAVE:
-            mvy = speed * (-1 if held else 1) * mgrav
-        elif mmode == MODE_UFO:
-            mvy += params.gravity * mgrav
-            if held and m.get("on_ground", False):
-                mvy = params.jump_force * mgrav
-            elif pressed and not m.get("on_ground", False):
-                mvy = params.ufo_jump_force * mgrav
-        elif mmode == MODE_SWING:
-            mvy += params.gravity * mgrav
-        elif mmode == MODE_BALL:
-            mvy += params.gravity * mgrav
-            if pressed and m.get("on_ground", False):
-                mvy = params.ball_flip_force * (-mgrav)
-        elif mmode == MODE_SPIDER:
-            # A press resolves the teleport instantly, so extrapolating
-            # the fall would be a false positive. Skip the check.
-            if pressed and m.get("on_ground", False):
-                return False
-            mvy += params.gravity * mgrav
-        else:
-            mvy += params.gravity * mgrav
-            if held and m.get("on_ground", False):
-                mvy = params.jump_force * mgrav
+        speed = player.move_speed
+        # Teleports need a full world query, not linear extrapolation.
+        if m.get("mode") == MODE_SPIDER and m.get("on_ground") and (pressed or held):
+            return False
+        # Run the actual mode code against isolated body/input state.
+        # This keeps mini, robot, UFO, swing and future tuning in sync
+        # without consuming the live player's buffers or moving its world.
+        if self._motion_probe is None:
+            self._motion_probe = Player([])
+        probe = self._motion_probe
+        probe.params = player.params
+        probe.move_speed = speed
+        probe.mirror_input_buffer = getattr(player, "mirror_input_buffer", 0)
+        body = MirrorBody(**{k: m.get(k, v) for k, v in MirrorBody._DEFAULTS.items()})
+        active = not getattr(player, "_hold_consumed", False)
+        probe._apply_mode_physics(body, (held or pressed) and active,
+                                  pressed and active, held or pressed, pressed)
+        mvy = body.vy
         return self.path_crosses_hazard(
             player.x + msize / 2, m["y"] + msize / 2, speed, mvy, frames)
 
@@ -313,7 +307,9 @@ class PathFollowController:
 
         mode = player.mode
         grav = player.grav
-        speed = max(1.0, player.move_speed)
+        speed = player.move_speed
+        mode_changed = (mode != self._last_mode)
+        self._last_mode = mode
         look = LOOKAHEAD_BY_MODE.get(mode, 5)
         future_x = pcx + look * speed
 
@@ -326,7 +322,8 @@ class PathFollowController:
         if target_future is None:
             target_future = target_now
 
-        threshold = THRESHOLD_BY_MODE.get(mode, 10) * (speed / 5.0)
+        # Dead zones scale with the canonical normal run speed.
+        threshold = THRESHOLD_BY_MODE.get(mode, 10) * (speed / BASE_MOVE_SPEED)
         error_now = pcy - target_now      # +ve → below the line
         error_future = pcy - target_future
 
@@ -335,24 +332,43 @@ class PathFollowController:
             # errors and act on the average displacement.
             blended = 0.35 * error_now + 0.65 * error_future
             want_hold = blended > 0 if grav == 1 else blended < 0
+            if mode_changed:
+                want_hold = self.avoid_hazards(
+                    player, want_hold, look,
+                    lambda h: player.params.wave_velocity(
+                        speed, grav, size < PLAYER_SIZE, h),
+                    pcx, pcy, speed)
+                self._hold_state = want_hold
+                self._hold_flip_confirm = 0
+                return want_hold
             return self.hysteretic_hold(
                 self.avoid_hazards(player, want_hold, look,
-                                    lambda h: speed * (-1 if h else 1) * grav,
+                                    lambda h: player.params.wave_velocity(
+                                        speed, grav, size < PLAYER_SIZE, h),
                                     pcx, pcy, speed))
 
         if mode == MODE_SHIP:
-            v_drift = player.vy + player.params.ship_gravity * look * grav
-            y_drift = pcy + (player.vy + v_drift) * 0.5 * look
+            def _mean_vy(h):
+                vy = player.vy
+                distance = 0.0
+                for _ in range(look):
+                    vy = player.params.ship_velocity(vy, grav, size < PLAYER_SIZE, h)
+                    distance += vy
+                return distance / look
+
+            y_drift = pcy + _mean_vy(False) * look
             drift_err = y_drift - target_future
             want_hold = (drift_err > threshold if grav == 1
                          else drift_err < -threshold)
-
-            def _mean_vy(h):
-                accel = player.params.ship_gravity * grav
-                if h:
-                    accel -= player.params.ship_thrust * grav
-                return player.vy + accel * look * 0.5
-
+            if mode_changed:
+                want_hold = self.avoid_hazards(player, want_hold, look, _mean_vy,
+                                               pcx, pcy, speed)
+                self._hold_state = want_hold
+                self._hold_flip_confirm = 0
+                return want_hold
+            # Ship sections usually change direction at portal edges, so
+            # a delayed confirm makes the bot miss the first post-portal
+            # correction. Keep those flips responsive.
             return self.hysteretic_hold(
                 self.avoid_hazards(player, want_hold, look, _mean_vy,
                                     pcx, pcy, speed))
@@ -417,6 +433,7 @@ class PathFollowController:
         # A stale latch would inject a phantom hold into the next run.
         self._hold_state = False
         self._hold_flip_confirm = 0
+        self._last_mode = None
 
     def save_inputs(self, filepath=DEFAULT_INPUT_FILE):
         return save_bot_inputs(self.inputs, filepath)
@@ -565,6 +582,18 @@ class LoopholeBot:
         if not won and follow_won and seed:
             # The plain follow beat the level and the search did not
             # improve on it — keep the route the user drew.
+            inputs = seed
+            wp, mwp, won, _ = solver.replay_for_waypoints(seed)
+        elif won and follow_won and seed and len(seed) <= len(inputs):
+            # The search's early-exit termination accepts the *first*
+            # winning child it generates, not necessarily the cheapest
+            # one — so it can return a route that deviates from the
+            # drawn line even when doing so wasn't actually faster (see
+            # the module docstring: deviating is only supposed to win
+            # when it "reaches the end wall sooner"). If the plain,
+            # undeviated follow already wins in the same or fewer
+            # frames, the deviation bought nothing, so it isn't a real
+            # loophole — keep the faithful route instead.
             inputs = seed
             wp, mwp, won, _ = solver.replay_for_waypoints(seed)
         self._measure_deviation(inputs)

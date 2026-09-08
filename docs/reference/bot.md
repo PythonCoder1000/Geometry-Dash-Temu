@@ -1,4 +1,5 @@
 # The honest state of Geometry Dash bots on macOS
+> Archived research, not current setup instructions for this project.
 
 **No AI has ever beaten a Hard Demon, let alone an Extreme Demon — every "bot completion" of Tidal Wave, Acheron, Slaughterhouse or Silent Clubstep you have ever seen is a human-recorded macro played back frame-perfectly.** That is the single most important fact for a Mac user evaluating "GD bots" in 2026. The practical question is therefore not "which AI should I use" but "which macro/replay mod actually has a working macOS build through Geode, and which auto-generates macros so I don't have to record runs myself." The winning stack is **Geode + Pathfinder (auto-generates the macro) + GDH or Prism Menu's Quartz Bot (plays it back) + Click Between Frames (input precision) + ZCB Live (optional click sounds)**. Crucially, the two bots most often recommended online — **xdBot** and **MegaHack** — do not run on macOS at all, and several "Mac MegaHack" downloads circulating on itch.io are reskinned malware. Using any of these tools on rated levels invalidates Pointercrate/AREDL records and can earn a shadow-ban from RobTop's global leaderboard.
 

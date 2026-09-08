@@ -12,7 +12,7 @@ Usage:
     python scripts/bench_bots.py --levels levels/nine_circles.json
     python scripts/bench_bots.py --budgets 10 20 --engines brute_force
     python scripts/bench_bots.py --engines brute_force --pos-bucket 0.5 --vel-bucket 0.25
-    python scripts/bench_bots.py --out bench_results.json
+    python scripts/bench_bots.py --out reports/benchmarks/bench_results.json
 
 For each (level, budget, engine) combination it runs HumanBot.solve()
 once with that time_budget and reports:
@@ -32,7 +32,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.levels import load_level
+from src.levels import load_level_full
+from src.physics import PhysicsParams
 from src.bots import HumanBot
 from src.bots.action_space import HUMAN
 
@@ -45,8 +46,8 @@ DEFAULT_LEVELS = [
 ENGINES = ("astar", "brute_force")
 
 
-def run_one(objects, engine, time_budget, max_frames, pos_bucket, vel_bucket):
-    bot = HumanBot([dict(o) for o in objects])
+def run_one(objects, engine, time_budget, max_frames, pos_bucket, vel_bucket, params=None):
+    bot = HumanBot([dict(o) for o in objects], params=params)
     bot.USE_BRUTE_FORCE = (engine == "brute_force")
     bot.BRUTE_FORCE_POS_BUCKET = pos_bucket
     bot.BRUTE_FORCE_VEL_BUCKET = vel_bucket
@@ -96,7 +97,8 @@ def main():
         if not os.path.exists(level_path):
             print(f"skip (missing): {level_path}")
             continue
-        _name, objects, _music = load_level(level_path)
+        meta, objects = load_level_full(level_path)
+        params = PhysicsParams.from_meta(meta)
         print(f"\n=== {os.path.basename(level_path)} "
               f"({len(objects)} objects) ===")
         header = f"{'budget':>7} | " + " | ".join(
@@ -107,13 +109,14 @@ def main():
             row = [f"{budget:>7g}"]
             for engine in args.engines:
                 r = run_one(objects, engine, budget, args.max_frames,
-                           args.pos_bucket, args.vel_bucket)
+                           args.pos_bucket, args.vel_bucket, params=params)
                 results.append({"level": level_path, "engine": engine,
                                 "budget": budget, **r})
                 row.append(f"{_cell(r):>28}")
             print(" | ".join(row))
 
     if args.out:
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nwrote {args.out}")

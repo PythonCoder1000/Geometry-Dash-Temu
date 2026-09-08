@@ -12,12 +12,14 @@ import pygame
 from ..constants import (
     WIDTH, C_WHITE, C_GRAY, C_BTN, C_DANGER, MOVE_CURVE_SPEED_MAX,
     T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, TELEPORT_LINK_TYPES,
+    T_COLOR_TRIGGER, T_PULSE_TRIGGER,
 )
 from ..graphics import txt, draw_obj, lighter
 from ..geometry import obj_scale, normalize_rotation
 from ..objects import (
     spec_for, get_field_value, set_active_start, TYPE_NAMES,
 )
+from ..levels import get_groups
 from .state import TOP_H, BAR_Y
 from . import ops
 
@@ -29,6 +31,19 @@ HEADER_H = 104
 CURVE_H = 96
 CURVE_PAD = 8
 CURVE_HIT_R2 = 100
+
+
+def _parse_groups_text(text):
+    """"1, 2,3" -> sorted unique positive ints; malformed tokens ignored."""
+    out = set()
+    for tok in text.replace(",", " ").split():
+        try:
+            g = int(tok)
+        except ValueError:
+            continue
+        if g > 0:
+            out.add(g)
+    return sorted(out)
 
 
 class Row:
@@ -86,6 +101,8 @@ class PropPanel:
         y += ROW_H
         self.rows.append(_value_row(y, "scale", "Scale"))
         y += ROW_H
+        self.rows.append(_value_row(y, "groups", "Groups"))
+        y += ROW_H
         if single is not None:
             stack = ops.objects_at_cell(st.objects, single["x"], single["y"])
             if len(stack) > 1:
@@ -117,6 +134,9 @@ class PropPanel:
                 y += ROW_H
             elif t in TELEPORT_LINK_TYPES:
                 self.rows.append(_button_row(y, "Link partner orb/portal", "link", color=(120, 80, 190)))
+                y += ROW_H
+            if t in (T_COLOR_TRIGGER, T_PULSE_TRIGGER):
+                self.rows.append(_button_row(y, "Edit this channel's color", "edit_channel", color=(160, 100, 60)))
                 y += ROW_H
             if single is not None and t == T_MOVE_TRIGGER:
                 self.rows.append(Row("curve", "curve", "Speed curve",
@@ -151,6 +171,14 @@ class PropPanel:
             return "Mixed"
         sx, sy = vals.pop()
         return f"{sx:.2f}x" if abs(sx - sy) < 1e-6 else f"{sx:.2f} x {sy:.2f}"
+
+    @staticmethod
+    def _groups_text(objs):
+        vals = {tuple(get_groups(o)) for o in objs}
+        if len(vals) > 1:
+            return "Mixed"
+        groups = vals.pop()
+        return ",".join(str(g) for g in groups) if groups else "None"
 
     @staticmethod
     def _field_text(objs, f):
@@ -205,6 +233,8 @@ class PropPanel:
                 text = self._rotation_text(objs)
             elif row.key == "scale":
                 text = self._scale_text(objs)
+            elif row.key == "groups":
+                text = self._groups_text(objs)
             else:
                 text = self._field_text(objs, row.field)
             self._draw_box(screen, row.rect, text, mpos)
@@ -353,6 +383,19 @@ class PropPanel:
             st.push_undo()
             for o in objs:
                 ops.set_scale(o, *parsed)
+        elif row.key == "groups":
+            typed = session.ask_text("Groups (comma-separated ids, blank = none):",
+                                     ",".join(str(g) for g in get_groups(obj)))
+            if typed is None:
+                return
+            groups = _parse_groups_text(typed)
+            st.push_undo()
+            for o in objs:
+                if groups:
+                    o["groups"] = list(groups)
+                else:
+                    o.pop("groups", None)
+                o.pop("group", None)
         else:
             f = row.field
             typed = session.ask_text(f"{f.label}:", f.format(get_field_value(obj, f)))
@@ -369,6 +412,24 @@ class PropPanel:
                 o["r"] = normalize_rotation(float(o.get("r", 0)) + 90 * direction)
         elif row.key == "scale":
             ops.scale_objects(objs, direction)
+        elif row.key == "groups":
+            # + adds the next unused small group id to every selected
+            # object; - drops each object's own highest group id.
+            for o in objs:
+                groups = get_groups(o)
+                if direction > 0:
+                    existing = set(groups)
+                    gid = 1
+                    while gid in existing:
+                        gid += 1
+                    groups = sorted(existing | {gid})
+                elif groups:
+                    groups = groups[:-1]
+                if groups:
+                    o["groups"] = groups
+                else:
+                    o.pop("groups", None)
+                o.pop("group", None)
         else:
             f = row.field
             for o in objs:
