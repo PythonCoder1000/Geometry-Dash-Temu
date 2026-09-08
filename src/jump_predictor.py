@@ -21,15 +21,23 @@ from __future__ import annotations
 from typing import Optional
 
 from .constants import (
-    CELL, PLAYER_SIZE, MINI_PLAYER_SIZE, T_JUMP_PREDICTOR,
+    UNITS_PER_BLOCK, PLAYER_SIZE_UNITS, MINI_PLAYER_SIZE_UNITS,
+    PLAYER_SIZE, MINI_PLAYER_SIZE,
+    T_JUMP_PREDICTOR,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING, MODE_ROBOT,
     T_BLOCK, T_SLAB,
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     T_MODE_CUBE, T_MODE_SHIP, T_MODE_BALL, T_MODE_WAVE, T_MODE_UFO,
     T_MODE_SPIDER, T_MODE_MINI, T_MODE_BIG,
-    SPEED_VALUES, MODE_FROM_TYPE,
+    SPEED_VALUES, MODE_FROM_TYPE, PX_PER_UNIT, px_to_units,
 )
+
+# Internal simulation (SimPlayer.x/y/size) works in real GD units — see
+# docs/development/UNITS_REFACTOR.md. This module's own public contract
+# (predict()'s returned samples/spawn/size, draw_overlay, summary_text)
+# stays in px, since it's consumed directly by the editor/play renderer;
+# the px<->unit boundary is right where predict() builds its return dict.
 
 # Keep predictor cost bounded: long wave / ship flights just show a
 # truncated arc rather than hanging the editor main thread.
@@ -137,22 +145,24 @@ def _solid_rect(obj):
     if t == T_BLOCK:
         gx = int(obj["x"])
         gy = int(obj["y"])
-        return (gx * CELL, gy * CELL, CELL, CELL)
+        return (gx * UNITS_PER_BLOCK, gy * UNITS_PER_BLOCK,
+                UNITS_PER_BLOCK, UNITS_PER_BLOCK)
     if t == T_SLAB:
         gx = int(obj["x"])
         gy = int(obj["y"])
         r = int(obj.get("r", 0)) % 360
         # Local offsets match graphics._SLAB_LOCAL so the physics-side
         # collision surface is what we snap to.
+        half = UNITS_PER_BLOCK / 2.0
         if r == 0:
-            lx, ly, lw, lh = 0, CELL // 2, CELL, CELL // 2
+            lx, ly, lw, lh = 0, half, UNITS_PER_BLOCK, half
         elif r == 180:
-            lx, ly, lw, lh = 0, 0, CELL, CELL // 2
+            lx, ly, lw, lh = 0, 0, UNITS_PER_BLOCK, half
         elif r == 90:
-            lx, ly, lw, lh = 0, 0, CELL // 2, CELL
+            lx, ly, lw, lh = 0, 0, half, UNITS_PER_BLOCK
         else:
-            lx, ly, lw, lh = CELL // 2, 0, CELL // 2, CELL
-        return (gx * CELL + lx, gy * CELL + ly, lw, lh)
+            lx, ly, lw, lh = half, 0, half, UNITS_PER_BLOCK
+        return (gx * UNITS_PER_BLOCK + lx, gy * UNITS_PER_BLOCK + ly, lw, lh)
     return None
 
 
@@ -164,9 +174,9 @@ def _snap_spawn_y(objects, probe_gx: int, probe_gy: int,
     within ``_SNAP_SEARCH_CELLS``, fall back to the cell's vertical
     center — the probe is mid-air and the click will behave like a
     mid-air click (no-op for cube/ball/spider)."""
-    # Player's x-span in pixels (centered on the probe cell). Any block
-    # whose x-range overlaps this column counts as "below" / "above".
-    px_left = probe_gx * CELL + (CELL - size) / 2.0
+    # Player's x-span in GD units (centered on the probe cell). Any
+    # block whose x-range overlaps this column counts as "below" / "above".
+    px_left = probe_gx * UNITS_PER_BLOCK + (UNITS_PER_BLOCK - size) / 2.0
     px_right = px_left + size
     best = None
     for o in objects:
@@ -193,7 +203,7 @@ def _snap_spawn_y(objects, probe_gx: int, probe_gy: int,
         if best is None or dist < best[0]:
             best = (dist, resting_y)
     if best is None:
-        return probe_gy * CELL + (CELL - size) / 2.0
+        return probe_gy * UNITS_PER_BLOCK + (UNITS_PER_BLOCK - size) / 2.0
     return float(best[1])
 
 
@@ -227,9 +237,11 @@ def predict(objects, probe, params=None):
         mode = MODE_CUBE
     grav = 1 if int(probe.get("grav", 1)) >= 0 else -1
     mini = bool(probe.get("mini", False))
-    size = MINI_PLAYER_SIZE if mini else PLAYER_SIZE
-    dx_px = int(probe.get("dx", 0))
-    dy_px = int(probe.get("dy", 0))
+    size = MINI_PLAYER_SIZE_UNITS if mini else PLAYER_SIZE_UNITS
+    # The editor's dx/dy nudge fields are authored in px (nudge_fine_px /
+    # nudge_coarse_px are pixel-exact) — convert to units for the sim.
+    dx_units = px_to_units(int(probe.get("dx", 0)))
+    dy_units = px_to_units(int(probe.get("dy", 0)))
     gx = int(probe["x"])
     gy = int(probe["y"])
     # Strip the probe from the world so the simulated player can't
@@ -239,14 +251,14 @@ def predict(objects, probe, params=None):
     world = [deepcopy(o) for o in objects if o.get("t") != T_JUMP_PREDICTOR]
     if not world:
         return None
-    # Spawn: centered in the probe cell horizontally, and rested on the
-    # nearest solid surface vertically so the arc actually starts where
-    # the player would be standing. Without the snap, the spawn floats
-    # ~3 px above the real resting y and the arc visibly disagrees with
-    # real gameplay. The sub-cell nudge is applied last so the author's
-    # ±1 px tweaks ride on top of the snap.
-    spawn_x = gx * CELL + (CELL - size) / 2.0 + dx_px
-    spawn_y = _snap_spawn_y(world, gx, gy, grav, size) + dy_px
+    # Spawn (GD units): centered in the probe cell horizontally, and
+    # rested on the nearest solid surface vertically so the arc actually
+    # starts where the player would be standing. Without the snap, the
+    # spawn floats above the real resting y and the arc visibly disagrees
+    # with real gameplay. The sub-cell nudge is applied last so the
+    # author's ±1 px tweaks ride on top of the snap.
+    spawn_x = gx * UNITS_PER_BLOCK + (UNITS_PER_BLOCK - size) / 2.0 + dx_units
+    spawn_y = _snap_spawn_y(world, gx, gy, grav, size) + dy_units
 
     # Apply the speed portal chain up to the probe's x so 1.35x / 1.65x
     # sections aren't secretly simulated at 1.0x (the single biggest
@@ -257,7 +269,9 @@ def predict(objects, probe, params=None):
     sim.mode = mode
     sim.grav = grav
     sim.size = size
-    sim.move_speed = detected_speed
+    # detect_speed() returns px/frame (its own documented contract,
+    # matching SPEED_VALUES); the sim itself works in units/tick.
+    sim.move_speed = px_to_units(detected_speed)
     sim.x = float(spawn_x)
     sim.y = float(spawn_y)
     sim.vy = 0.0
@@ -276,7 +290,10 @@ def predict(objects, probe, params=None):
 
     hold = mode in _HELD_MODES
 
-    samples = [(sim.x, sim.y, sim.size)]
+    # Internal simulation is in GD units; this function's public
+    # contract (samples/spawn/size/landing/hit) is px, per its own
+    # docstring — convert once, right here, at the boundary.
+    samples = [(sim.x * PX_PER_UNIT, sim.y * PX_PER_UNIT, sim.size * PX_PER_UNIT)]
     # Per-substep hitbox trace — Player.update appends one entry to
     # this list at every collision-check point (each inner substep,
     # plus teleport brackets), so the density scales naturally with
@@ -291,24 +308,30 @@ def predict(objects, probe, params=None):
         input_pressed = is_first
         input_held = True if (is_first or hold) else False
         sim.update(input_held, input_pressed)
-        samples.append((sim.x, sim.y, sim.size))
+        samples.append((sim.x * PX_PER_UNIT, sim.y * PX_PER_UNIT,
+                        sim.size * PX_PER_UNIT))
         if not sim.alive:
-            hit = (sim.x, sim.y, sim.death_reason or "Died", sim.frame)
+            hit = (sim.x * PX_PER_UNIT, sim.y * PX_PER_UNIT,
+                   sim.death_reason or "Died", sim.frame)
             break
         # Landing only counts after the initial click has taken us off
         # the ground — otherwise frame-1 grounded state (= we never
         # left) would instantly close the arc at the spawn point.
         if not is_first and sim.on_ground:
-            landing = (sim.x, sim.y, sim.frame)
+            landing = (sim.x * PX_PER_UNIT, sim.y * PX_PER_UNIT, sim.frame)
             break
+    hitboxes_px = [
+        (hx * PX_PER_UNIT, hy * PX_PER_UNIT, hsz * PX_PER_UNIT, *rest)
+        for (hx, hy, hsz, *rest) in sim.hitbox_trace
+    ]
     return {
         "samples": samples,
-        "hitboxes": list(sim.hitbox_trace),
+        "hitboxes": hitboxes_px,
         "landing": landing,
         "hit": hit,
         "mode": mode,
-        "spawn": (spawn_x, spawn_y),
-        "size": size,
+        "spawn": (spawn_x * PX_PER_UNIT, spawn_y * PX_PER_UNIT),
+        "size": size * PX_PER_UNIT,
         "frames": len(samples) - 1,
         "speed": detected_speed,
         "grounded": grounded_at_spawn,
@@ -326,7 +349,7 @@ def nudge_coarse_px() -> int:
     re-aiming of the probe when the author is still ballparking the
     right cell before fine-tuning with the 1 px buttons."""
     from .physics import DEFAULT_PARAMS
-    return max(1, int(round(DEFAULT_PARAMS.base_move_speed)))
+    return max(1, int(round(DEFAULT_PARAMS.base_move_speed * PX_PER_UNIT)))
 
 
 def next_mode(current: str, delta: int = 1) -> str:

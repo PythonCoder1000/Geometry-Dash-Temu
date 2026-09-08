@@ -17,8 +17,9 @@ pruning.
 from typing import NamedTuple
 
 from ..constants import (
-    CELL, PLAYER_SIZE, ORB_TYPES, T_TELEPORT_PORTAL, PHYSICS_TPS,
-    MODE_CUBE, MODE_SHIP, MODE_WAVE, MODE_UFO, MODE_ROBOT,
+    UNITS_PER_BLOCK, PLAYER_SIZE_UNITS as PLAYER_SIZE, ORB_TYPES,
+    T_TELEPORT_PORTAL, PHYSICS_TPS,
+    MODE_CUBE, MODE_SHIP, MODE_WAVE, MODE_UFO, MODE_ROBOT, px_to_units,
 )
 
 # ``passed`` entries for these types gate a real future action (a
@@ -152,10 +153,10 @@ class SimPlayer(Player):
     def _nearby_for_aabb(self, left_px, top_px, right_px, bottom_px, extra=2):
         ox = self._grid_ox
         oy = self._grid_oy
-        left = left_px // CELL - extra - ox
-        right = right_px // CELL + extra - ox
-        top = top_px // CELL - extra - oy
-        bottom = bottom_px // CELL + extra - oy
+        left = int(left_px // UNITS_PER_BLOCK) - extra - ox
+        right = int(right_px // UNITS_PER_BLOCK) + extra - ox
+        top = int(top_px // UNITS_PER_BLOCK) - extra - oy
+        bottom = int(bottom_px // UNITS_PER_BLOCK) + extra - oy
         bot_vis = bool(getattr(self, "_bot_visibility", False))
         cache_key = (left, top, right, bottom, extra, bot_vis)
         if cache_key == self._nearby_cache_key:
@@ -199,10 +200,10 @@ class SimPlayer(Player):
                                   bottom_px, extra=2):
         ox = self._grid_ox
         oy = self._grid_oy
-        left = left_px // CELL - extra - ox
-        right = right_px // CELL + extra - ox
-        top = top_px // CELL - extra - oy
-        bottom = bottom_px // CELL + extra - oy
+        left = int(left_px // UNITS_PER_BLOCK) - extra - ox
+        right = int(right_px // UNITS_PER_BLOCK) + extra - ox
+        top = int(top_px // UNITS_PER_BLOCK) - extra - oy
+        bottom = int(bottom_px // UNITS_PER_BLOCK) + extra - oy
         bot_vis = bool(getattr(self, "_bot_visibility", False))
         cache_key = (left, top, right, bottom, extra, bot_vis)
         if cache_key == self._nearby_trigger_cache_key:
@@ -599,11 +600,11 @@ def dedup_key(snap):
         size = vals[20]
         move_speed = vals[10]
     if mode in _CONTINUOUS_Y_MODES:
-        y_bucket = round(y / 1.5)
-        vy_bucket = round(vy / 0.75)
+        y_bucket = round(y / px_to_units(1.5))
+        vy_bucket = round(vy / px_to_units(0.75))
     else:
-        y_bucket = round(y / 2.5)
-        vy_bucket = round(vy / 1.0)
+        y_bucket = round(y / px_to_units(2.5))
+        vy_bucket = round(vy / px_to_units(1.0))
     # Hash active animation frames + moved-object positions into the
     # dedup key. Empty tuples (no movement) collapse to a no-op.
     anims_t = snap[2] if len(snap) > 2 else ()
@@ -661,7 +662,7 @@ def dedup_key(snap):
         (my, mvy, _mgrav, _mog, _mang, malive, mmode, msize,
          _mfb, _mtd) = mirror
     mirror_buf = 1 if mirror_input_buffer > 0 else 0
-    return base + (round(my / 2.5), round(mvy / 1.0),
+    return base + (round(my / px_to_units(2.5)), round(mvy / px_to_units(1.0)),
                    1 if malive else 0, mmode, msize,
                    _mgrav, 1 if _mog else 0, mirror_buf)
 
@@ -676,11 +677,11 @@ def player_dedup_key(player):
     y = player.y
     vy = player.vy
     if mode in _CONTINUOUS_Y_MODES:
-        y_bucket = round(y / 1.5)
-        vy_bucket = round(vy / 0.75)
+        y_bucket = round(y / px_to_units(1.5))
+        vy_bucket = round(vy / px_to_units(0.75))
     else:
-        y_bucket = round(y / 2.5)
-        vy_bucket = round(vy / 1.0)
+        y_bucket = round(y / px_to_units(2.5))
+        vy_bucket = round(vy / px_to_units(1.0))
     anims = player.move_animations
     if anims:
         oid_index = player._oid_index

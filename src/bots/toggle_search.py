@@ -23,7 +23,7 @@ import random
 import time
 
 from ..constants import (
-    CELL, MODE_CUBE, MODE_BALL, MODE_SPIDER, MODE_SWING,
+    UNITS_PER_BLOCK, MODE_CUBE, MODE_BALL, MODE_SPIDER, MODE_SWING,
     MODE_ROBOT, MODE_SHIP, MODE_UFO, MODE_WAVE, T_END,
 )
 from .action_space import DWELL_CAP, HUMAN, replay_state
@@ -87,7 +87,7 @@ class ToggleSearch:
         self.fitness = fitness
         self.rng = random.Random(rng_seed)
 
-        end_xs = [o["x"] * CELL for o in self.objects if o.get("t") == T_END]
+        end_xs = [o["x"] * UNITS_PER_BLOCK for o in self.objects if o.get("t") == T_END]
         self.end_x = max(end_xs) if end_xs else 0.0
         self.horizon = self.HORIZON_MIN
 

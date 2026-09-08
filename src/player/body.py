@@ -11,7 +11,7 @@ For backwards compatibility with the bot snapshot code and older tests the
 mirror also answers dict-style access (``m["y"]``, ``m.get("mode")``).
 """
 
-from ..constants import MODE_CUBE, PLAYER_SIZE
+from ..constants import MODE_CUBE, PLAYER_SIZE_UNITS, PX_PER_UNIT
 
 
 class MirrorBody:
@@ -21,7 +21,7 @@ class MirrorBody:
 
     _DEFAULTS = {
         "y": 0.0, "vy": 0.0, "grav": -1, "on_ground": False, "angle": 0.0,
-        "alive": True, "mode": MODE_CUBE, "size": PLAYER_SIZE,
+        "alive": True, "mode": MODE_CUBE, "size": PLAYER_SIZE_UNITS,
         "flight_budget": 0, "thrust_disabled": False, "wave_vy_smooth": 0.0,
     }
 
@@ -59,6 +59,15 @@ class MirrorBody:
 
     def to_dict(self):
         return {k: getattr(self, k) for k in self._DEFAULTS}
+
+    # ---- render-space (px) compatibility --------------------------------
+    @property
+    def y_px(self):
+        return self.y * PX_PER_UNIT
+
+    @property
+    def size_px(self):
+        return self.size * PX_PER_UNIT
 
     def __repr__(self):
         return f"MirrorBody({self.to_dict()})"

@@ -248,7 +248,7 @@ check("Player spawns not won", not p.won)
 check("Player mode is cube", p.mode == MODE_CUBE)
 check("Player coins_collected empty", len(p.coins_collected) == 0)
 check("Player near start x",
-      abs(p.x - (3 * CELL + (CELL - PLAYER_SIZE) / 2)) < 1)
+      abs(p.x - (3 * C.UNITS_PER_BLOCK + (C.UNITS_PER_BLOCK - C.PLAYER_SIZE_UNITS) / 2)) < 1)
 
 # Step a few frames: player should walk forward
 x0 = p.x
@@ -339,7 +339,7 @@ p = Player(objs)
 # Walk under the ceiling; tick counts change with the default run speed.
 for _ in range(320):
     p.update(False, False)
-    if p.x >= 10 * CELL:
+    if p.x >= 10 * C.UNITS_PER_BLOCK:
         break
 check("Spider portal switched mode", p.mode == MODE_SPIDER)
 y_before = p.y
@@ -1048,8 +1048,8 @@ _saw_jump = False
 _pre_tp_x = _dp.x
 for _f in range(480):
     _pre_tp_x = _dp.x
-    _dp.update(False, _dp.x + _dp.size >= 10 * CELL - 3)
-    if _dp.x - _pre_tp_x > 100:  # instant horizontal jump = teleport
+    _dp.update(False, _dp.x + _dp.size >= 10 * C.UNITS_PER_BLOCK - C.px_to_units(3))
+    if _dp.x - _pre_tp_x > C.px_to_units(100):  # instant horizontal jump = teleport
         _saw_jump = True
         break
 check("Directional spider orb (r=90) teleports player horizontally",
@@ -1068,7 +1068,7 @@ _vp = Player(_vert_objs)
 _vp_grav_before = _vp.grav
 _saw_flip = False
 for _f in range(600):
-    _vp.update(False, _vp.x + _vp.size >= 10 * CELL - 3)
+    _vp.update(False, _vp.x + _vp.size >= 10 * C.UNITS_PER_BLOCK - C.px_to_units(3))
     if _vp.grav != _vp_grav_before:
         _saw_flip = True
         break
@@ -1167,7 +1167,8 @@ def _dash_level(extras):
 def _run_to_dash(p, orb_gx, max_frames=240):
     """Step until the orb at ``orb_gx`` has started a dash."""
     for _ in range(max_frames):
-        over = p.x + p.size > orb_gx * 50 and p.x < (orb_gx + 1) * 50
+        over = (p.x + p.size > orb_gx * C.UNITS_PER_BLOCK
+                and p.x < (orb_gx + 1) * C.UNITS_PER_BLOCK)
         p.update(over, over)
         if p.dash_timer > 0:
             return True
@@ -1235,8 +1236,8 @@ _bp = Player(_buf_level)
 _bp.mode = MODE_SHIP
 _pressed_once = False
 for _ in range(600):
-    orb1_left = _orb1_gx * CELL
-    about_to_touch = (orb1_left - (_bp.x + _bp.size)) <= 25
+    orb1_left = _orb1_gx * C.UNITS_PER_BLOCK
+    about_to_touch = (orb1_left - (_bp.x + _bp.size)) <= C.px_to_units(25)
     press_now = about_to_touch and not _pressed_once
     if press_now:
         _pressed_once = True
@@ -1263,7 +1264,7 @@ _tpp = Player(_portal_level)
 for _ in range(320):
     _tpp.update(False, False)   # never clicked — auto-run only
 check("teleport portal fires without any click",
-      _tpp.x > 20 * CELL)
+      _tpp.x > 20 * C.UNITS_PER_BLOCK)
 
 _orb_level = make_flat_level(40, extras=[
     {"t": T_TELEPORT_ORB, "x": 6, "y": 9, "group_id": 1},
@@ -1274,7 +1275,7 @@ _tpo = Player(_orb_level)
 for _ in range(320):
     _tpo.update(False, False)   # never clicked — teleport orb needs one
 check("teleport orb (unlike the portal) does NOT fire without a click",
-      _tpo.x < 20 * CELL)
+      _tpo.x < 20 * C.UNITS_PER_BLOCK)
 
 # Registry / placement wiring for the S Block.
 from src.objects import (SPECS as _SPECS, CAT_EDITOR_UTILS as _CAT_UTILS,
@@ -1305,7 +1306,7 @@ def _orb_double_touch(multi):
     back to the orb).  Returns one bool per touch: did the orb fire?"""
     orb = {"t": T_ORB, "x": 6, "y": 9, "r": 0, "multi_activate": multi}
     p = Player(_dash_level([orb]))
-    while p.x + p.size < 6 * 50 + 10:
+    while p.x + p.size < 6 * C.UNITS_PER_BLOCK + C.px_to_units(10):
         p.update(False, False)
     pose = (p.x, p.y, p.vy)
     fired = []
@@ -1318,7 +1319,7 @@ def _orb_double_touch(multi):
         # JUMP_FORCE (and other per-tick velocities) is ~4x smaller at
         # 240 TPS than at the old 60 TPS, so the "did a jump fire" drop
         # threshold shrinks with it (was 5, now 5/4).
-        fired.append(p.vy < before - 1.25)
+        fired.append(p.vy < before - C.px_to_units(1.25))
         p.update(False, False)
     return fired
 
@@ -1330,7 +1331,7 @@ check("multi_activate orb fires again on a second discrete touch",
 
 _ma_orb = {"t": T_ORB, "x": 6, "y": 9, "r": 0, "multi_activate": True}
 _ma_p = Player(_dash_level([_ma_orb]))
-while _ma_p.x + _ma_p.size < 6 * 50 + 10:
+while _ma_p.x + _ma_p.size < 6 * C.UNITS_PER_BLOCK + C.px_to_units(10):
     _ma_p.update(False, False)
 _ma_pose = (_ma_p.x, _ma_p.y, _ma_p.vy)
 _ma_p.update(True, True)
@@ -1342,7 +1343,7 @@ _ma_p.update(True, False)
 # Threshold scaled 5 -> 1.25 for the same reason as _orb_double_touch's
 # 5 -> 1.25 (JUMP_FORCE shrank ~4x under the 240 TPS tick-rate migration).
 check("multi_activate orb does not refire during the same hold",
-      _ma_p.vy > -1.25)
+      _ma_p.vy > -C.px_to_units(1.25))
 _ma_p.update(False, False)
 check("releasing clears the multi-activate hold gate", not _ma_p.held_orbs)
 check("every orb type exposes the multi_activate field",
@@ -1387,12 +1388,12 @@ _pre_x_dir = None
 _post_x_dir = None
 for _f in range(800):
     _pre_x_dir = _dp_dir.x
-    _dp_dir.update(False, _dp_dir.x + _dp_dir.size >= 10 * CELL - 3)
-    if _dp_dir.x - _pre_x_dir > 100:
+    _dp_dir.update(False, _dp_dir.x + _dp_dir.size >= 10 * C.UNITS_PER_BLOCK - C.px_to_units(3))
+    if _dp_dir.x - _pre_x_dir > C.px_to_units(100):
         _post_x_dir = _dp_dir.x
         break
 check("dir=right teleports the player horizontally",
-      _post_x_dir is not None and _post_x_dir > _pre_x_dir + 200)
+      _post_x_dir is not None and _post_x_dir > _pre_x_dir + C.px_to_units(200))
 
 
 # ---------------------------------------------------------------------------
@@ -1449,14 +1450,14 @@ check("path_crosses_hazard misses when path sits well above hazard row",
 class _FakePlayer:
     pass
 _fp = _FakePlayer()
-_fp.x = 50.0
-_fp.y = 5 * CELL
+_fp.x = C.px_to_units(50.0)
+_fp.y = 5 * C.UNITS_PER_BLOCK
 _fp.vy = 0.0
 _fp.mode = _MW
 _fp.grav = 1
 _fp.on_ground = False
-_fp.size = PLAYER_SIZE
-_fp.move_speed = float(CELL)   # exactly 1 cell per frame
+_fp.size = C.PLAYER_SIZE_UNITS
+_fp.move_speed = float(C.UNITS_PER_BLOCK)   # exactly 1 cell per frame
 _fp.params = _PP()
 _fp.dash_timer = 0
 _fp.mirror = None
@@ -1488,14 +1489,14 @@ check("wave lookahead flips decision when PD choice sails into a spike",
 #    a hazard the main's trajectory avoids. Expect the bot to prefer the
 #    alternative, even when main's own direction is safe.
 _fp2 = _FakePlayer()
-_fp2.x = 50.0
-_fp2.y = 5 * CELL
+_fp2.x = C.px_to_units(50.0)
+_fp2.y = 5 * C.UNITS_PER_BLOCK
 _fp2.vy = 0.0
 _fp2.mode = _MW
 _fp2.grav = 1
 _fp2.on_ground = False
-_fp2.size = PLAYER_SIZE
-_fp2.move_speed = float(CELL)
+_fp2.size = C.PLAYER_SIZE_UNITS
+_fp2.move_speed = float(C.UNITS_PER_BLOCK)
 _fp2.params = _PP()
 _fp2.dash_timer = 0
 # Mirror sits high in the world with grav=-1 (falls upward). Place a
@@ -1503,13 +1504,13 @@ _fp2.dash_timer = 0
 # goes down, AWAY from the spike) is safe, but releasing (direction=+1 ×
 # grav=-1 = -1, goes up, INTO the spike) kills it.
 _fp2.mirror = {
-    "y": 10 * CELL,
+    "y": 10 * C.UNITS_PER_BLOCK,
     "vy": 0.0,
     "grav": -1,
     "on_ground": False,
     "alive": True,
     "mode": _MW,
-    "size": PLAYER_SIZE,
+    "size": C.PLAYER_SIZE_UNITS,
     "angle": 0.0,
 }
 # Spike 3 cells ahead at the mirror's y-1 row (above mirror in world =
@@ -1702,7 +1703,7 @@ check("Mirror fires global triggers (bg_preset changed)",
 from src.constants import (
     T_MODE_WAVE, T_MODE_BALL, T_MODE_MINI, T_MODE_BIG,
     MODE_CUBE as _MC, MODE_WAVE as _MW, MODE_BALL as _MB,
-    MINI_PLAYER_SIZE as _MINI, PLAYER_SIZE as _BIG,
+    MINI_PLAYER_SIZE_UNITS as _MINI, PLAYER_SIZE_UNITS as _BIG,
 )
 
 # 7a. Wave portal in MIRROR's path — main stays cube, mirror becomes wave.
@@ -1798,7 +1799,7 @@ _main_jumped = False
 _mirror_jumped = False
 for _frame in range(880):
     # Click only when the player is roughly under both orbs (cell x≈18).
-    do_click = (not _clicked) and 17 * CELL <= _op.x <= 18.5 * CELL
+    do_click = (not _clicked) and 17 * C.UNITS_PER_BLOCK <= _op.x <= 18.5 * C.UNITS_PER_BLOCK
     pressed = do_click and not _clicked
     if do_click:
         _clicked = True
@@ -2210,11 +2211,11 @@ for _ in range(160):
 _spslab.update(True, True)
 # Slabs span the whole row at y=12, so whichever column the spider is
 # in when the teleport fires, slab_bottom is cell_y=12 bottom = 625.
-_slab_bottom = _slab_rect(0, 12, 180, 1.0).bottom
-_block_bottom = _cell_rect(0, 10, 1.0).bottom
+_slab_bottom = C.px_to_units(_slab_rect(0, 12, 180, 1.0).bottom)
+_block_bottom = C.px_to_units(_cell_rect(0, 10, 1.0).bottom)
 check("spider teleport lands on slab's bottom face (not phasing through)",
-      abs(_spslab.y - _slab_bottom) < 2
-      and abs(_spslab.y - _block_bottom) > 20)
+      abs(_spslab.y - _slab_bottom) < C.px_to_units(2)
+      and abs(_spslab.y - _block_bottom) > C.px_to_units(20))
 
 # Invisible flag: persisted on ANY object type (universal invisibility),
 # visible is the default, and behavior still runs when set (player
@@ -2307,11 +2308,13 @@ for gx in range(100):  # 100 blocks stacked at one column
 _dense_objs.append({"t": T_END, "x": 200, "y": 0, "r": 0})
 _sp = Player(_dense_objs)
 import pygame as _pg
-_rect = _pg.Rect(100 * CELL, 0, CELL, CELL)  # far from the dense column
+_rect = _pg.FRect(100 * C.UNITS_PER_BLOCK, 0, C.UNITS_PER_BLOCK,
+                  C.UNITS_PER_BLOCK)  # far from the dense column
 _near_far = _sp.nearby_for_rect(_rect)
 check("Spatial index: far-away rect returns few objects (not the full list)",
       len(_near_far) < 10)
-_rect2 = _pg.Rect(80 * CELL, 50 * CELL, CELL, CELL)  # inside the column
+_rect2 = _pg.FRect(80 * C.UNITS_PER_BLOCK, 50 * C.UNITS_PER_BLOCK,
+                   C.UNITS_PER_BLOCK, C.UNITS_PER_BLOCK)  # inside the column
 _near_close = _sp.nearby_for_rect(_rect2)
 check("Spatial index: close rect finds the objects in that cell range",
       len(_near_close) >= 1)
@@ -2481,10 +2484,10 @@ from src.bots import SolveProgress as _SP, win_x_for_objects as _winx
 
 _pg_lvl = make_flat_level(length=20)
 _pg_win_x = _winx(_pg_lvl)
-_pg_end_x = max(o["x"] for o in _pg_lvl if o["t"] == T_END) * C.CELL
-from src.bots.progress import TRIGGER_INFLATE_PX as _TRIG
+_pg_end_x = max(o["x"] for o in _pg_lvl if o["t"] == T_END) * C.UNITS_PER_BLOCK
+from src.bots.progress import TRIGGER_INFLATE as _TRIG
 check("win x is the end wall minus the player, not the wall itself",
-      _pg_win_x == _pg_end_x - PLAYER_SIZE - _TRIG and _pg_win_x < _pg_end_x)
+      _pg_win_x == _pg_end_x - C.PLAYER_SIZE_UNITS - _TRIG and _pg_win_x < _pg_end_x)
 
 # The x a real winning run actually stops at must read as 100%, which is
 # exactly what the old denominator got wrong.
@@ -3048,7 +3051,7 @@ def _multi_start_level():
 
 
 _ms_objs = _multi_start_level()
-_ms_expect_x = 20 * CELL + (CELL - PLAYER_SIZE) / 2
+_ms_expect_x = 20 * C.UNITS_PER_BLOCK + (C.UNITS_PER_BLOCK - C.PLAYER_SIZE_UNITS) / 2
 
 check("Start Pos declares a persisted 'active' field",
       _spec_for(T_START).field("active") is not None
@@ -3124,7 +3127,8 @@ _ms_bot = _MsHumanBot([dict(o) for o in _ms_objs])
 _ms_wp, _ms_mwp, _ms_inputs, _ms_won = _ms_bot.solve(
     None, None, max_frames=4000, time_budget=20)
 check("HumanBot's first waypoint is the active start, not the leftmost",
-      bool(_ms_wp) and abs(_ms_wp[0][0] - _ms_expect_x) < CELL)
+      bool(_ms_wp)
+      and abs(_ms_wp[0][0] - _ms_expect_x * C.PX_PER_UNIT) < CELL)
 
 
 # ---------------------------------------------------------------------------
@@ -3189,7 +3193,8 @@ _ms_play.player.save_checkpoint()
 _ms_play._handle_key(pygame.K_e)
 check("E activates the next Start Pos and restarts there",
       _active_start(_ms_play.objects)["x"] == 40
-      and _ms_play.player.x == 40 * CELL + (CELL - PLAYER_SIZE) / 2)
+      and _ms_play.player.x == 40 * C.UNITS_PER_BLOCK
+          + (C.UNITS_PER_BLOCK - C.PLAYER_SIZE_UNITS) / 2)
 check("switching Start Pos drops practice checkpoints",
       _ms_play.player.checkpoints == [])
 _ms_play._handle_key(pygame.K_q)
@@ -3204,7 +3209,8 @@ _ms_practice = _MsPlaySession(_ms_screen, _ms_clock, _multi_start_level(),
 _ms_practice._handle_key(pygame.K_q)
 check("practice mode honours Q/E too",
       _active_start(_ms_practice.objects)["x"] == 3
-      and _ms_practice.player.x == 3 * CELL + (CELL - PLAYER_SIZE) / 2)
+      and _ms_practice.player.x == 3 * C.UNITS_PER_BLOCK
+          + (C.UNITS_PER_BLOCK - C.PLAYER_SIZE_UNITS) / 2)
 
 # The monotone gate in _record_result is only escapable via a clear.
 from src import bot_menu as _ms_bm

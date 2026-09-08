@@ -86,23 +86,25 @@ class PhysicsContracts(unittest.TestCase):
         from src.player.body import MirrorBody
         p = flat()
         p.params = PhysicsParams(wave_angle=30)
-        p.mirror = MirrorBody(mode=C.MODE_WAVE, size=C.MINI_PLAYER_SIZE, grav=-1, y=200)
+        p.mirror = MirrorBody(mode=C.MODE_WAVE, size=C.MINI_PLAYER_SIZE_UNITS, grav=-1, y=200)
         controller = PathFollowController([(0, 200), (1000, 200)])
         controller._hazard_cells = {(99, 99)}
         state = p.mirror.to_dict()
         with patch.object(controller, "path_crosses_hazard", return_value=False) as estimate:
             controller.mirror_crosses_hazard(p, True, True, 10)
-        self.assertAlmostEqual(estimate.call_args.args[3], p.params.wave_velocity(p.move_speed, -1, True, True))
+        self.assertAlmostEqual(
+            estimate.call_args.args[3],
+            p.params.wave_velocity(p.move_speed, -1, True, True) * C.PX_PER_UNIT)
         self.assertEqual(p.mirror.to_dict(), state)
 
     def test_mirror_sweeps_horizontal_hazards(self):
         from src.player.body import MirrorBody
         p = Player([{"t": C.T_SPIKE, "x": 4, "y": 4}])
-        p.x = 300
-        p.mirror = MirrorBody(y=200, grav=1, mode=C.MODE_SHIP)
-        p._step_mirror(False, False, 200)
+        p.x = C.px_to_units(300)
+        p.mirror = MirrorBody(y=C.px_to_units(200), grav=1, mode=C.MODE_SHIP)
+        p._step_mirror(False, False, C.px_to_units(200))
         self.assertFalse(p.mirror.alive)
-        self.assertEqual(p.x, 300)
+        self.assertEqual(p.x, C.px_to_units(300))
 
     def test_cached_win_invalidated_by_physics_or_geometry(self):
         from src import bot_menu
@@ -133,7 +135,7 @@ class PhysicsContracts(unittest.TestCase):
         x = p.x
         for _ in range(240):
             p.update(False, False)
-        self.assertAlmostEqual((p.x - x) / C.CELL, 10.386)
+        self.assertAlmostEqual((p.x - x) / C.UNITS_PER_BLOCK, 10.386)
         self.assertTrue(p.alive and p.on_ground)
 
     def test_cube_arc_height_duration_and_distance(self):
@@ -147,9 +149,9 @@ class PhysicsContracts(unittest.TestCase):
             apex = min(apex, p.y)
             ticks += 1
         self.assertTrue(p.alive and p.on_ground)
-        self.assertTrue(2.30 < (y - apex) / C.CELL < 2.40)
+        self.assertTrue(2.30 < (y - apex) / C.UNITS_PER_BLOCK < 2.40)
         self.assertTrue(0.42 < ticks / 240 < 0.44)
-        self.assertTrue(4.35 < (p.x - x) / C.CELL < 4.55)
+        self.assertTrue(4.35 < (p.x - x) / C.UNITS_PER_BLOCK < 4.55)
 
     def test_short_tap_is_not_lost(self):
         p = flat()
@@ -173,7 +175,7 @@ class PhysicsContracts(unittest.TestCase):
         for mini in (False, True):
             p = flat()
             if mini:
-                p._set_size(C.MINI_PLAYER_SIZE)
+                p._set_size(C.MINI_PLAYER_SIZE_UNITS)
             y = p.y
             p.update(True, True)
             while p.vy < 0:
@@ -182,7 +184,7 @@ class PhysicsContracts(unittest.TestCase):
         self.assertTrue(0.60 < heights[1] / heights[0] < 0.67)
 
     def test_wave_reversal_and_mini_slope(self):
-        for size, slope in ((C.PLAYER_SIZE, 1), (C.MINI_PLAYER_SIZE, 2)):
+        for size, slope in ((C.PLAYER_SIZE_UNITS, 1), (C.MINI_PLAYER_SIZE_UNITS, 2)):
             for speed in C.SPEED_VALUES.values():
                 for grav in (1, -1):
                     p = flat()
@@ -208,7 +210,7 @@ class PhysicsContracts(unittest.TestCase):
         for tick in range(80):
             p.update(True, tick == 0)
         self.assertEqual(p.flight_budget, 0)
-        self.assertTrue(3 < (y - p.y) / C.CELL < 4)
+        self.assertTrue(3 < (y - p.y) / C.UNITS_PER_BLOCK < 4)
         p = flat()
         p.set_mode(C.MODE_ROBOT)
         p.update(True, True)
@@ -226,7 +228,7 @@ class PhysicsContracts(unittest.TestCase):
         self.assertFalse(p.on_ground)
         p.update(False, False)
         self.assertFalse(p.on_ground)
-        self.assertLess(p.y + p.size, 10 * C.CELL)
+        self.assertLess(p.y + p.size, 10 * C.UNITS_PER_BLOCK)
 
     def test_ball_press_held_before_landing_flips_once(self):
         p = flat()
@@ -255,18 +257,20 @@ class PhysicsContracts(unittest.TestCase):
     def test_landing_at_outer_feet_in_both_gravities(self):
         for grav in (1, -1):
             p = Player([{"t": C.T_BLOCK, "x": 3, "y": 5}])
-            p.x, p.grav, p.on_ground = 3 * C.CELL, grav, False
-            p.y = 5 * C.CELL - p.size + 0.1 if grav == 1 else 6 * C.CELL - 0.1
+            p.x, p.grav, p.on_ground = 3 * C.UNITS_PER_BLOCK, grav, False
+            p.y = (5 * C.UNITS_PER_BLOCK - p.size + 0.1 if grav == 1
+                   else 6 * C.UNITS_PER_BLOCK - 0.1)
             p.vy = grav
             p._resolve_y_collision(p, grav * 0.2)
             self.assertTrue(p.on_ground)
-            self.assertEqual(p.y, 5 * C.CELL - p.size if grav == 1 else 6 * C.CELL)
+            self.assertEqual(p.y, 5 * C.UNITS_PER_BLOCK - p.size if grav == 1
+                              else 6 * C.UNITS_PER_BLOCK)
 
     def test_cube_ceiling_lethal_ship_ceiling_slides(self):
         for mode, alive in ((C.MODE_CUBE, False), (C.MODE_ROBOT, False),
                             (C.MODE_SHIP, True), (C.MODE_BALL, True)):
             p = Player([{"t": C.T_BLOCK, "x": 3, "y": 5}])
-            p.x, p.y, p.mode = 3 * C.CELL, 6 * C.CELL - 0.1, mode
+            p.x, p.y, p.mode = 3 * C.UNITS_PER_BLOCK, 6 * C.UNITS_PER_BLOCK - 0.1, mode
             p._resolve_y_collision(p, -0.2)
             self.assertEqual(p.alive, alive)
 
@@ -298,11 +302,11 @@ class PhysicsContracts(unittest.TestCase):
         p.mode = C.MODE_UFO
         p.update(True, True)
         p.update(False, False)
-        self.assertLess(p.vy, -C.MAX_FALL_UFO)
+        self.assertLess(p.vy, -C.MAX_FALL_UFO_UT)
 
     def test_wave_slope_contact_is_lethal(self):
         p = Player([{"t": C.T_SLOPE, "x": 3, "y": 5, "r": 0}])
-        p.x, p.y, p.mode = 3 * C.CELL, 5 * C.CELL, C.MODE_WAVE
+        p.x, p.y, p.mode = 3 * C.UNITS_PER_BLOCK, 5 * C.UNITS_PER_BLOCK, C.MODE_WAVE
         p._resolve_slopes(p)
         self.assertFalse(p.alive)
 

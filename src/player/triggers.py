@@ -5,7 +5,7 @@ Sequence, Scale, Alpha)."""
 import math
 
 from ..constants import (
-    CELL, HEIGHT, DEFAULT_MOVE_CURVE, PHYSICS_TPS,
+    UNITS_PER_BLOCK, HEIGHT_UNITS, DEFAULT_MOVE_CURVE, PHYSICS_TPS,
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
     T_BLACKOUT_TRIGGER, T_SPAWN_TRIGGER, T_TOGGLE_TRIGGER, T_STOP_TRIGGER,
@@ -693,7 +693,8 @@ class TriggerMixin:
                 self.camera_locked = False
                 self.static_cam_group = None
                 row = o.get("cy", o["y"])
-                self.target_cam_y = row * CELL + CELL / 2 - HEIGHT / 2
+                self.target_cam_y = (row * UNITS_PER_BLOCK
+                                     + UNITS_PER_BLOCK / 2 - HEIGHT_UNITS / 2)
                 try:
                     self.cam_pan_duration = max(0.0, float(o.get("duration", 1.0)))
                 except (TypeError, ValueError):
@@ -823,8 +824,8 @@ class TriggerMixin:
         for link in self.active_follows:
             source = link["source"]
             if source is None:  # follows the live player (cell coords)
-                sx = self.x / CELL
-                sy = self.y / CELL
+                sx = self.x / UNITS_PER_BLOCK
+                sy = self.y / UNITS_PER_BLOCK
             else:
                 sx = float(source.get("_fx", source["x"]))
                 sy = float(source.get("_fy", source["y"]))

@@ -67,6 +67,16 @@ MINI_PLAYER_SIZE = 24
 
 PX_PER_UNIT = CELL / UNITS_PER_BLOCK
 VEL_PX_PER_TICK = 60.0 * PX_PER_UNIT / PHYSICS_TPS  # == PX_PER_UNIT at 60 TPS
+# Public: any px-space length/velocity/accel literal -> its GD-unit
+# equivalent (the tick-based integration means the same factor applies to
+# positions, velocities and accelerations alike). Used both to derive the
+# *_UT constants below and for one-off literal conversions in player/
+# collision code migrated to units.
+PX_TO_UNIT_RATIO = 1.0 / PX_PER_UNIT
+
+
+def px_to_units(v_px):
+    return v_px * PX_TO_UNIT_RATIO
 
 # ---------------------------------------------------------------------------
 # Canonical GD-unit constants (units/second, units/second^2).
@@ -182,6 +192,38 @@ SHIP_MAX_FALL = _ups_to_px_per_tick(SHIP_MAX_FALL_UPS)
 # toggles the gravity" — applied in core.py's MODE_SWING branch.
 SWING_VY_MULTIPLIER = 0.8
 
+# ---------------------------------------------------------------------------
+# Unit-space (GD units / GD units-per-tick) twins of the constants above,
+# for player/collision code migrated to units (see
+# docs/development/UNITS_REFACTOR.md, Phase 2/3). Derived by dividing the
+# already-verified px constant by PX_PER_UNIT rather than re-deriving from
+# the bible numbers a second time, so `value_ut * PX_PER_UNIT ==
+# value_px` is exact by construction — no room for the two families to
+# drift apart.
+# ---------------------------------------------------------------------------
+GRAVITY_UT = px_to_units(GRAVITY)
+SHIP_GRAVITY_UT = px_to_units(SHIP_GRAVITY)
+SHIP_THRUST_UT = px_to_units(SHIP_THRUST)
+JUMP_FORCE_UT = px_to_units(JUMP_FORCE)
+PAD_FORCE_UT = px_to_units(PAD_FORCE)
+BALL_FLIP_FORCE_UT = px_to_units(BALL_FLIP_FORCE)
+UFO_JUMP_FORCE_UT = px_to_units(UFO_JUMP_FORCE)
+BASE_MOVE_SPEED_UT = px_to_units(BASE_MOVE_SPEED)
+ROBOT_THRUST_UT = px_to_units(ROBOT_THRUST)
+MAX_FALL_BOX_UT = px_to_units(MAX_FALL_BOX)
+MAX_FALL_UFO_UT = px_to_units(MAX_FALL_UFO)
+MAX_RISE_UFO_UT = px_to_units(MAX_RISE_UFO)
+MAX_FALL_SWING_UT = px_to_units(MAX_FALL_SWING)
+SHIP_MAX_RISE_UT = px_to_units(SHIP_MAX_RISE)
+SHIP_MAX_FALL_UT = px_to_units(SHIP_MAX_FALL)
+PLAYER_SIZE_UNITS = px_to_units(PLAYER_SIZE)
+MINI_PLAYER_SIZE_UNITS = px_to_units(MINI_PLAYER_SIZE)
+COLLISION_SUBSTEP_UNITS = px_to_units(COLLISION_SUBSTEP_PX)
+# HEIGHT is the render/screen-space height in px (window size), used by
+# player/core.py for the "fell off the screen" bound and free-cam target
+# alongside a unit-space player position — needs the same conversion.
+HEIGHT_UNITS = px_to_units(HEIGHT)
+
 # Mini ground modes scale jump velocity by 0.8. Flying modes have their
 # own acceleration factors in core.py; extra per-level scaling stays optional.
 MINI_GRAVITY_SCALE = 1.0
@@ -197,6 +239,7 @@ MINI_WAVE_VY_SCALE = 2.0
 # the player than this (world px) are dropped so the list doesn't grow
 # without bound over a long run.
 TRAIL_MAX_DISTANCE = WIDTH * 3
+TRAIL_MAX_DISTANCE_UNITS = px_to_units(TRAIL_MAX_DISTANCE)
 
 # Orb / pad strength multipliers relative to JUMP_FORCE / PAD_FORCE.
 # Mirrors GD: pink = small, yellow = medium, red = big. No bible figure
@@ -595,6 +638,8 @@ SPEED_VALUES = {
     T_SPEED_FASTER: BASE_MOVE_SPEED * 1.502,
     T_SPEED_FASTEST: BASE_MOVE_SPEED * 1.849,
 }
+# Unit-space twin of SPEED_VALUES (see the _UT block above).
+SPEED_VALUES_UT = {k: px_to_units(v) for k, v in SPEED_VALUES.items()}
 
 # ---------------------------------------------------------------------------
 # Move trigger curve

@@ -8,13 +8,16 @@ share the player's ``x``; everything else is read from the body.
 import math
 
 from ..constants import (
-    CELL, PLAYER_SIZE, SOLID_HITBOX_FRACTION, HITBOX_SOLID_FRACTION,
+    UNITS_PER_BLOCK, PLAYER_SIZE_UNITS, SOLID_HITBOX_FRACTION,
+    HITBOX_SOLID_FRACTION,
     T_BLOCK, T_SLAB, T_SLOPE, T_START, T_SPIKE, T_HALF_SPIKE, T_SAW,
     SOLID_TYPES, MODE_WAVE, MODE_CUBE, MODE_ROBOT,
-    T_WAVE_BLOCK, T_BONK_BLOCK,
+    T_WAVE_BLOCK, T_BONK_BLOCK, px_to_units,
 )
 from ..geometry import (
-    cell_rect, slab_rect, spike_hitboxes, saw_hitbox, obj_scale,
+    cell_rect_units as cell_rect, slab_rect_units as slab_rect,
+    spike_hitboxes_units as spike_hitboxes, saw_hitbox_units as saw_hitbox,
+    obj_scale,
 )
 
 # Object types the interaction pass never reacts to.
@@ -27,11 +30,11 @@ _POSE_CACHE_KEYS = ("_srect", "_caabb", "_saw_aabb", "_sphb_aabbs")
 def solid_hitbox_fraction(mode, size):
     """Inner ("blue" solid) hitbox as a fraction of the outer box, per the
     physics bible's §3.2 per-(mode, mini) table. ``size`` decides normal vs
-    mini (mirrors the ``mini = b.size < PLAYER_SIZE`` convention used
+    mini (mirrors the ``mini = b.size < PLAYER_SIZE_UNITS`` convention used
     elsewhere in the player module)."""
     normal, mini = HITBOX_SOLID_FRACTION.get(
         mode, (SOLID_HITBOX_FRACTION, SOLID_HITBOX_FRACTION))
-    return mini if size < PLAYER_SIZE else normal
+    return mini if size < PLAYER_SIZE_UNITS else normal
 
 
 def is_non_trigger(o):
@@ -146,12 +149,12 @@ class CollisionMixin:
                                      rect.bottom, extra)
 
     def _nearby_for_aabb(self, left_px, top_px, right_px, bottom_px, extra=2):
-        """Objects in the cells around a pixel box.  Bot-only objects are
-        phantom unless ``self._bot_visibility`` is set."""
-        left = left_px // CELL - extra
-        right = right_px // CELL + extra
-        top = top_px // CELL - extra
-        bottom = bottom_px // CELL + extra
+        """Objects in the cells around a unit-space box.  Bot-only objects
+        are phantom unless ``self._bot_visibility`` is set."""
+        left = int(left_px // UNITS_PER_BLOCK) - extra
+        right = int(right_px // UNITS_PER_BLOCK) + extra
+        top = int(top_px // UNITS_PER_BLOCK) - extra
+        bottom = int(bottom_px // UNITS_PER_BLOCK) + extra
         bot_vis = self._bot_visibility
         key = (left, top, right, bottom, extra, bot_vis)
         if key == self._nearby_cache_key:
@@ -174,10 +177,10 @@ class CollisionMixin:
 
     def _nearby_triggers_for_aabb(self, left_px, top_px, right_px,
                                   bottom_px, extra=2):
-        left = left_px // CELL - extra
-        right = right_px // CELL + extra
-        top = top_px // CELL - extra
-        bottom = bottom_px // CELL + extra
+        left = int(left_px // UNITS_PER_BLOCK) - extra
+        right = int(right_px // UNITS_PER_BLOCK) + extra
+        top = int(top_px // UNITS_PER_BLOCK) - extra
+        bottom = int(bottom_px // UNITS_PER_BLOCK) + extra
         bot_vis = self._bot_visibility
         key = (left, top, right, bottom, extra, bot_vis)
         if key == self._nearby_trigger_cache_key:
@@ -237,11 +240,11 @@ class CollisionMixin:
     @staticmethod
     def _inner_bounds(x, y, size, mode=None):
         frac = solid_hitbox_fraction(mode, size)
-        inner = max(2, int(size * frac))
-        cx = round(x) + size // 2
-        cy = round(y) + size // 2
-        left = cx - inner // 2
-        top = cy - inner // 2
+        inner = max(px_to_units(2), size * frac)
+        cx = x + size / 2.0
+        cy = y + size / 2.0
+        left = cx - inner / 2.0
+        top = cy - inner / 2.0
         return left, top, left + inner, top + inner
 
     # ---- block resolution ------------------------------------------------
@@ -255,8 +258,8 @@ class CollisionMixin:
         still runs (it no-ops the actual death) so a dash that would
         have ended here still ends, instead of dashing forever."""
         size = b.size
-        px = round(self.x)
-        py = round(b.y)
+        px = self.x
+        py = b.y
         il, it, ir, ib = self._inner_bounds(self.x, b.y, size, b.mode)
         solid_rect = self._solid_rect
         for o in self._nearby_for_aabb(px, py, px + size, py + size):
@@ -295,8 +298,8 @@ class CollisionMixin:
         icon sink, then pop upward by a third of its height every landing.
         """
         size = b.size
-        px = round(self.x)
-        py = round(b.y)
+        px = self.x
+        py = b.y
         il, it, ir, ib = self._inner_bounds(self.x, b.y, size, b.mode)
         hits = []
         solid_rect = self._solid_rect
@@ -342,8 +345,8 @@ class CollisionMixin:
         if b.on_ground:
             return False
         size = b.size
-        px = round(self.x)
-        py = round(b.y)
+        px = self.x
+        py = b.y
         il, it, ir, ib = self._inner_bounds(self.x, b.y, size, b.mode)
         solid_rect = self._solid_rect
         for o in self._nearby_for_aabb(px, py, px + size, py + size):
@@ -380,10 +383,11 @@ class CollisionMixin:
         # Only preserve real contact. A hitbox-sized magnetic gap used to
         # shorten falls and permit jumps before reaching the platform.
         gap = 1e-6
-        px = round(self.x)
+        px = self.x
         edge = b.y + size if b.grav == 1 else b.y
-        p_top = math.floor(edge - 1)
-        p_bottom = math.ceil(edge + 1)
+        margin = px_to_units(1)
+        p_top = edge - margin
+        p_bottom = edge + margin
         il, _, ir, _ = self._inner_bounds(self.x, b.y, size, b.mode)
         solid_rect = self._solid_rect
         for o in self._nearby_for_aabb(px, p_top, px + size, p_bottom):
@@ -420,10 +424,10 @@ class CollisionMixin:
         # slab_rect, so a scaled slope's collision surface tracks its
         # rendered footprint instead of always using the base cell.
         sx, sy = obj_scale(o)
-        cx = o["x"] * CELL + CELL / 2.0
-        cy = o["y"] * CELL + CELL / 2.0
-        w = CELL * sx
-        h = CELL * sy
+        cx = o["x"] * UNITS_PER_BLOCK + UNITS_PER_BLOCK / 2.0
+        cy = o["y"] * UNITS_PER_BLOCK + UNITS_PER_BLOCK / 2.0
+        w = UNITS_PER_BLOCK * sx
+        h = UNITS_PER_BLOCK * sy
         cell_left = cx - w / 2.0
         cell_right = cx + w / 2.0
         px_l = max(player_left, cell_left)
@@ -445,8 +449,8 @@ class CollisionMixin:
         if not self._has_slopes:
             return
         size = b.size
-        px = round(self.x)
-        py = round(b.y)
+        px = self.x
+        py = b.y
         left = float(self.x)
         right = float(self.x + size)
         best_floor = None
@@ -465,7 +469,7 @@ class CollisionMixin:
                 best_ceiling = surface_y
         if best_floor is not None:
             bottom = b.y + size
-            if best_floor < bottom <= best_floor + CELL + 4:
+            if best_floor < bottom <= best_floor + UNITS_PER_BLOCK + px_to_units(4):
                 if b.mode == MODE_WAVE and not self._letter_block_nearby(px, py, size, T_WAVE_BLOCK):
                     self._kill(b, "Hit a slope")
                     if not self.noclip:
@@ -476,7 +480,7 @@ class CollisionMixin:
                 if b.grav == 1:
                     b.on_ground = True
         if best_ceiling is not None:
-            if best_ceiling - CELL - 4 <= b.y < best_ceiling:
+            if best_ceiling - UNITS_PER_BLOCK - px_to_units(4) <= b.y < best_ceiling:
                 if b.mode == MODE_WAVE and not self._letter_block_nearby(px, py, size, T_WAVE_BLOCK):
                     self._kill(b, "Hit a slope")
                     if not self.noclip:
@@ -531,12 +535,13 @@ class CollisionMixin:
         """Kill ``b`` if the swept box between two poses crosses a hazard
         (used by instantaneous teleports)."""
         size = b.size
-        shrink = max(2, int(6 * size / PLAYER_SIZE))
-        l = min(round(x0), round(x1)) + shrink
-        t = min(round(y0), round(y1)) + shrink
-        r = max(round(x0), round(x1)) + size - shrink
-        bt = max(round(y0), round(y1)) + size - shrink
-        for o in self._nearby_for_aabb(l - 3, t - 3, r + 3, bt + 3, 2):
+        shrink = max(px_to_units(2), px_to_units(6) * size / PLAYER_SIZE_UNITS)
+        pad = px_to_units(3)
+        l = min(x0, x1) + shrink
+        t = min(y0, y1) + shrink
+        r = max(x0, x1) + size - shrink
+        bt = max(y0, y1) + size - shrink
+        for o in self._nearby_for_aabb(l - pad, t - pad, r + pad, bt + pad, 2):
             if self._hazard_hit(o, (l, t, r, bt), None):
                 reason = ("Teleported into a saw" if o["t"] == T_SAW
                           else "Teleported into a spike")
@@ -550,15 +555,15 @@ class CollisionMixin:
         Returns ``(new_x, new_y)`` or ``None``."""
         dx, dy = direction
         size = b.size
-        pl = round(self.x)
+        pl = self.x
         pr = pl + size
-        pt = round(b.y)
+        pt = b.y
         pb = pt + size
         best = None
         solid_rect = self._solid_rect
         if dy != 0 and dx == 0:
-            lc = pl // CELL - 1
-            rc = (pr - 1) // CELL + 1
+            lc = int(pl // UNITS_PER_BLOCK) - 1
+            rc = int((pr - 1) // UNITS_PER_BLOCK) + 1
             for (gx, _gy), bucket in self._spatial_index.items():
                 if gx < lc or gx > rc:
                     continue
@@ -578,8 +583,8 @@ class CollisionMixin:
                         if best is None or d < best[0]:
                             best = (d, self.x, float(bt - size))
         elif dx != 0 and dy == 0:
-            tc = pt // CELL - 1
-            bc = (pb - 1) // CELL + 1
+            tc = int(pt // UNITS_PER_BLOCK) - 1
+            bc = int((pb - 1) // UNITS_PER_BLOCK) + 1
             for (_gx, gy), bucket in self._spatial_index.items():
                 if gy < tc or gy > bc:
                     continue

@@ -84,28 +84,51 @@ convert exactly via `px_literal * (UNITS_PER_BLOCK / CELL)` = `px_literal
       constants redefined in units/second first, px/tick derived from them.
       Zero behavior change (test_physics.py 28/28, test_game.py 504/504
       bit-for-bit). Committed `1079450`.
-- [ ] **Phase 2 — player core**: migrate `Player.x/y/vx/vy` and every
-      spawn/checkpoint/teleport/mode-transition site in `player/core.py` to
-      units.
-- [ ] **Phase 3 — collision & geometry**: add `pygame.FRect` unit-space
-      hitbox builders to `geometry.py` (parallel to the existing px-space
-      ones, additive/zero-risk first step), then migrate
-      `player/collision.py` to consume them in lockstep with Phase 2.
-- [ ] **Phase 4 — bot parity**: migrate `bots/sim.py` and
-      `jump_predictor.py` onto the same shared unit-space helpers as
-      `player/core.py`/`collision.py` (delegate, don't re-derive).
-- [ ] **Phase 5 — rendering boundary**: introduce `world_to_screen` calls in
-      `play_render.py`, `graphics.py`, `sprites.py`; remove inline
-      `gx * CELL - cam_x` math.
-      **Requires a real GUI/display playtest — cannot be verified headless.**
-- [ ] **Phase 6 — editor**: untangle `editor/state.py`'s `CELL * zoom`
-      conflation into separate unit-scale vs. camera-zoom concepts; route
-      `editor/render.py` / `editor/ops.py` through the same boundary.
+- [x] **Phase 2 — player core**: `Player.x/y/vx/vy` and every
+      spawn/checkpoint/teleport/mode-transition site in `player/core.py`
+      migrated to units. `x_px`/`y_px`/`size_px`/`target_cam_y_px`/
+      `render_pose_px()` added as the px boundary for renderers/camera.
+- [x] **Phase 3 — collision & geometry**: `pygame.FRect` unit-space hitbox
+      builders added to `geometry.py` (`cell_rect_units`, `slab_rect_units`,
+      `spike_hitboxes_units`, `pad_trigger_rect_units`, `slope_polygon_units`,
+      `saw_hitbox_units`, `rotate_local_frect`); `player/collision.py` fully
+      migrated to consume them (float, no `round()`).
+- [x] **Phase 4 — bot parity**: `bots/sim.py`, `jump_predictor.py`,
+      `bots/loophole.py`, `bots/human.py`, `bots/brute_force.py`,
+      `bots/toggle_search.py`, `bots/progress.py` all migrated to unit-space
+      internals with a px boundary at every public output (waypoints,
+      `SolveProgress`/`win_x_for_objects`, `nudge_coarse_px`,
+      `BRUTE_FORCE_POS_BUCKET`/`VEL_BUCKET`, `scripts/bench_bots.py`'s CLI
+      bucket args). Fixed several real float//int and px/unit scale-mismatch
+      bugs caught by manual review (not by any failing test) along the way —
+      see git log for `src/bots/*.py` this session.
+- [x] **Phase 5 — rendering boundary** (code-complete, playtest still
+      pending): `play.py`'s camera (`cam_x`/`cam_y`, `render_pose_px`,
+      `target_cam_y_px`), death/best-run/particle/predicted-path/checkpoint-
+      marker rendering in `play.py`/`play_render.py` all fixed to convert
+      through the px boundary instead of mixing `player.x` (units) with
+      `cam_x`/waypoints/particles (px). `graphics.py`/`sprites.py` needed no
+      changes (already pure px, grid-cell driven).
+      **Still requires a real GUI/display playtest — cannot be verified
+      headless.**
+- [x] **Phase 6 — editor** (code-complete, playtest still pending):
+      audited `editor/state.py`/`render.py`/`ops.py`/`session.py` — the
+      editor's own world/grid math is untouched (still px/CELL, by design,
+      since the level format and editor canvas stay scale-agnostic grid
+      integers). Fixed the one real bug found: `base_move_speed` (now
+      unit-scale) fed unconverted into the px-space `real_time_to_x`/
+      `x_at_time` music-preview helpers in `editor/session.py` and
+      `editor/render.py`.
       **Requires a real GUI/display playtest.**
-- [ ] **Phase 7 — play.py**: camera lead/offset and speed-portal/move-trigger
-      x-lookup tables to unit-space.
-- [ ] **Phase 8 — tests**: update `test_physics.py`/`test_game.py`
-      literal-px assertions to unit-space; full regression pass.
+- [x] **Phase 7 — play.py**: camera lead/offset, speed-portal/move-trigger/
+      teleport x-lookup tables confirmed self-consistently px (level-object
+      grid math, untouched); the actual bugs were `player.x`/`render_pose`/
+      `base_move_speed` leaking unit-scale values into this px-space code —
+      fixed as part of Phase 5/6 above.
+- [x] **Phase 8 — tests**: `test_physics.py` (28/28) and `test_game.py`
+      (504/504) fully migrated to unit-scale assertions; one genuine stale
+      test found (`wave_velocity` mirror estimate expected raw units where
+      the code now correctly returns px) and fixed rather than papered over.
 - [ ] **Phase 9 — full playtest & sign-off**: GUI playtest every gamemode,
       editor placement/zoom, bot solve on a bundled level; update
       `docs/PHYSICS.md` to describe the unit model as implemented; remove

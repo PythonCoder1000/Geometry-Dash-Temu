@@ -8,7 +8,7 @@ from ..constants import (
     WIDTH, HEIGHT, C_GRID, C_WHITE, CELL, PLAYER_START_GX,
     T_BLOCK, T_SLAB, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW, T_END,
     T_MOVE_TRIGGER, T_CAMERA_TRIGGER, T_MODE_DUAL, T_ROTATE_TRIGGER,
-    T_FOLLOW_TRIGGER, SOLID_HITBOX_FRACTION, TELEPORT_LINK_TYPES,
+    T_FOLLOW_TRIGGER, SOLID_HITBOX_FRACTION, TELEPORT_LINK_TYPES, PX_PER_UNIT,
 )
 from ..graphics import draw_bg, draw_obj, draw_end_wall
 from ..geometry import (
@@ -329,7 +329,7 @@ def render_music_playhead(screen, st):
     if pos_ms < 0:
         return
     cur_song_t = st.music_preview_offset + pos_ms / 1000.0
-    base = float(PhysicsParams.from_meta(st.level_meta).base_move_speed)
+    base = float(PhysicsParams.from_meta(st.level_meta).base_move_speed) * PX_PER_UNIT
     default_x = float(PLAYER_START_GX * CELL)
     anchor_t = real_time_to_x(st.objects, default_x, base)
     x_px = x_at_time(st.objects, cur_song_t + anchor_t, base)

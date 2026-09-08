@@ -27,12 +27,24 @@ import os
 
 from ..constants import (
     BOT_RUNS_DIR,
-    CELL, PLAYER_SIZE, BASE_MOVE_SPEED, PHYSICS_TPS,
+    CELL, PLAYER_SIZE_UNITS, BASE_MOVE_SPEED, PHYSICS_TPS,
+    PX_PER_UNIT,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING,
     HAZARD_TYPES, SOLID_TYPES,
     T_DASH_ORB, T_DASH_ORB_GRAV,
 )
+
+# Waypoints (drawn in the editor via screen_to_world) and everything
+# derived from them (DrawnPath, PATH_CORRIDOR_PX, THRESHOLD_BY_MODE,
+# hazard-cell grid math) stay in PX — that's the editor's own coordinate
+# space and doesn't change with the physics units refactor. Player state
+# (x/y/size/move_speed/vy) is real GD units internally (see
+# docs/development/UNITS_REFACTOR.md); every read of it in this file
+# converts to px immediately (PX_PER_UNIT) for comparison against the
+# path, and physics-formula calls (wave_velocity/ship_velocity/
+# _apply_mode_physics) get the raw unit-scale value back, converting
+# their result to px on the way out.
 
 # LOOKAHEAD_BY_MODE below is authored in ticks at a 60 TPS baseline; scale
 # it so the same real-world lookahead window holds at the engine's actual
@@ -232,8 +244,8 @@ class PathFollowController:
             return False
         if not self._hazard_cells or frames <= 0:
             return False
-        msize = int(m.get("size", PLAYER_SIZE))
-        speed = player.move_speed
+        msize_units = m.get("size", PLAYER_SIZE_UNITS)
+        speed_units = player.move_speed
         # Teleports need a full world query, not linear extrapolation.
         if m.get("mode") == MODE_SPIDER and m.get("on_ground") and (pressed or held):
             return False
@@ -244,15 +256,18 @@ class PathFollowController:
             self._motion_probe = Player([])
         probe = self._motion_probe
         probe.params = player.params
-        probe.move_speed = speed
+        probe.move_speed = speed_units
         probe.mirror_input_buffer = getattr(player, "mirror_input_buffer", 0)
         body = MirrorBody(**{k: m.get(k, v) for k, v in MirrorBody._DEFAULTS.items()})
         active = not getattr(player, "_hold_consumed", False)
         probe._apply_mode_physics(body, (held or pressed) and active,
                                   pressed and active, held or pressed, pressed)
-        mvy = body.vy
+        mvy_px = body.vy * PX_PER_UNIT
+        msize_px = msize_units * PX_PER_UNIT
         return self.path_crosses_hazard(
-            player.x + msize / 2, m["y"] + msize / 2, speed, mvy, frames)
+            player.x * PX_PER_UNIT + msize_px / 2,
+            m["y"] * PX_PER_UNIT + msize_px / 2,
+            speed_units * PX_PER_UNIT, mvy_px, frames)
 
     # ---- hold hysteresis -----------------------------------------------
 
@@ -293,9 +308,13 @@ class PathFollowController:
         if getattr(player, "dash_timer", 0) > 0:
             return True
 
-        size = getattr(player, "size", PLAYER_SIZE)
-        pcx = player.x + size / 2
-        pcy = player.y + size / 2
+        # Player state is real GD units internally; this controller
+        # (path, hazard cells, thresholds) works in px like the editor
+        # that drew the path — convert once, right here.
+        size_units = getattr(player, "size", PLAYER_SIZE_UNITS)
+        size = size_units * PX_PER_UNIT
+        pcx = player.x * PX_PER_UNIT + size / 2
+        pcy = player.y * PX_PER_UNIT + size / 2
 
         if self._dash_orb_cells:
             gx_now = int(pcx // CELL)
@@ -307,7 +326,8 @@ class PathFollowController:
 
         mode = player.mode
         grav = player.grav
-        speed = player.move_speed
+        speed_units = player.move_speed
+        speed = speed_units * PX_PER_UNIT
         mode_changed = (mode != self._last_mode)
         self._last_mode = mode
         look = LOOKAHEAD_BY_MODE.get(mode, 5)
@@ -332,19 +352,16 @@ class PathFollowController:
             # errors and act on the average displacement.
             blended = 0.35 * error_now + 0.65 * error_future
             want_hold = blended > 0 if grav == 1 else blended < 0
+            wave_vy_px = lambda h: player.params.wave_velocity(
+                speed_units, grav, size_units < PLAYER_SIZE_UNITS, h) * PX_PER_UNIT
             if mode_changed:
                 want_hold = self.avoid_hazards(
-                    player, want_hold, look,
-                    lambda h: player.params.wave_velocity(
-                        speed, grav, size < PLAYER_SIZE, h),
-                    pcx, pcy, speed)
+                    player, want_hold, look, wave_vy_px, pcx, pcy, speed)
                 self._hold_state = want_hold
                 self._hold_flip_confirm = 0
                 return want_hold
             return self.hysteretic_hold(
-                self.avoid_hazards(player, want_hold, look,
-                                    lambda h: player.params.wave_velocity(
-                                        speed, grav, size < PLAYER_SIZE, h),
+                self.avoid_hazards(player, want_hold, look, wave_vy_px,
                                     pcx, pcy, speed))
 
         if mode == MODE_SHIP:
@@ -352,9 +369,10 @@ class PathFollowController:
                 vy = player.vy
                 distance = 0.0
                 for _ in range(look):
-                    vy = player.params.ship_velocity(vy, grav, size < PLAYER_SIZE, h)
+                    vy = player.params.ship_velocity(
+                        vy, grav, size_units < PLAYER_SIZE_UNITS, h)
                     distance += vy
-                return distance / look
+                return (distance / look) * PX_PER_UNIT
 
             y_drift = pcy + _mean_vy(False) * look
             drift_err = y_drift - target_future
@@ -374,10 +392,11 @@ class PathFollowController:
                                     pcx, pcy, speed))
 
         if mode == MODE_UFO:
+            vy_px = player.vy * PX_PER_UNIT
             need_up = (grav == 1 and error_future > threshold
-                       and player.vy * grav > -4)
+                       and vy_px * grav > -4)
             need_down = (grav == -1 and error_future < -threshold
-                         and player.vy * grav > -4)
+                         and vy_px * grav > -4)
             return need_up or need_down
 
         if mode in (MODE_SWING, MODE_BALL, MODE_SPIDER):
@@ -515,8 +534,10 @@ class LoopholeBot:
         """
         if not self.path:
             return 0.0
-        size = getattr(player, "size", PLAYER_SIZE)
-        offset = self.path.offset(player.x + size / 2, player.y + size / 2)
+        size = getattr(player, "size", PLAYER_SIZE_UNITS) * PX_PER_UNIT
+        pcx = player.x * PX_PER_UNIT + size / 2
+        pcy = player.y * PX_PER_UNIT + size / 2
+        offset = self.path.offset(pcx, pcy)
         if offset >= PATH_CORRIDOR_PX:
             return 0.0
         return PATH_BIAS_WEIGHT * (1.0 - offset / PATH_CORRIDOR_PX)
@@ -546,11 +567,11 @@ class LoopholeBot:
             sim.update(held, pressed)
             if not sim.alive or sim.won:
                 break
-            size = sim.size
-            cx = sim.x + size / 2
+            size = sim.size * PX_PER_UNIT
+            cx = sim.x * PX_PER_UNIT + size / 2
             if cx > self.path.end_x:
                 break
-            offset = self.path.offset(cx, sim.y + size / 2)
+            offset = self.path.offset(cx, sim.y * PX_PER_UNIT + size / 2)
             total += 1
             worst = max(worst, offset)
             if offset > PATH_CORRIDOR_PX:

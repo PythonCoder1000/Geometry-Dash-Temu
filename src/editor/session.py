@@ -25,7 +25,7 @@ import pygame
 
 from ..constants import (
     WIDTH, LEVELS_DIR, T_START, TELEPORT_LINK_TYPES, T_MOVE_TRIGGER,
-    CELL, PLAYER_START_GX,
+    CELL, PLAYER_START_GX, PX_PER_UNIT,
 )
 from ..graphics import make_stars, make_mountains
 from ..input_guard import ClickGuard
@@ -270,7 +270,7 @@ class EditorSession:
         if not st.level_music:
             st.say("No music set for this level (F5 / Cycle Music to pick one)", 120)
             return
-        base = float(PhysicsParams.from_meta(st.level_meta).base_move_speed)
+        base = float(PhysicsParams.from_meta(st.level_meta).base_move_speed) * PX_PER_UNIT
         default_x = float(PLAYER_START_GX * CELL)
         target_x = float(gx) * CELL
         offset = max(0.0, real_time_to_x(st.objects, target_x, base)

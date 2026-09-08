@@ -9,7 +9,7 @@ per line trail) which was a large part of the frame budget.
 import pygame
 
 from ..constants import (
-    WIDTH, HEIGHT, PLAYER_SIZE, ALL_MODES,
+    WIDTH, HEIGHT, PLAYER_SIZE, ALL_MODES, PX_PER_UNIT,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING, MODE_ROBOT,
     C_DASH_ORB, C_PAD, C_MODE_WAVE, C_MODE_UFO, C_MODE_SPIDER,
@@ -295,9 +295,11 @@ def draw_trail(surf, trail, mode, size, col, cam_x, cam_y, flip=False):
     line_surf = _line_surface()
     half = size // 2
     drew = False
+    # Trail samples are recorded in GD units (player.core._sample_trails);
+    # this function draws in px, so convert once per sample here.
     for i in range(len(trail) - 1):
-        x1, y1 = trail[i][0], trail[i][1]
-        x2, y2 = trail[i + 1][0], trail[i + 1][1]
+        x1, y1 = trail[i][0] * PX_PER_UNIT, trail[i][1] * PX_PER_UNIT
+        x2, y2 = trail[i + 1][0] * PX_PER_UNIT, trail[i + 1][1] * PX_PER_UNIT
         sx1 = x1 - cam_x + half
         sx2 = x2 - cam_x + half
         if (sx1 < -60 and sx2 < -60) or (sx1 > WIDTH + 60 and sx2 > WIDTH + 60):
@@ -328,11 +330,16 @@ class DrawMixin:
     def draw(self, surf, cam_x, cam_y=0, alpha=None):
         """Draw trails, the main body and the mirror. ``alpha`` (0..1)
         interpolates between the previous and current physics tick so a
-        render rate above the tick rate stays smooth."""
+        render rate above the tick rate stays smooth.
+
+        Player position/size are real GD units internally; everything in
+        this method is px (screen space), so every read goes through the
+        ``*_px`` conversion properties (see docs/development/UNITS_REFACTOR.md).
+        """
         col = self._player_color()
-        size = self.size
+        size = round(self.size_px)
         draw_trail(surf, self.trail, self.mode, size, col, cam_x, cam_y)
-        x, y, angle = self.render_pose(alpha)
+        x, y, angle = self.render_pose_px(alpha)
         sx = x - cam_x
         sy = y - cam_y
         ps = self._draw_player_surface()
@@ -345,13 +352,13 @@ class DrawMixin:
         m = self.mirror
         if m is None:
             return
-        msize = int(m.size)
+        msize = round(m.size_px)
         draw_trail(surf, m.trail, m.mode, msize, col, cam_x, cam_y, flip=True)
         if alpha is None or alpha >= 1.0:
-            my, mangle = m.y, m.angle
+            my, mangle = m.y_px, m.angle
         else:
             a = max(0.0, alpha)
-            my = m.prev_y + (m.y - m.prev_y) * a
+            my = (m.prev_y + (m.y - m.prev_y) * a) * PX_PER_UNIT
             mangle = m.prev_angle + (m.angle - m.prev_angle) * a
         msurf = render_player_sprite(
             m.mode, col, self.icon_index,

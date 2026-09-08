@@ -26,7 +26,9 @@ import time
 
 import pygame
 
-from ..constants import CELL, PLAYER_SIZE, WIDTH, HEIGHT, T_END
+from ..constants import (
+    UNITS_PER_BLOCK, PLAYER_SIZE_UNITS, WIDTH, HEIGHT, T_END, px_to_units,
+)
 
 # Wall-clock cadence for repaints and for draining the event queue.
 PAINT_INTERVAL = 0.2
@@ -45,24 +47,24 @@ COLOR_SOLVED = (90, 255, 120)
 
 
 # ``Player`` tests the end wall against a trigger rect inflated by this
-# many pixels on each side, so the win fires slightly before the player's
-# true right edge reaches the wall. Mirrored here so the bar's 100% mark
-# is the x a winning run actually stops at.
-TRIGGER_INFLATE_PX = 3
+# many GD units on each side, so the win fires slightly before the
+# player's true right edge reaches the wall. Mirrored here so the bar's
+# 100% mark is the x a winning run actually stops at.
+TRIGGER_INFLATE = px_to_units(3)
 
 
-def win_x_for_objects(objects, player_size=PLAYER_SIZE):
-    """The ``player.x`` at which the level is won, or 0 if it has no end.
+def win_x_for_objects(objects, player_size=PLAYER_SIZE_UNITS):
+    """The ``player.x`` (in GD units) at which the level is won, or 0.
 
     ``Player._handle_interactions`` sets ``won`` when the player's
     inflated right edge crosses an end wall, so the winning left-edge x
     is the wall column minus the player's size and that inflation — not
     the wall column itself, which is what the bar used to divide by.
     """
-    end_xs = [o["x"] * CELL for o in objects if o.get("t") == T_END]
+    end_xs = [o["x"] * UNITS_PER_BLOCK for o in objects if o.get("t") == T_END]
     if not end_xs:
         return 0.0
-    return max(1.0, max(end_xs) - player_size - TRIGGER_INFLATE_PX)
+    return max(1.0, max(end_xs) - player_size - TRIGGER_INFLATE)
 
 
 class SolveProgress:
@@ -172,8 +174,9 @@ class SolveProgress:
         if status_text:
             txt(screen, status_text, WIDTH // 2, HEIGHT // 2 - 52, 16,
                 COLOR_STATUS, True)
-        txt(screen, f"X {int(self.best_x)}", WIDTH // 2, HEIGHT // 2 - 18,
-            18, COLOR_MUTED, True)
+        from ..constants import PX_PER_UNIT
+        txt(screen, f"X {int(self.best_x * PX_PER_UNIT)}", WIDTH // 2,
+            HEIGHT // 2 - 18, 18, COLOR_MUTED, True)
         bw = 460
         bx = WIDTH // 2 - bw // 2
         by = HEIGHT // 2 + 14

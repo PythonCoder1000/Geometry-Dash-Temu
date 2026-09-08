@@ -22,12 +22,14 @@ import math
 import pygame
 
 from ..constants import (
-    CELL, HEIGHT, PLAYER_SIZE, MINI_PLAYER_SIZE, PLAYER_START_GX,
-    TRAIL_MAX_DISTANCE, PHYSICS_TPS, INPUT_BUFFER_TICKS,
+    UNITS_PER_BLOCK, HEIGHT_UNITS, PLAYER_SIZE_UNITS, MINI_PLAYER_SIZE_UNITS,
+    PLAYER_START_GX,
+    TRAIL_MAX_DISTANCE_UNITS, PHYSICS_TPS, INPUT_BUFFER_TICKS,
     WAVE_ANGLE_SMOOTHING,
     TELEPORT_COOLDOWN_TICKS,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
-    MODE_SWING, MODE_ROBOT, MODE_FROM_TYPE, SPEED_VALUES, PLAYER_COLORS,
+    MODE_SWING, MODE_ROBOT, MODE_FROM_TYPE, SPEED_VALUES_UT as SPEED_VALUES,
+    PLAYER_COLORS,
     PLAYER_ICONS,
     T_BLOCK, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW,
     T_ORB, T_DASH_ORB_GRAV, T_TELEPORT_ORB, T_TELEPORT_PORTAL, T_BLACK_ORB,
@@ -39,12 +41,16 @@ from ..constants import (
     PAD_TYPES, ORB_TYPES, DASH_ORB_TYPES, T_DASH_STOP,
     T_JUMP_BLOCK, T_WAVE_BLOCK, T_BONK_BLOCK,
     T_ITEM_PICKUP, T_COUNT_TRIGGER, T_TIME_EVENT_TRIGGER, T_KEYFRAME,
-    COLLISION_SUBSTEP_PX, DASH_TIMER_INFINITE,
+    COLLISION_SUBSTEP_UNITS, DASH_TIMER_INFINITE,
     ORB_PINK_SCALE, ORB_RED_SCALE, PAD_PINK_SCALE, PAD_RED_SCALE,
-    MAX_FALL_BOX, MAX_FALL_UFO, MAX_RISE_UFO, MAX_FALL_SWING,
-    SWING_VY_MULTIPLIER,
+    MAX_FALL_BOX_UT as MAX_FALL_BOX, MAX_FALL_UFO_UT as MAX_FALL_UFO,
+    MAX_RISE_UFO_UT as MAX_RISE_UFO, MAX_FALL_SWING_UT as MAX_FALL_SWING,
+    SWING_VY_MULTIPLIER, px_to_units, PX_PER_UNIT,
 )
-from ..geometry import cell_rect, pad_trigger_rect, obj_scale, clamp
+from ..geometry import (
+    cell_rect_units as cell_rect, pad_trigger_rect_units as pad_trigger_rect,
+    obj_scale, clamp,
+)
 from ..levels import get_group_id, get_groups
 from ..objects import active_start
 from ..physics import DEFAULT_PARAMS
@@ -209,7 +215,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             kfs.sort(key=lambda k: k.get("order", 0))
         # End walls span the full screen height: collision is x-only.
         self._end_walls_x = sorted({
-            o["x"] * CELL for o in self.objects if o["t"] == T_END})
+            o["x"] * UNITS_PER_BLOCK for o in self.objects if o["t"] == T_END})
         # Checkpoint 7: Count / Time Event triggers watch continuously
         # (edge-triggered on their own object dict, see triggers.py's
         # _step_count_watchers) rather than only on touch/spawn, so the
@@ -358,7 +364,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # J Block (bible Sec 4.1): armed by touching one, consumed at the
         # next landing auto-jump to suppress it.
         self._jump_block_armed = False
-        self.size = PLAYER_SIZE
+        self.size = PLAYER_SIZE_UNITS
         self.coins_collected = set()
         self._mirror = None
         # Portals the mirror consumed independently (mode / size / grav).
@@ -382,20 +388,47 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
     def _spawn_point(self):
         start = self._start_object()
         if start:
-            return (float(start["x"] * CELL + (CELL - PLAYER_SIZE) / 2),
-                    float(start["y"] * CELL + (CELL - PLAYER_SIZE) / 2))
-        return float(PLAYER_START_GX * CELL), float(self._default_ground_y())
+            return (float(start["x"] * UNITS_PER_BLOCK + (UNITS_PER_BLOCK - PLAYER_SIZE_UNITS) / 2),
+                    float(start["y"] * UNITS_PER_BLOCK + (UNITS_PER_BLOCK - PLAYER_SIZE_UNITS) / 2))
+        return float(PLAYER_START_GX * UNITS_PER_BLOCK), float(self._default_ground_y())
 
     def _default_ground_y(self):
         col_blocks = [o for o in self.objects
                       if o["t"] == T_BLOCK and o["x"] == PLAYER_START_GX]
         if col_blocks:
-            return min(o["y"] for o in col_blocks) * CELL - PLAYER_SIZE
-        return 10 * CELL - PLAYER_SIZE
+            return min(o["y"] for o in col_blocks) * UNITS_PER_BLOCK - PLAYER_SIZE_UNITS
+        return 10 * UNITS_PER_BLOCK - PLAYER_SIZE_UNITS
+
+    # ---- render-space (px) compatibility -----------------------------
+    # Physics/collision above this point works entirely in real GD units
+    # (see docs/development/UNITS_REFACTOR.md). Camera, rendering, bots,
+    # jump prediction and the editor still read player position/size in
+    # px; these properties are the one conversion boundary they go
+    # through, instead of each call site re-deriving PX_PER_UNIT.
+    @property
+    def x_px(self):
+        return self.x * PX_PER_UNIT
+
+    @property
+    def y_px(self):
+        return self.y * PX_PER_UNIT
+
+    @property
+    def size_px(self):
+        return self.size * PX_PER_UNIT
+
+    @property
+    def target_cam_y_px(self):
+        return self.target_cam_y * PX_PER_UNIT
+
+    def render_pose_px(self, alpha=None):
+        """Like :meth:`render_pose`, but in px for the renderer/camera."""
+        x, y, angle = self.render_pose(alpha)
+        return x * PX_PER_UNIT, y * PX_PER_UNIT, angle
 
     # ---- rects -----------------------------------------------------------
     def rect(self):
-        return pygame.Rect(round(self.x), round(self.y), self.size, self.size)
+        return pygame.FRect(self.x, self.y, self.size, self.size)
 
     hitbox = rect
 
@@ -403,7 +436,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         """Inner death hitbox: a per-gamemode fraction of the player size,
         centred (physics bible §3.2 — see HITBOX_SOLID_FRACTION)."""
         l, t, r, b = self._inner_bounds(self.x, self.y, self.size, self.mode)
-        return pygame.Rect(l, t, r - l, b - t)
+        return pygame.FRect(l, t, r - l, b - t)
 
     def _outer_obb_corners(self):
         return obb_corners(self.x, self.y, self.size, self.angle, 1.0)
@@ -417,7 +450,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         if self.mirror_hitbox_trace is None or m is None:
             return
         self.mirror_hitbox_trace.append(
-            (self.x, m.y, int(m.size), float(m.angle)))
+            (self.x, m.y, float(m.size), float(m.angle)))
 
     def set_x(self, x):
         """Teleport horizontally (test-from-cursor spawn) keeping the
@@ -490,7 +523,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.blackout_frames = 1
         self.color_index = cp.get("color_index", 0)
         self.player_color = channel_color(self.channels, self.color_index)[:3]
-        self.size = int(cp.get("size", PLAYER_SIZE))
+        self.size = float(cp.get("size", PLAYER_SIZE_UNITS))
         self.coins_collected = set(cp.get("coins", set()))
         self.passed = set(cp.get("passed", set()))
         self.items = dict(cp.get("items", self.items_pers))
@@ -611,8 +644,8 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             return
         dests = [o for o in group if o.get("dest")]
         dest = dests[0] if dests else group[0]
-        self.x = dest["x"] * CELL + (CELL - self.size) / 2
-        self.y = dest["y"] * CELL + (CELL - self.size) / 2
+        self.x = dest["x"] * UNITS_PER_BLOCK + (UNITS_PER_BLOCK - self.size) / 2
+        self.y = dest["y"] * UNITS_PER_BLOCK + (UNITS_PER_BLOCK - self.size) / 2
         self.vy *= 0.25
         self.teleport_cooldown = TELEPORT_COOLDOWN_TICKS
         self.trail = []
@@ -639,7 +672,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         if self._swept_hazard_death(b, prev_x, prev_y, new_x, new_y) and not self.noclip:
             return
         # Beam samples so the trail reads as a continuous warp line.
-        beam_step = max(8, b.size // 2)
+        beam_step = max(px_to_units(8), b.size / 2)
         dx_b = new_x - prev_x
         dy_b = new_y - prev_y
         beam_n = max(1, int(((dx_b * dx_b + dy_b * dy_b) ** 0.5) // beam_step))
@@ -680,7 +713,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             b.y += delta
         if b is self:
             self.x += delta / 2.0
-        b.size = int(new_size)
+        b.size = float(new_size)
 
     def _set_size(self, new_size):
         self._set_body_size(self, new_size)
@@ -692,13 +725,13 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             return
         spawn_row = obj.get("spawn_y") if obj else None
         if spawn_row is not None:
-            mirror_y = float(spawn_row) * CELL
+            mirror_y = float(spawn_row) * UNITS_PER_BLOCK
         else:
-            mirror_y = HEIGHT - self.y - self.size
+            mirror_y = HEIGHT_UNITS - self.y - self.size
         self._mirror = MirrorBody(
             y=float(mirror_y), vy=-float(self.vy), grav=-self.grav,
             on_ground=bool(self._was_on_ground), angle=-float(self.angle),
-            alive=True, mode=self.mode, size=int(self.size),
+            alive=True, mode=self.mode, size=float(self.size),
             flight_budget=int(self.flight_budget),
             thrust_disabled=bool(self.thrust_disabled))
 
@@ -711,7 +744,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.on_ground = bool(m.on_ground)
         self.angle = float(m.angle)
         self.mode = m.mode
-        self.size = int(m.size)
+        self.size = float(m.size)
         self.flight_budget = int(m.flight_budget)
         self.thrust_disabled = bool(m.thrust_disabled)
         self.wave_vy_smooth = float(m.wave_vy_smooth)
@@ -750,7 +783,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         p = self.params
         mode = b.mode
         main = b is self
-        mini = b.size < PLAYER_SIZE
+        mini = b.size < PLAYER_SIZE_UNITS
         gmul = p.mini_gravity_scale if mini else 1.0
         jmul = p.mini_jump_scale if mini else 1.0
         buffered_ground_press = mode_pressed or (
@@ -987,7 +1020,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         if main:
             prev_right = self._x_at_frame_start + self.size
             for wall_x in self._end_walls_x:
-                if (tr_right > wall_x and tr_left < wall_x + CELL
+                if (tr_right > wall_x and tr_left < wall_x + UNITS_PER_BLOCK
                         and prev_right <= wall_x):
                     self.won = True
                     return True
@@ -1112,12 +1145,12 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                     body_passed.add(key)
             elif t == T_MODE_MINI:
                 if key not in body_passed:
-                    self._set_body_size(b, MINI_PLAYER_SIZE)
+                    self._set_body_size(b, MINI_PLAYER_SIZE_UNITS)
                     self._sync_prev_pose()
                     body_passed.add(key)
             elif t == T_MODE_BIG:
                 if key not in body_passed:
-                    self._set_body_size(b, PLAYER_SIZE)
+                    self._set_body_size(b, PLAYER_SIZE_UNITS)
                     self._sync_prev_pose()
                     body_passed.add(key)
             elif t == T_MODE_DUAL:
@@ -1180,12 +1213,15 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # x and a single y-spanning rectangle missed fast horizontal
         # hazards and created false hits away from the diagonal path.
         final_x = self.x
-        steps = max(1, int(math.ceil(max(abs(dx_step), abs(m.vy)) / COLLISION_SUBSTEP_PX)))
+        steps = max(1, int(math.ceil(max(abs(dx_step), abs(m.vy)) / COLLISION_SUBSTEP_UNITS)))
         input_active = input_pressed or self.mirror_input_buffer > 0
+        pad = px_to_units(3)
+        min_shrink = px_to_units(2)
+        shrink_px = px_to_units(6)
         try:
             self.x = final_x - dx_step
             for _ in range(steps):
-                old_x, old_y = round(self.x), round(m.y)
+                old_x, old_y = self.x, m.y
                 self.x += dx_step / steps
                 self._resolve_slopes(m)
                 if self._resolve_x_collision(m, dx_step / steps):
@@ -1199,20 +1235,22 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 if self._inner_in_block_dies(m) and not self.noclip:
                     return
                 size = m.size
-                shrink = max(2, int(6 * size / PLAYER_SIZE))
-                x, y = round(self.x), round(m.y)
-                trigger_rect = pygame.Rect(min(old_x, x) - 3, min(old_y, y) - 3,
-                                           abs(x - old_x) + size + 6,
-                                           abs(y - old_y) + size + 6)
-                hazard_rect = pygame.Rect(x + shrink, y + shrink,
-                                          size - shrink * 2, size - shrink * 2)
+                shrink = max(min_shrink, shrink_px * size / PLAYER_SIZE_UNITS)
+                x, y = self.x, m.y
+                trigger_rect = pygame.FRect(
+                    min(old_x, x) - pad, min(old_y, y) - pad,
+                    abs(x - old_x) + size + pad * 2,
+                    abs(y - old_y) + size + pad * 2)
+                hazard_rect = pygame.FRect(x + shrink, y + shrink,
+                                           size - shrink * 2, size - shrink * 2)
                 if self._handle_interactions(m, trigger_rect, hazard_rect, input_active):
                     return
                 input_active = self.mirror_input_buffer > 0
         finally:
             self.x = final_x
         cam_y = self.target_cam_y
-        if m.y > cam_y + HEIGHT + 300 or m.y < cam_y - 500:
+        if (m.y > cam_y + HEIGHT_UNITS + px_to_units(300)
+                or m.y < cam_y - px_to_units(500)):
             self._kill(m, "Fell off the screen")
             return
         self._check_ground_adjacency(m)
@@ -1300,7 +1338,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 self._end_dash()
         self.on_ground = False
         steps = max(1, int(math.ceil(
-            max(abs(dx), abs(self.vy)) / COLLISION_SUBSTEP_PX)))
+            max(abs(dx), abs(self.vy)) / COLLISION_SUBSTEP_UNITS)))
         dx_step = dx / steps
         # Click-edge, not sustained hold: an orb fires on the click frame
         # (or within the short buffer window after it), never merely
@@ -1309,10 +1347,12 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # them instead of only the first, unlike real GD.
         input_active = input_pressed or self.input_buffer > 0
         size = self.size
-        haz_shrink = max(2, int(6 * size / PLAYER_SIZE))
+        pad = px_to_units(3)
+        min_shrink = px_to_units(2)
+        shrink_px = px_to_units(6)
+        haz_shrink = max(min_shrink, shrink_px * size / PLAYER_SIZE_UNITS)
         for _ in range(steps):
-            prev_x_int = round(self.x)
-            prev_y_int = round(self.y)
+            prev_x, prev_y = self.x, self.y
             self.x += dx_step
             # Slope x-pass lifts the cube up a ramp before the wall test.
             self._resolve_slopes(self)
@@ -1329,18 +1369,17 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             if self._inner_in_block_dies(self) and not self.noclip:
                 self._record_hitbox()
                 return
-            cur_x_int = round(self.x)
-            cur_y_int = round(self.y)
-            tr_left = min(prev_x_int, cur_x_int) - 3
-            tr_top = min(prev_y_int, cur_y_int) - 3
-            tr_right = max(prev_x_int, cur_x_int) + size + 3
-            tr_bottom = max(prev_y_int, cur_y_int) + size + 3
-            trigger_rect = pygame.Rect(tr_left, tr_top, tr_right - tr_left,
-                                       tr_bottom - tr_top)
-            hazard_rect = pygame.Rect(cur_x_int + haz_shrink,
-                                      cur_y_int + haz_shrink,
-                                      size - haz_shrink * 2,
-                                      size - haz_shrink * 2)
+            cur_x, cur_y = self.x, self.y
+            tr_left = min(prev_x, cur_x) - pad
+            tr_top = min(prev_y, cur_y) - pad
+            tr_right = max(prev_x, cur_x) + size + pad
+            tr_bottom = max(prev_y, cur_y) + size + pad
+            trigger_rect = pygame.FRect(tr_left, tr_top, tr_right - tr_left,
+                                        tr_bottom - tr_top)
+            hazard_rect = pygame.FRect(cur_x + haz_shrink,
+                                       cur_y + haz_shrink,
+                                       size - haz_shrink * 2,
+                                       size - haz_shrink * 2)
             if self._handle_interactions(self, trigger_rect, hazard_rect,
                                          input_active):
                 self._check_ground_adjacency(self)
@@ -1348,7 +1387,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 return
             input_active = self.input_buffer > 0
             size = self.size  # portals may have resized us mid-frame
-            haz_shrink = max(2, int(6 * size / PLAYER_SIZE))
+            haz_shrink = max(min_shrink, shrink_px * size / PLAYER_SIZE_UNITS)
         self._check_ground_adjacency(self)
         if self.mode == MODE_ROBOT and self.on_ground:
             self.flight_budget = int(self.params.robot_flight_seconds * PHYSICS_TPS)
@@ -1360,9 +1399,10 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             # same target for the *visual* eased camera; this keeps the
             # physics check (bots, jump predictor, headless sims — none of
             # which run _tick_camera) in sync without needing that call.
-            self.target_cam_y = self.y + self.size / 2 - HEIGHT / 2
+            self.target_cam_y = self.y + self.size / 2 - HEIGHT_UNITS / 2
         cam_y = self.target_cam_y
-        if self.y > cam_y + HEIGHT + 300 or self.y < cam_y - 500:
+        if (self.y > cam_y + HEIGHT_UNITS + px_to_units(300)
+                or self.y < cam_y - px_to_units(500)):
             self._kill(self, "Fell off the screen")
             return
         if self._mirror is not None:
@@ -1394,7 +1434,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             m = self._mirror
             if m is not None and m.alive:
                 m.trail.append([self.x, m.y, m.angle, 100])
-        cutoff = self.x - TRAIL_MAX_DISTANCE
+        cutoff = self.x - TRAIL_MAX_DISTANCE_UNITS
         if self.trail:
             self.trail = [seg for seg in self.trail if seg[0] > cutoff]
         m = self._mirror

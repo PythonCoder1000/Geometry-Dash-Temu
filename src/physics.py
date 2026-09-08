@@ -28,26 +28,31 @@ non-finite values are ignored; numeric strings are accepted.
 from dataclasses import dataclass, fields
 import math
 
+# Unit-space (GD units / units-per-tick) constants — see
+# docs/development/UNITS_REFACTOR.md. PhysicsParams now hands out values
+# in real GD units so player/core.py's integration is unit-native; the
+# legacy px-per-tick constants in constants.py remain only as the
+# derivation source (value_ut * PX_PER_UNIT == value_px, exact).
 from .constants import (
-    GRAVITY as _GRAVITY,
-    SHIP_GRAVITY as _SHIP_GRAVITY,
-    SHIP_THRUST as _SHIP_THRUST,
-    JUMP_FORCE as _JUMP_FORCE,
-    PAD_FORCE as _PAD_FORCE,
-    BALL_FLIP_FORCE as _BALL_FLIP_FORCE,
+    GRAVITY_UT as _GRAVITY,
+    SHIP_GRAVITY_UT as _SHIP_GRAVITY,
+    SHIP_THRUST_UT as _SHIP_THRUST,
+    JUMP_FORCE_UT as _JUMP_FORCE,
+    PAD_FORCE_UT as _PAD_FORCE,
+    BALL_FLIP_FORCE_UT as _BALL_FLIP_FORCE,
     DASH_SPEED as _DASH_SPEED,
     DASH_TIME as _DASH_TIME,
     WAVE_ANGLE as _WAVE_ANGLE,
-    UFO_JUMP_FORCE as _UFO_JUMP_FORCE,
-    BASE_MOVE_SPEED as _BASE_MOVE_SPEED,
+    UFO_JUMP_FORCE_UT as _UFO_JUMP_FORCE,
+    BASE_MOVE_SPEED_UT as _BASE_MOVE_SPEED,
     SPIDER_TELEPORT_RANGE as _SPIDER_TELEPORT_RANGE,
-    ROBOT_THRUST as _ROBOT_THRUST,
+    ROBOT_THRUST_UT as _ROBOT_THRUST,
     ROBOT_FLIGHT_SECONDS as _ROBOT_FLIGHT_SECONDS,
     MINI_GRAVITY_SCALE as _MINI_GRAVITY_SCALE,
     MINI_JUMP_SCALE as _MINI_JUMP_SCALE,
     MINI_WAVE_ANGLE_SCALE as _MINI_WAVE_ANGLE_SCALE,
     MINI_WAVE_VY_SCALE as _MINI_WAVE_VY_SCALE,
-    SHIP_MAX_RISE, SHIP_MAX_FALL,
+    SHIP_MAX_RISE_UT as SHIP_MAX_RISE, SHIP_MAX_FALL_UT as SHIP_MAX_FALL,
 )
 
 

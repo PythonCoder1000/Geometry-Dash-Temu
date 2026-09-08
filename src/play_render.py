@@ -19,7 +19,7 @@ import numpy as np
 import pygame
 
 from .constants import (
-    WIDTH, HEIGHT, CELL, PLAYER_SIZE, PHYSICS_TPS,
+    WIDTH, HEIGHT, CELL, PLAYER_SIZE, PHYSICS_TPS, PX_PER_UNIT,
     C_DARK, C_PLAYER, C_GRAY, C_WHITE, C_BTN, C_COIN, C_SUCCESS, C_DANGER,
     BG_PRESETS, T_COIN, T_END, T_TELEPORT_ORB, T_TELEPORT_PORTAL, T_SPIDER_ORB,
     T_ITEM_COUNTER,
@@ -360,8 +360,8 @@ def render_player_and_particles(screen, player, particles, death_timer,
             # Center on the player's visual midpoint, which shrinks
             # with `player.size` in mini mode — a fixed +22 offset
             # placed the ring 10 px off-center for mini cubes.
-            cx = int(player.x - cam_x - shake_x + player.size / 2)
-            cy = int(player.y - cam_y - shake_y + player.size / 2)
+            cx = int(player.x_px - cam_x - shake_x + player.size_px / 2)
+            cy = int(player.y_px - cam_y - shake_y + player.size_px / 2)
             ring_side = radius * 2 + 8
             ring_surf = pygame.Surface((ring_side, ring_side), pygame.SRCALPHA)
             pygame.draw.circle(ring_surf, (255, 200, 80, alpha),
@@ -378,8 +378,8 @@ def render_checkpoint_markers(screen, practice_mode, player, pulse,
     pulse_t = (pulse % PHYSICS_TPS) / PHYSICS_TPS  # `pulse` ticks once/tick
     glow = int(90 + 40 * math.sin(pulse_t * math.tau))
     for i, cp in enumerate(player.checkpoints):
-        fx = int(cp["x"] - cam_x - shake_x)
-        fy = int(cp["y"] - cam_y - shake_y)
+        fx = int(cp["x"] * PX_PER_UNIT - cam_x - shake_x)
+        fy = int(cp["y"] * PX_PER_UNIT - cam_y - shake_y)
         # Cull off-screen markers cheaply.
         if fx < -40 or fx > WIDTH + 40:
             continue
@@ -865,7 +865,7 @@ def render_state_hud(screen, show_state, player):
         MODE_CUBE as MC, MODE_SHIP as MS, MODE_BALL as MB,
         MODE_WAVE as MW, MODE_UFO as MU, MODE_SPIDER as MSP,
         MODE_SWING as MSW, MODE_ROBOT as MR,
-        MINI_PLAYER_SIZE as MINI,
+        MINI_PLAYER_SIZE_UNITS as MINI,
         C_MODE_CUBE as C_CUBE, C_MODE_SHIP as C_SHIP, C_MODE_BALL as C_BALL,
         C_MODE_WAVE as C_WAVE, C_MODE_UFO as C_UFO, C_MODE_SPIDER as C_SPIDER,
         C_MODE_SWING as C_SWING, C_MODE_ROBOT as C_ROBOT,
@@ -897,7 +897,8 @@ def render_state_hud(screen, show_state, player):
     grav_col = neutral if grav_label == "Normal" else accent
     dual_col = neutral if player.mirror is None else accent
     tw_col = neutral if abs(tw - 1.0) < 0.01 else accent
-    cell_x = int(player.x // CELL)
+    from .constants import UNITS_PER_BLOCK
+    cell_x = int(player.x // UNITS_PER_BLOCK)
     state_lines = [
         ("Mode",     mode_label,                     mode_col),
         ("Speed",    f"{speed_mult:.2f}x",           speed_col),
@@ -905,7 +906,7 @@ def render_state_hud(screen, show_state, player):
         ("Gravity",  grav_label,                     grav_col),
         ("Dual",     dual_label,                     dual_col),
         ("Time",     f"{tw:.2f}x",                   tw_col),
-        ("Pos",      f"x={player.x:.0f} (cell {cell_x})", neutral),
+        ("Pos",      f"x={player.x_px:.0f} (cell {cell_x})", neutral),
     ]
     sw, sh = 220, 14 * len(state_lines) + 30
     sx0 = WIDTH - sw - 10

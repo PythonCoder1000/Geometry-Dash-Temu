@@ -23,13 +23,13 @@ import sys
 import pygame
 
 from .constants import (
-    WIDTH, HEIGHT, CELL, PLAYER_START_GX, PHYSICS_TPS,
+    WIDTH, HEIGHT, CELL, UNITS_PER_BLOCK, PLAYER_START_GX, PHYSICS_TPS,
     C_PLAYER, C_BG_TOP, C_BG_BOT, C_DASH_ORB,
     DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES,
     T_COIN, T_ORB, T_DASH_ORB, T_DASH_ORB_GRAV, T_BLACK_ORB,
     T_BLUE_ORB, T_GREEN_ORB, T_SPIDER_ORB, T_RED_ORB, T_PINK_ORB,
     T_GRAV_UP, T_GRAV_DOWN, T_TIME_WARP, SPEED_VALUES, T_END,
-    TELEPORT_LINK_TYPES,
+    TELEPORT_LINK_TYPES, px_to_units, PX_PER_UNIT,
 )
 from .graphics import (
     make_rect, make_stars, make_mountains,
@@ -316,7 +316,7 @@ class PlaySession:
         end_xs = [o["x"] for o in self.objects if o["t"] == T_END]
         rightmost_gx = (min(end_xs) if end_xs
                         else max((o["x"] for o in self.objects), default=10))
-        self.max_x = rightmost_gx * CELL + CELL
+        self.max_x = rightmost_gx * UNITS_PER_BLOCK + UNITS_PER_BLOCK
         self.player = Player(self.objects, params=PhysicsParams.from_meta(meta),
                             channels=channels_from_meta(meta))
         self.player.practice_mode = practice_mode
@@ -405,8 +405,8 @@ class PlaySession:
         self.bg_bot = [float(c) for c in C_BG_BOT]
         self._init_attempt_state()
         if self.start_x is not None:
-            self.player.set_x(self.start_x)
-        self.cam_x = self.player.x - CAMERA_LEAD_PX
+            self.player.set_x(px_to_units(self.start_x))
+        self.cam_x = self.player.x_px - CAMERA_LEAD_PX
 
     # ---- attempt lifecycle -------------------------------------------------
     def _init_attempt_state(self):
@@ -433,13 +433,13 @@ class PlaySession:
     def _music_offset_seconds(self):
         """Seek offset so the music matches a mid-level spawn.  t=0 is
         the default spawn column, not world x=0."""
-        spawn_x = float(self.player.x)
+        spawn_x = self.player.x_px
         if self.start_x is not None:
             spawn_x = max(spawn_x, self.start_x)
         default_x = float(PLAYER_START_GX * CELL)
         if spawn_x <= default_x + 1.0:
             return 0.0
-        base = float(self.player.params.base_move_speed)
+        base = float(self.player.params.base_move_speed) * PX_PER_UNIT
         return max(0.0, real_time_to_x(self.objects, spawn_x, base)
                    - real_time_to_x(self.objects, default_x, base))
 
@@ -479,12 +479,12 @@ class PlaySession:
         self.current_mirror_hitboxes.clear()
         self.player.reset()
         if self.start_x is not None:
-            self.player.set_x(self.start_x)
+            self.player.set_x(px_to_units(self.start_x))
         self.attempts += 1
         self._init_attempt_state()
         if self.bot_controller:
             self.bot_controller.reset()
-        self.cam_x = self.player.x - CAMERA_LEAD_PX
+        self.cam_x = self.player.x_px - CAMERA_LEAD_PX
         self.cam_y = 0.0
         self.prev_cam_y = 0.0
         self._cam_pan_target = 0.0
@@ -836,17 +836,18 @@ class PlaySession:
         if self.playback_wp_sorted and self.playback_inputs is not None:
             self._check_playback_drift()
         if p.alive and p.dash_timer > 0:
-            self.particles.dash_trail(p.x + p.size / 2, p.y + p.size / 2,
-                                      p.dash_vx, p.dash_vy, C_DASH_ORB)
+            self.particles.dash_trail(p.x_px + p.size_px / 2, p.y_px + p.size_px / 2,
+                                      p.dash_vx * PX_PER_UNIT, p.dash_vy * PX_PER_UNIT,
+                                      C_DASH_ORB)
         self.attempt_frames += 1
         if self.attempt_frames % 2 == 0:
-            self.current_run.append((self.attempt_frames, p.x, p.y))
+            self.current_run.append((self.attempt_frames, p.x_px, p.y_px))
         if p.camera_locked and p.static_cam_group:
             ctr = self._static_group_center()
             if ctr is not None:
                 self.cam_x = ctr[0] - CAMERA_LEAD_PX
         elif not p.camera_locked:
-            self.cam_x = p.x - CAMERA_LEAD_PX
+            self.cam_x = p.x_px - CAMERA_LEAD_PX
         after_passed = set(p.passed)
         _play_interaction_sounds(
             before_passed, after_passed, before_pads,
@@ -882,7 +883,7 @@ class PlaySession:
         """Compare live y against the recorded waypoint at this x so a
         desynced replay is flagged before it dies to a 'ghost spike'."""
         p = self.player
-        px = p.x + p.size / 2
+        px = p.x_px + p.size_px / 2
         xs = self.playback_wp_xs
         pts = self.playback_wp_sorted
         if px <= xs[0]:
@@ -902,7 +903,7 @@ class PlaySession:
             span = x1 - x0
             t = 0.0 if span <= 1e-9 else (px - x0) / span
             exp_y = y0 + (y1 - y0) * t
-        drift = abs((p.y + p.size / 2) - exp_y)
+        drift = abs((p.y_px + p.size_px / 2) - exp_y)
         self.desync_max_px = max(self.desync_max_px, drift)
         if drift > DESYNC_ALERT_PX:
             self.desync_alert_timer = 120  # 30 * 4 (same real-time duration, 240 TPS)
@@ -911,12 +912,12 @@ class PlaySession:
 
     def _on_death(self):
         p = self.player
-        self.particles.explosion(p.x + p.size / 2, p.y + p.size / 2, C_PLAYER)
+        self.particles.explosion(p.x_px + p.size_px / 2, p.y_px + p.size_px / 2, C_PLAYER)
         apply_shake(12)
         sfx.play("death", 0.6)
         if self.level_music:
             music.stop()
-        self.death_hitbox = (p.x, p.y, p.size, p.angle, p.death_reason)
+        self.death_hitbox = (p.x_px, p.y_px, p.size_px, p.angle, p.death_reason)
         self.death_timer = DEATH_FRAMES
         self.death_slowmo_timer = DEATH_SLOWMO_FRAMES
         self.death_flash_timer = 30
@@ -956,15 +957,15 @@ class PlaySession:
                 # overrides the smoothing constant while active.
                 self._cam_pan_len = 1
                 ease = p.cam_guide_ease if p.cam_guide_ease is not None else CAM_Y_EASE
-                dy = (p.target_cam_y - self.cam_y) * ease
+                dy = (p.target_cam_y_px - self.cam_y) * ease
                 self.cam_y += max(-CAM_Y_MAX_STEP, min(CAM_Y_MAX_STEP, dy))
             else:
                 # One-shot "pan" trigger: ease smoothly to the target
                 # over the trigger's configured duration instead of a
                 # magic-number exponential chase, so mappers control how
                 # smooth/fast the transition looks.
-                if p.target_cam_y != self._cam_pan_target:
-                    self._cam_pan_target = p.target_cam_y
+                if p.target_cam_y_px != self._cam_pan_target:
+                    self._cam_pan_target = p.target_cam_y_px
                     self._cam_pan_start = self.cam_y
                     self._cam_pan_timer = 0
                     self._cam_pan_len = max(1, round(p.cam_pan_duration * PHYSICS_RATE))
@@ -1015,7 +1016,7 @@ class PlaySession:
         # Interpolate between the last two ticks; while the game is not
         # advancing (pause / dead) draw the latest pose.
         alpha = self.sim_accum if (p.alive and not p.won and not self.paused) else 1.0
-        rx, _ry, _ = p.render_pose(alpha)
+        rx, _ry, _ = p.render_pose_px(alpha)
         cam_x = (rx - CAMERA_LEAD_PX
                  if self.death_timer == 0 and not p.camera_locked
                  else self.cam_x)
@@ -1041,7 +1042,7 @@ class PlaySession:
                             self.hint_path, self.hint_mirror_path, cam_x, cam_y,
                             shake_x, shake_y)
         render_predicted_path(s, os_, self.CLEAR, self.pred_path_sorted,
-                              self.pred_path_xs, p.x, p.size, cam_x, cam_y,
+                              self.pred_path_xs, p.x_px, p.size_px, cam_x, cam_y,
                               shake_x, shake_y)
         render_ghost_paths(s, os_, self.CLEAR, self.ghost_paths, self.bot_frame,
                            self.playback_inputs, self.bot_controller,

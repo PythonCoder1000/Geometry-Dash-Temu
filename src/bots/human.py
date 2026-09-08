@@ -34,10 +34,11 @@ import time
 _os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "hide")
 
 from ..constants import (
-    CELL, HEIGHT, PLAYER_SIZE,
+    UNITS_PER_BLOCK, HEIGHT_UNITS, PLAYER_SIZE_UNITS, PX_PER_UNIT,
+    px_to_units,
     MODE_CUBE, MODE_BALL, MODE_SPIDER,
     HAZARD_TYPES, ORB_TYPES,
-    T_END, T_SPEED_NORMAL, SPEED_VALUES,
+    T_END, T_SPEED_NORMAL, SPEED_VALUES_UT as SPEED_VALUES,
     T_COIN, T_JUMP_PREDICTOR, T_BOT_CHECKPOINT,
 )
 from ..player import Player
@@ -107,7 +108,7 @@ class CheckpointLadder:
     # Cells of forward progress between committed rungs.  Too fine and
     # the ladder is thousands of near-identical prefixes; too coarse and
     # a walk-back throws away more work than the stall cost.
-    STRIDE_PX = CELL * 4
+    STRIDE_PX = UNITS_PER_BLOCK * 4
 
     def __init__(self):
         self.rungs = [(0.0, [])]
@@ -189,8 +190,8 @@ class HumanBot:
     USE_BRUTE_FORCE = False
     # Dedup granularity passed straight through to BruteForceSearch —
     # see that module's docstring for the completeness/speed tradeoff.
-    BRUTE_FORCE_POS_BUCKET = 1.0
-    BRUTE_FORCE_VEL_BUCKET = 0.5
+    BRUTE_FORCE_POS_BUCKET = px_to_units(1.0)
+    BRUTE_FORCE_VEL_BUCKET = px_to_units(0.5)
     # Opt-in multi-process macro-scan for BruteForceSearch — see that
     # module's "Parallel search" block for the design and the earlier
     # CPU-peg / unresponsive-ESC bug it's built to avoid. Off by
@@ -215,7 +216,7 @@ class HumanBot:
         self.progress_title = "HUMAN BOT SEARCH"
         self._deadline = None
 
-        end_xs = [o["x"] * CELL for o in objects if o["t"] == T_END]
+        end_xs = [o["x"] * UNITS_PER_BLOCK for o in objects if o["t"] == T_END]
         self.end_x = max(end_xs) if end_xs else 0
         self.has_end = bool(end_xs)
         self.win_x = win_x_for_objects(objects)
@@ -239,7 +240,7 @@ class HumanBot:
         # A real drop can run several screen heights before it's done;
         # too tight a margin kills a still-recoverable fall before it
         # ever reaches what it was falling toward.
-        self._void_y = max_y * CELL + HEIGHT * 4
+        self._void_y = max_y * UNITS_PER_BLOCK + HEIGHT_UNITS * 4
 
         self._orb_cells = set()
         for o in objects:
@@ -251,8 +252,8 @@ class HumanBot:
         for o in objects:
             if o.get("t") != T_COIN:
                 continue
-            cx = o["x"] * CELL + CELL // 2
-            cy = o["y"] * CELL + CELL // 2
+            cx = o["x"] * UNITS_PER_BLOCK + UNITS_PER_BLOCK // 2
+            cy = o["y"] * UNITS_PER_BLOCK + UNITS_PER_BLOCK // 2
             for dgx in range(-6, 1):
                 self._coin_objs_for_gx.setdefault(o["x"] + dgx, []).append(
                     (cx, cy))
@@ -260,8 +261,8 @@ class HumanBot:
                                if o.get("t") == T_JUMP_PREDICTOR)
 
         self._checkpoints = sorted(
-            ((int(o["x"]) * CELL + CELL // 2,
-              int(o["y"]) * CELL + CELL // 2)
+            ((int(o["x"]) * UNITS_PER_BLOCK + UNITS_PER_BLOCK // 2,
+              int(o["y"]) * UNITS_PER_BLOCK + UNITS_PER_BLOCK // 2)
              for o in objects if o.get("t") == T_BOT_CHECKPOINT),
             key=lambda p: p[0])
         self._checkpoint_xs = [c[0] for c in self._checkpoints]
@@ -326,7 +327,7 @@ class HumanBot:
         base_speed = (self.params.base_move_speed if self.params is not None
                       else SPEED_VALUES[T_SPEED_NORMAL])
         events = sorted(
-            ((int(o["x"]) * CELL, SPEED_VALUES[o["t"]])
+            ((int(o["x"]) * UNITS_PER_BLOCK, SPEED_VALUES[o["t"]])
              for o in self.objects if o.get("t") in SPEED_VALUES),
             key=lambda e: e[0])
         seg_starts = [0]
@@ -348,12 +349,12 @@ class HumanBot:
             if seg_speeds[i] > 0:
                 running += seg_len / seg_speeds[i]
 
-        n_cells = self.end_x // CELL + 2 if self.end_x > 0 else 1
+        n_cells = int(self.end_x // UNITS_PER_BLOCK) + 2 if self.end_x > 0 else 1
         recips = [0.0] * n_cells
         seg_end_px = [self.end_x] * n_cells
         cumul_after = [0.0] * n_cells
         for cell in range(n_cells):
-            x_px = cell * CELL
+            x_px = cell * UNITS_PER_BLOCK
             i = 0
             for j, ss in enumerate(seg_starts):
                 if ss <= x_px:
@@ -372,7 +373,7 @@ class HumanBot:
     def _h(self, x):
         if self.end_x <= 0 or x >= self.end_x:
             return 0.0
-        cell = int(x) // CELL
+        cell = int(x // UNITS_PER_BLOCK)
         if cell >= self._h_n_cells:
             return 0.0
         if cell < 0:
@@ -400,21 +401,26 @@ class HumanBot:
     def verify(self, inputs):
         """Replay ``inputs``. Returns ``(waypoints, mirror_waypoints, won,
         last_alive_frame)``; ``last_alive_frame`` is -1 on a frame-0 death."""
+        # Internal sim state (player.x/y/size) is real GD units; this
+        # method's public contract (waypoints) is px, matching the
+        # editor/render consumers — convert once, right here.
         player = self._new_sim()
         size = player.size
-        waypoints = [(player.x + size / 2, player.y + size / 2)]
+        waypoints = [((player.x + size / 2) * PX_PER_UNIT,
+                      (player.y + size / 2) * PX_PER_UNIT)]
         mirror_waypoints = []
         last_alive = -1
         for i, (held, pressed) in enumerate(inputs):
             player.update(held, pressed)
             size = player.size
             if i % 4 == 0 or not player.alive or player.won:
-                waypoints.append((player.x + size / 2, player.y + size / 2))
+                waypoints.append(((player.x + size / 2) * PX_PER_UNIT,
+                                  (player.y + size / 2) * PX_PER_UNIT))
                 if player.mirror is not None and player.mirror.get("alive"):
-                    msize = player.mirror.get("size", PLAYER_SIZE)
+                    msize = player.mirror.get("size", PLAYER_SIZE_UNITS)
                     mirror_waypoints.append(
-                        (player.x + size / 2,
-                         player.mirror["y"] + msize / 2))
+                        ((player.x + size / 2) * PX_PER_UNIT,
+                         (player.mirror["y"] + msize / 2) * PX_PER_UNIT))
             if player.alive:
                 last_alive = i
             if not player.alive or player.won:
@@ -436,19 +442,21 @@ class HumanBot:
         player = Player([dict(o) for o in self.objects], params=self.params)
         player.trail = []
         size = player.size
-        waypoints = [(player.x + size / 2, player.y + size / 2)]
+        waypoints = [((player.x + size / 2) * PX_PER_UNIT,
+                      (player.y + size / 2) * PX_PER_UNIT)]
         mirror_waypoints = []
         stopped_at = len(inputs)
         for i, (held, pressed) in enumerate(inputs):
             player.update(held, pressed)
             size = player.size
             if i % 4 == 0 or not player.alive or player.won:
-                waypoints.append((player.x + size / 2, player.y + size / 2))
+                waypoints.append(((player.x + size / 2) * PX_PER_UNIT,
+                                  (player.y + size / 2) * PX_PER_UNIT))
                 if player.mirror is not None and player.mirror.get("alive"):
-                    msize = player.mirror.get("size", PLAYER_SIZE)
+                    msize = player.mirror.get("size", PLAYER_SIZE_UNITS)
                     mirror_waypoints.append(
-                        (player.x + size / 2,
-                         player.mirror["y"] + msize / 2))
+                        ((player.x + size / 2) * PX_PER_UNIT,
+                         (player.mirror["y"] + msize / 2) * PX_PER_UNIT))
             if not player.alive or player.won:
                 stopped_at = i + 1
                 break
@@ -855,8 +863,8 @@ class HumanBot:
         for _ in range(max_frames):
             if not sim.alive or sim.won or self._stop():
                 break
-            gx = int(sim.x) // CELL
-            gy = int(sim.y) // CELL
+            gx = int(sim.x // UNITS_PER_BLOCK)
+            gy = int(sim.y // UNITS_PER_BLOCK)
             on_orb = False
             if gx in orb_xs or (gx + 1) in orb_xs or (gx - 1) in orb_xs:
                 for dx in range(-1, 3):
@@ -902,14 +910,14 @@ class HumanBot:
                     live.update(held, pressed)
                     inputs.append((held, pressed))
                     return inputs, True
-                score_x = probe.x + len(probe.coins_collected) * 80.0
+                score_x = probe.x + len(probe.coins_collected) * px_to_units(80.0)
                 if self.route_bias is not None:
-                    score_x += self.route_bias(probe) * CELL
+                    score_x += self.route_bias(probe) * UNITS_PER_BLOCK
                 if ckpt_xs:
                     next_ckpt = next((cx for cx in ckpt_xs
-                                      if cx >= probe.x - CELL), None)
+                                      if cx >= probe.x - UNITS_PER_BLOCK), None)
                     if next_ckpt is not None:
-                        score_x += (self.CHECKPOINT_BONUS * 50.0
+                        score_x += (self.CHECKPOINT_BONUS * px_to_units(50.0)
                                     / max(1.0, abs(next_ckpt - probe.x)))
                 score = (1 if probe.alive else 0, score_x)
                 if score > best_score:
@@ -972,7 +980,7 @@ class HumanBot:
         def _h_local(x):
             if end_x <= 0 or x >= end_x:
                 return 0.0
-            cell = int(x) // CELL
+            cell = int(x // UNITS_PER_BLOCK)
             if cell >= h_n_cells:
                 return 0.0
             if cell < 0:
@@ -1075,7 +1083,7 @@ class HumanBot:
             if (not in_dash and not mirror_active
                     and cand_mode in _TAP_PRUNABLE
                     and not vals[_ON_GROUND]
-                    and (int(vals[_X]) // CELL) not in orb_xs_expanded):
+                    and (int(vals[_X] // UNITS_PER_BLOCK)) not in orb_xs_expanded):
                 options = [o for o in options if not (o[0] and not prev_held)]
 
             parent_pcount = len(snap[1])
@@ -1095,7 +1103,7 @@ class HumanBot:
                     return wp, mwp, inputs, ok
 
                 if not player.alive:
-                    dgx = int(player.x) // CELL
+                    dgx = int(player.x // UNITS_PER_BLOCK)
                     death_counts[dgx] = death_counts.get(dgx, 0) + 1
                     continue
 
@@ -1120,7 +1128,7 @@ class HumanBot:
                 if newly_coins > 0:
                     progress += newly_coins * coin_bonus
 
-                gx_now = int(player.x) // CELL
+                gx_now = int(player.x // UNITS_PER_BLOCK)
                 pcx_now = float(player.x)
 
                 if pressed and probe_xs:
@@ -1138,12 +1146,12 @@ class HumanBot:
                                         if cx <= parent_x)
                     for i in range(passed_before, passed_now):
                         dyp = abs(ckpt_ys_list[i] - pcy_now)
-                        scale = max(0.25, 1.0 - dyp / (CELL * 1.5))
+                        scale = max(0.25, 1.0 - dyp / (UNITS_PER_BLOCK * 1.5))
                         progress += ckpt_bonus * scale
                     if passed_now < n_ckpts:
                         dxa = abs(ckpt_xs_list[passed_now] - pcx_now)
                         dya = abs(ckpt_ys_list[passed_now] - pcy_now)
-                        prox = max(0.0, 1.0 - (dxa + dya) / (CELL * 6.0))
+                        prox = max(0.0, 1.0 - (dxa + dya) / (UNITS_PER_BLOCK * 6.0))
                         progress += ckpt_bonus * prox
 
                 if pressed:
@@ -1185,7 +1193,7 @@ class HumanBot:
                         pref -= hcount * 0.005
 
                 if hazard_clearance:
-                    gy_now = int(player.y) // CELL
+                    gy_now = int(player.y // UNITS_PER_BLOCK)
                     d_here = clearance_get((gx_now, gy_now))
                     d_next = clearance_get((gx_now + 1, gy_now))
                     nearest = None

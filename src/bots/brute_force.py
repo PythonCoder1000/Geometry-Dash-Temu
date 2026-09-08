@@ -53,8 +53,9 @@ import multiprocessing as mp
 import time
 
 from ..constants import (
-    CELL, HEIGHT, MODE_ROBOT, MODE_SHIP, MODE_UFO, MODE_WAVE, ORB_TYPES,
-    SPEED_VALUES, T_END, T_SPEED_NORMAL, T_TELEPORT_PORTAL,
+    UNITS_PER_BLOCK, HEIGHT_UNITS, MODE_ROBOT, MODE_SHIP, MODE_UFO, MODE_WAVE,
+    ORB_TYPES, SPEED_VALUES_UT as SPEED_VALUES, T_END, T_SPEED_NORMAL,
+    T_TELEPORT_PORTAL, px_to_units,
 )
 from .action_space import DWELL_CAP, HUMAN, replay_state
 from .sim import SimPlayer, snapshot, restore
@@ -352,7 +353,8 @@ class BruteForceSearch:
 
     def __init__(self, objects, params=None, *, model=HUMAN,
                 seed_inputs=None, time_budget=None, max_frames=20000,
-                pos_bucket=1.0, vel_bucket=0.5, max_nodes=3_000_000,
+                pos_bucket=px_to_units(1.0), vel_bucket=px_to_units(0.5),
+                max_nodes=3_000_000,
                 heuristic_weight=2.0, progress=None, verbose=False,
                 dash_release_stride=1, parallel=False, workers=None):
         self.objects = [dict(o) for o in objects]
@@ -397,7 +399,7 @@ class BruteForceSearch:
         self.workers = int(workers) if workers else max(
             1, (mp.cpu_count() or 4) - 1)
 
-        end_xs = [o["x"] * CELL for o in self.objects if o.get("t") == T_END]
+        end_xs = [o["x"] * UNITS_PER_BLOCK for o in self.objects if o.get("t") == T_END]
         self.end_x = max(end_xs) if end_xs else 0.0
         self._build_speed_segments()
 
@@ -426,8 +428,8 @@ class BruteForceSearch:
         # (see the fix's history — an early, tighter margin did exactly
         # that, cutting a fall off 300px past the lowest platform,
         # before it had even reached a portal sitting well within that
-        # gap). HEIGHT is the play area height in px.
-        self._void_y = max_y * CELL + HEIGHT * 4
+        # gap). HEIGHT_UNITS is the play area height in GD units.
+        self._void_y = max_y * UNITS_PER_BLOCK + HEIGHT_UNITS * 4
 
         self._probe = SimPlayer([dict(o) for o in self.objects], params=params)
         self._probe_a = SimPlayer([dict(o) for o in self.objects], params=params)
@@ -472,7 +474,7 @@ class BruteForceSearch:
         base_speed = (self.params.base_move_speed if self.params is not None
                       else SPEED_VALUES[T_SPEED_NORMAL])
         events = sorted(
-            ((int(o["x"]) * CELL, SPEED_VALUES[o["t"]])
+            ((int(o["x"]) * UNITS_PER_BLOCK, SPEED_VALUES[o["t"]])
              for o in self.objects if o.get("t") in SPEED_VALUES),
             key=lambda e: e[0])
         seg_starts = [0]
@@ -494,12 +496,12 @@ class BruteForceSearch:
             if seg_speeds[i] > 0:
                 running += seg_len / seg_speeds[i]
 
-        n_cells = self.end_x // CELL + 2 if self.end_x > 0 else 1
+        n_cells = int(self.end_x // UNITS_PER_BLOCK) + 2 if self.end_x > 0 else 1
         recips = [0.0] * n_cells
         seg_end_px = [self.end_x] * n_cells
         cumul_after = [0.0] * n_cells
         for cell in range(n_cells):
-            x_px = cell * CELL
+            x_px = cell * UNITS_PER_BLOCK
             i = 0
             for j, ss in enumerate(seg_starts):
                 if ss <= x_px:
@@ -518,7 +520,7 @@ class BruteForceSearch:
     def _h(self, x):
         if self.end_x <= 0 or x >= self.end_x:
             return 0.0
-        cell = int(x) // CELL
+        cell = int(x // UNITS_PER_BLOCK)
         if cell >= self._h_n_cells:
             return 0.0
         if cell < 0:

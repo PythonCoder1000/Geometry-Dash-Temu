@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.levels import load_level_full
 from src.physics import PhysicsParams
+from src.constants import px_to_units
 from src.bots import HumanBot
 from src.bots.action_space import HUMAN
 
@@ -49,8 +50,8 @@ ENGINES = ("astar", "brute_force")
 def run_one(objects, engine, time_budget, max_frames, pos_bucket, vel_bucket, params=None):
     bot = HumanBot([dict(o) for o in objects], params=params)
     bot.USE_BRUTE_FORCE = (engine == "brute_force")
-    bot.BRUTE_FORCE_POS_BUCKET = pos_bucket
-    bot.BRUTE_FORCE_VEL_BUCKET = vel_bucket
+    bot.BRUTE_FORCE_POS_BUCKET = px_to_units(pos_bucket)
+    bot.BRUTE_FORCE_VEL_BUCKET = px_to_units(vel_bucket)
     t0 = time.monotonic()
     wp, _mwp, inputs, won = bot.solve(
         screen=None, clock=None, max_frames=max_frames, time_budget=time_budget)
