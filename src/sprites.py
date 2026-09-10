@@ -7,6 +7,7 @@ as PNGs under the per-user ``sprite_cache/`` dir (and shipped pre-baked in
 renderer's output changes so stale PNGs are regenerated.
 """
 
+import hashlib
 import math
 import os
 from collections import OrderedDict
@@ -15,7 +16,8 @@ import pygame
 
 from .constants import (
     ASSETS_DIR, CELL, _USER_DATA, TRIGGER_TYPES, PHYSICS_TPS,
-    C_WHITE, C_GRAY, C_BLOCK_H, C_BLOCK_D, C_SPIKE, C_SAW, C_ORB, C_DASH_ORB,
+    C_WHITE, C_GRAY, C_BLOCK_H, C_BLOCK_D, C_BLOCK_INNER,
+    C_SPIKE, C_SAW, C_ORB, C_DASH_ORB,
     C_DASH_ORB_GRAV, C_TELEPORT_ORB, C_TELEPORT_PORTAL,
     C_GREEN_ORB, C_SPIDER_ORB, C_RED_ORB,
     C_PINK_ORB, C_PAD, C_PINK_PAD, C_RED_PAD, C_BLUE_PAD, C_SPIDER_PAD,
@@ -43,6 +45,7 @@ from .constants import (
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     T_SPEED_FASTEST,
 )
+from . import gd_atlas
 from .objects import TYPE_COLS, ANIMATED_TYPES
 from .geometry import normalize_rotation, _resolve_scale, clamp
 from .graphics import (
@@ -64,7 +67,7 @@ from .graphics import (
 # way that would make stale PNGs look wrong. On mismatch the user cache
 # is wiped and regenerated on demand.
 # ---------------------------------------------------------------------------
-SPRITE_CACHE_VERSION = "5"
+SPRITE_CACHE_VERSION = "8"
 BUNDLED_SPRITES_DIR = os.path.join(ASSETS_DIR, "sprites")
 SPRITES_DIR = os.path.join(_USER_DATA, "sprite_cache")
 _SPRITE_VERSION_MARKER = os.path.join(SPRITES_DIR, ".version")
@@ -74,8 +77,37 @@ _OBJECT_CACHE = OrderedDict()  # (t, s, frame, variant) -> Surface; LRU-ordered
 _OBJECT_CACHE_MAX = 600
 
 
+def sprite_cache_signature():
+    """What the cached PNGs on disk were baked from.
+
+    The renderer version alone is not enough now that art can also come
+    from the optional real-GD atlas: installing or removing those sheets
+    changes every mapped sprite without touching any code, so the
+    signature carries their presence too — and, past that, a digest of
+    the atlas recipe itself.
+
+    That digest is what stops a half-stale cache.  Editing a frame name,
+    a tint, a ``fit`` or a ``spin`` in ``GD_SPRITE_MAP`` changes what
+    every affected sprite bakes to, and only some of a type's eight
+    frames are usually on disk at any moment; without the digest, the
+    already-cached frames keep rendering under the OLD recipe while the
+    rest render under the new one, and the animation flickers once per
+    loop.  Hand-bumping SPRITE_CACHE_VERSION prevented that only when
+    somebody remembered to.
+    """
+    if not gd_atlas.atlas_installed():
+        return SPRITE_CACHE_VERSION
+    # The installed resolution tier is part of the recipe: the same frame
+    # names off the -hd sheets bake to visibly sharper PNGs, so dropping
+    # those sheets in (or removing them) has to invalidate the cache on
+    # its own, exactly as editing a frame name does.
+    recipe = (GD_ART_RECIPE, sorted(gd_atlas.installed_tiers().items()))
+    digest = hashlib.sha1(repr(recipe).encode()).hexdigest()[:8]
+    return f"{SPRITE_CACHE_VERSION}+gd{digest}"
+
+
 def _check_sprite_cache_version():
-    """Wipe the writable sprite cache when SPRITE_CACHE_VERSION changes.
+    """Wipe the writable sprite cache when the signature changes.
 
     Prevents stale PNGs (from an older render pass) from shadowing the
     current renderer's output — that was the "asset glitch" class where
@@ -85,7 +117,7 @@ def _check_sprite_cache_version():
         os.makedirs(SPRITES_DIR, exist_ok=True)
     except OSError:
         return
-    want = SPRITE_CACHE_VERSION
+    want = sprite_cache_signature()
     cur = None
     try:
         with open(_SPRITE_VERSION_MARKER, encoding="utf-8") as f:
@@ -108,8 +140,6 @@ def _check_sprite_cache_version():
     except OSError:
         pass
 
-
-_check_sprite_cache_version()
 
 # Static types get a single image. Animated types get SPRITE_FRAMES.
 _ANIMATED_TYPES = ANIMATED_TYPES
@@ -136,12 +166,14 @@ def _bundled_sprites_valid():
     try:
         with open(os.path.join(BUNDLED_SPRITES_DIR, ".version"),
                   encoding="utf-8") as f:
-            return f.read().strip() == SPRITE_CACHE_VERSION
+            return f.read().strip() == sprite_cache_signature()
     except OSError:
         return False
 
 
-_BUNDLED_OK = _bundled_sprites_valid()
+# Set by init_sprite_cache() at the bottom of the module — the signature
+# it checks against hashes GD_ART_RECIPE, which is defined further down.
+_BUNDLED_OK = False
 
 
 def _bundled_sprite_path(t, s, frame):
@@ -1200,11 +1232,314 @@ _SIZE_PORTAL_TYPES = {T_MODE_MINI, T_MODE_BIG}
 _DUAL_PORTAL_TYPES = {T_MODE_DUAL, T_MODE_SOLO}
 
 
+# ---------------------------------------------------------------------------
+# Real Geometry Dash art
+#
+# Types listed here are cut out of the official cocos2d atlases in
+# ``assets/sprites/gd_official/`` instead of being drawn by the
+# procedural renderers above.  The sheets are optional: when they are
+# absent (they are gitignored copyrighted binaries) every lookup returns
+# None and the procedural renderer runs exactly as before.
+#
+# Spec keys:
+#   ``frames``  layered back-to-front (portals ship a back plate and a
+#               front rim as two separate frames).
+#   ``mirror``  GD only ships the left half of portals — the flipped copy
+#               is re-added about the untrimmed box's centre line.
+#   ``tint``    only for the frames GD stores as black/white silhouettes
+#               (block, spikes, blade).  GD tints those by the level's
+#               base colour channel; this engine substitutes its own
+#               palette colour so blocks stay blue and spikes stay red.
+#               Orbs, pads, portals and speed arrows already carry their
+#               own colours and must NOT be tinted.
+#   ``pulse``   per-frame breathing amplitude, reproducing the scale
+#               throb GD applies to orbs at runtime.
+#   ``spin``    degrees swept across the whole 8-frame loop.  Must stay a
+#               multiple of 360/teeth or the loop does not wrap and the
+#               blade visibly lurches backwards once per cycle.
+#               ``sawblade_02``'s radial profile repeats every 30°
+#               (measured: 12 teeth), so the sweep must be a multiple
+#               of 30 — and each frame's step must stay well under half
+#               a tooth (15°) or the direction reads as ambiguous.
+#   ``fit``     ``"cell"`` (default) keeps GD's true size, so art bigger
+#               than 30 GD units overhangs its cell exactly as in the
+#               real game.  ``"contain"`` shrinks the sprite into one
+#               cell — reserved for the pickup/marker art that is not
+#               level geometry and should not spill onto neighbours.
+# ---------------------------------------------------------------------------
+GD_SHEET_BLOCKS = "GJ_GameSheet"
+GD_SHEET_PORTALS = "GJ_GameSheet02"
+GD_SHEET_UI = "GJ_GameSheet03"
+
+# Portals are ~45 x 90 GD units — 1.5 cells wide and 3 cells tall — so
+# they take the default true-scale fit and stick out above and below the
+# row they are placed on, which is how GD draws them.
+_PORTAL_OPTS = {"sheet": GD_SHEET_PORTALS, "mirror": True}
+_ORB_OPTS = {"sheet": GD_SHEET_BLOCKS, "pulse": 0.05}
+_PAD_OPTS = {"sheet": GD_SHEET_BLOCKS, "anchor": "bottom"}
+
+
+def _gd_portal(index):
+    return dict(_PORTAL_OPTS,
+                frames=(f"portal_{index:02d}_back_001.png",
+                        f"portal_{index:02d}_front_001.png"))
+
+
+def _gd_orb(frame):
+    return dict(_ORB_OPTS, frames=(frame,))
+
+
+def _gd_pad(frame):
+    return dict(_PAD_OPTS, frames=(frame,))
+
+
+def _gd_speed(index):
+    return {"sheet": GD_SHEET_PORTALS,
+            "frames": (f"boost_{index:02d}_001.png",)}
+
+
+GD_SPRITE_MAP = {
+    # Solids and hazards — silhouettes, so they take this engine's tint.
+    T_BLOCK:  {"sheet": GD_SHEET_BLOCKS, "frames": ("square_01_001.png",),
+               "tint": C_BLOCK_H},
+    T_SPIKE:  {"sheet": GD_SHEET_BLOCKS, "frames": ("spike_01_001.png",),
+               "tint": C_SPIKE},
+    T_HALF_SPIKE: {"sheet": GD_SHEET_BLOCKS, "frames": ("spike_02_001.png",),
+                   "tint": C_SPIKE},
+    # The blade is 60x60 GD units — a genuine 2x2 cells, twice the size
+    # of a block, and it overhangs accordingly. Gameplay is unaffected:
+    # `geometry.saw_hitbox` is a fixed inset of the cell rect and never
+    # looks at the sprite.
+    T_SAW:    {"sheet": GD_SHEET_BLOCKS, "frames": ("sawblade_02_001.png",),
+               "tint": C_SAW, "spin": 60.0},
+
+    # Orbs. GD's names are historical, so the colour is what identifies
+    # them: ring_01 yellow, ring_02 red, ring_03 pink, gravring cyan,
+    # gravJumpRing green, dropRing black, dashRing_01/02 the dash pair.
+    T_ORB:            _gd_orb("ring_01_001.png"),
+    T_RED_ORB:        _gd_orb("ring_02_001.png"),
+    T_PINK_ORB:       _gd_orb("ring_03_001.png"),
+    T_BLUE_ORB:       _gd_orb("gravring_01_001.png"),
+    T_GREEN_ORB:      _gd_orb("gravJumpRing_01_001.png"),
+    T_BLACK_ORB:      _gd_orb("dropRing_01_001.png"),
+    T_DASH_ORB:       _gd_orb("dashRing_01_001.png"),
+    T_DASH_ORB_GRAV:  _gd_orb("dashRing_02_001.png"),
+
+    # Pads — GD calls them "bump"; they are thin plates that sit on the
+    # floor of their cell, hence the bottom anchor.
+    T_PAD:       _gd_pad("bump_01_001.png"),
+    T_RED_PAD:   _gd_pad("bump_02_001.png"),
+    T_PINK_PAD:  _gd_pad("bump_03_001.png"),
+    T_BLUE_PAD:  _gd_pad("gravbump_01_001.png"),
+
+    # Portals. Indices are GD's own numbering, cross-checked against the
+    # object-ID table in GDRWeb's assets/object.json (10/11 gravity,
+    # 12 cube, 13 ship, 47 ball, 111 UFO, 286 dual, 287 solo, 660 wave,
+    # 745 robot, 1331 spider) AND against each frame's mean hue, which
+    # matches GD's published portal colours one for one: 03 green cube,
+    # 04 magenta ship, 07 red ball, 10 orange UFO, 11 orange dual,
+    # 12 blue solo, 13 cyan wave, 14 white robot, 17 purple spider.
+    #
+    # The size pair was the one the object-ID table got wrong. GD's wiki
+    # is explicit that the MINI portal is pink and the one restoring
+    # normal size is green; `portal_08_front` measures (62,227,75) green
+    # and `portal_09_front` (228,117,235) pink, so 8 is Big and 9 is
+    # Mini — the reverse of what the ID table implied.
+    T_GRAV_UP:      _gd_portal(1),
+    T_GRAV_DOWN:    _gd_portal(2),
+    T_MODE_CUBE:    _gd_portal(3),
+    T_MODE_SHIP:    _gd_portal(4),
+    T_MODE_BALL:    _gd_portal(7),
+    T_MODE_MINI:    _gd_portal(9),
+    T_MODE_BIG:     _gd_portal(8),
+    T_MODE_UFO:     _gd_portal(10),
+    T_MODE_DUAL:    _gd_portal(11),
+    T_MODE_SOLO:    _gd_portal(12),
+    T_MODE_WAVE:    _gd_portal(13),
+    T_MODE_ROBOT:   _gd_portal(14),
+    T_MODE_SPIDER:  _gd_portal(17),
+
+    # Secret coin (GD object 142). The in-level frame `secretCoin_01` is
+    # absent from every sheet installed here, so this uses GD's own UI
+    # rendering of the same coin — identical gold disc and star, and it
+    # already carries its colour, so no tint. That UI frame is 44x44,
+    # i.e. drawn for an HUD slot rather than for the grid, so it keeps
+    # "contain": a coin is a pickup, not level geometry, and a 1.5-cell
+    # disc would sit on top of the blocks that frame a coin route.
+    T_COIN: {"sheet": GD_SHEET_UI, "frames": ("secretCoinUI_001.png",),
+             "fit": "contain", "pulse": 0.08},
+
+    # Practice-mode checkpoint (the green marker GD plants on the C key).
+    # `checkpoint_01_glow` is deliberately skipped, matching the general
+    # decision not to bake GD's glow layers into these sprites.
+    # 17x32 is a hair over one cell tall; "contain" costs 3 px of height
+    # against true scale and keeps this editor/practice marker from
+    # overlapping the object it marks.
+    T_CHECKPOINT: {"sheet": GD_SHEET_PORTALS,
+                   "frames": ("checkpoint_01_001.png",),
+                   "fit": "contain", "pulse": 0.06},
+
+    # Speed changers — GD calls them "boost"; one to four chevrons.
+    T_SPEED_SLOW:    _gd_speed(1),
+    T_SPEED_NORMAL:  _gd_speed(2),
+    T_SPEED_FAST:    _gd_speed(3),
+    T_SPEED_FASTER:  _gd_speed(4),
+    T_SPEED_FASTEST: _gd_speed(5),
+}
+
+# GD has no single frame for a solid slope: it draws the block fill
+# clipped to a triangle and lays the diagonal edge sprite over it. This
+# reproduces that, in the same base orientation _render_slope uses —
+# hypotenuse from (0, s) up to (s, 0), body filling the lower right.
+GD_SLOPE_FILL_FRAME = "square_01_001.png"
+GD_SLOPE_EDGE_FRAME = "blockOutline_14_001.png"
+
+# GD's Half Block (objects 62/65/66/68) is the one block texture that is
+# NOT a 30x30 cell: `square_b_01` is genuinely 30 wide x 16 tall, with a
+# `blockOutline_02` cap composited across its top edge at GD's own child
+# offset of +7.25 (GD's y points up). Neither layer fits compose()'s
+# square-cell model, so they are placed straight into the bottom half of
+# the cell — which is exactly the rect geometry.slab_rect collides
+# against, so the visual and the hitbox stay aligned.
+#
+# The two layers take DIFFERENT colour channels, which is what makes the
+# half block read as the same material as the full block: the fill is
+# "Black" (the interior channel) and only the cap is "Base".
+GD_SLAB_FILL_FRAME = "square_b_01_001.png"
+GD_SLAB_EDGE_FRAME = "blockOutline_02_001.png"
+GD_SLAB_SRC_H = 16.0
+GD_SLAB_EDGE_OFFSET_Y = 7.25
+
+# GD gives its letter-modifier blocks (Stop Dash 1755, and the jump /
+# buffer variants 1813 / 1829) no unique texture at all — every one of
+# them is a plain `blockOutline_01` frame with an editor-only letter on
+# top, which is what this engine already drew by hand.
+GD_LETTER_BLOCK_FRAME = "blockOutline_01_001.png"
+
+# Everything above that decides what a real-GD sprite bakes to. Hashed
+# into sprite_cache_signature(), so changing any of it invalidates the
+# cached PNGs by itself — see that function for why hand-bumping
+# SPRITE_CACHE_VERSION was not enough.
+GD_ART_RECIPE = (
+    GD_SPRITE_MAP,
+    GD_SLOPE_FILL_FRAME, GD_SLOPE_EDGE_FRAME,
+    GD_SLAB_FILL_FRAME, GD_SLAB_EDGE_FRAME,
+    GD_SLAB_SRC_H, GD_SLAB_EDGE_OFFSET_Y,
+    GD_LETTER_BLOCK_FRAME,
+)
+
+
+def _tinted(img, tint):
+    if tint:
+        img.fill((*tint, 255), special_flags=pygame.BLEND_RGBA_MULT)
+    return img
+
+
+def _render_gd_slope(s):
+    """Block fill clipped to the ramp triangle + GD's diagonal edge."""
+    fill = gd_atlas.compose(GD_SHEET_BLOCKS, GD_SLOPE_FILL_FRAME, s)
+    edge = gd_atlas.compose(GD_SHEET_BLOCKS, GD_SLOPE_EDGE_FRAME, s)
+    if fill is None or edge is None:
+        return None
+    mask = pygame.Surface((s, s), pygame.SRCALPHA)
+    pygame.draw.polygon(mask, (255, 255, 255, 255), [(0, s), (s, s), (s, 0)])
+    fill.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+    _tinted(fill, C_BLOCK_H)
+    fill.blit(_tinted(edge, C_BLOCK_H), (0, 0))
+    return fill
+
+
+def _render_gd_slab(s):
+    """Half-height block fill + GD's top-edge outline, same tint-then-
+    composite order as the slope."""
+    fill = gd_atlas.frame_surface(GD_SHEET_BLOCKS, GD_SLAB_FILL_FRAME)
+    edge = gd_atlas.frame_surface(GD_SHEET_BLOCKS, GD_SLAB_EDGE_FRAME)
+    if fill is None or edge is None:
+        return None
+    top = s // 2
+    half = s - top
+    px_per_gd = half / GD_SLAB_SRC_H
+    canvas = pygame.Surface((s, s), pygame.SRCALPHA)
+    canvas.blit(_tinted(pygame.transform.smoothscale(fill, (s, half)),
+                        C_BLOCK_INNER), (0, top))
+    # This is the one place that measures RAW frame pixels against a
+    # length written in base GD units (GD_SLAB_SRC_H), so it is the one
+    # place that has to divide the sheet's own density back out — on an
+    # -hd sheet `edge` is twice as tall for the same 30-unit cap.
+    edge_units = edge.get_height() / gd_atlas.sheet_unit_scale(GD_SHEET_BLOCKS)
+    edge_h = max(1, int(round(edge_units * px_per_gd)))
+    edge_y = top + half / 2.0 - GD_SLAB_EDGE_OFFSET_Y * px_per_gd - edge_h / 2.0
+    canvas.blit(_tinted(pygame.transform.smoothscale(edge, (s, edge_h)),
+                        C_BLOCK_H), (0, int(round(edge_y))))
+    return canvas
+
+
+# Types GD builds by compositing several frames with per-type geometry,
+# rather than by stacking whole cells the way GD_SPRITE_MAP does.
+_GD_COMPOSITE_RENDERERS = {
+    T_SLOPE: _render_gd_slope,
+    T_SLAB: _render_gd_slab,
+}
+
+
+def _render_gd_sprite(t, s, frame_t):
+    """Real-GD sprite for ``t``, or ``None`` to use the procedural path.
+
+    ``None`` is returned for unmapped types *and* whenever the atlas
+    files are missing, so a checkout without the sheets renders exactly
+    as it did before.
+    """
+    composite = _GD_COMPOSITE_RENDERERS.get(t)
+    if composite is not None:
+        return composite(s)
+    spec = GD_SPRITE_MAP.get(t)
+    if spec is None:
+        return None
+    pulse = spec.get("pulse", 0.0)
+    layers = []
+    for frame in spec["frames"]:
+        layer = gd_atlas.compose(
+            spec["sheet"], frame, s,
+            fit=spec.get("fit", "cell"),
+            anchor=spec.get("anchor", "center"),
+            mirror=spec.get("mirror", False),
+            # Breathe by shrinking rather than growing, so the sprite
+            # stays inside the canvas its widest frame needs.
+            pad=pulse * (1.0 - math.sin(frame_t * math.tau)) / 2.0,
+            spin=frame_t * spec.get("spin", 0.0),
+        )
+        if layer is None:
+            return None
+        layers.append(layer)
+    # Layers of one sprite can need different canvases (a portal's back
+    # plate is wider than its front rim), and every canvas carries the
+    # grid cell at its own centre — so they stack centre-on-centre, not
+    # corner-on-corner.
+    w = max(l.get_width() for l in layers)
+    h = max(l.get_height() for l in layers)
+    if len(layers) == 1:
+        canvas = layers[0]
+    else:
+        canvas = pygame.Surface((w, h), pygame.SRCALPHA)
+        for layer in layers:
+            canvas.blit(layer, (round((w - layer.get_width()) / 2.0),
+                                round((h - layer.get_height()) / 2.0)))
+    return _tinted(canvas, spec.get("tint"))
+
+
 def _render_sprite(t, s, frame_t, variant=None):
     """Render ONE sprite to a new (s,s) SRCALPHA surface.
 
-    Rendering happens at 2x then downscales with smoothscale for free AA.
+    Real-GD atlas art wins when this type has a mapping and the sheets
+    are installed; otherwise the procedural renderers below run. Those
+    render at 2x and downscale with smoothscale for free AA — the atlas
+    path composes at ``s`` directly, since resampling the source art
+    twice only softens it.
     """
+    if variant is None:
+        gd_img = _render_gd_sprite(t, s, frame_t)
+        if gd_img is not None:
+            return gd_img
     big = s * _SUPERSAMPLE
     surf = pygame.Surface((big, big), pygame.SRCALPHA)
     fn = _DIRECT_RENDERERS.get(t)
@@ -1269,12 +1604,21 @@ def _render_bonk_block(surf, s, frame_t):
 
 
 def _render_letter_block(surf, s, letter):
-    """Render GD-style utility blocks: hollow white square + letter."""
-    margin = max(4, int(s * 0.10))
-    rect = pygame.Rect(margin, margin, s - margin * 2, s - margin * 2)
-    width = max(2, int(s * 0.07))
-    pygame.draw.rect(surf, C_WHITE, rect, width,
-                     border_radius=max(2, int(s * 0.04)))
+    """GD-style utility block: hollow outline square + letter.
+
+    GD draws these with a plain ``blockOutline_01`` frame and puts the
+    letter on as an editor-only overlay, so the real texture replaces
+    only the hand-drawn square — the glyph stays exactly as it was.
+    """
+    outline = gd_atlas.compose(GD_SHEET_BLOCKS, GD_LETTER_BLOCK_FRAME, s)
+    if outline is not None:
+        surf.blit(_tinted(outline, C_WHITE), (0, 0))
+    else:
+        margin = max(4, int(s * 0.10))
+        rect = pygame.Rect(margin, margin, s - margin * 2, s - margin * 2)
+        width = max(2, int(s * 0.07))
+        pygame.draw.rect(surf, C_WHITE, rect, width,
+                         border_radius=max(2, int(s * 0.04)))
     txt(surf, letter, s // 2, s // 2, max(12, int(s * 0.55)), C_WHITE,
         True, shadow=True)
 
@@ -1320,9 +1664,32 @@ def _load_or_render(t, s, frame, variant=None):
     return img
 
 
+def sprite_extent(t, s=CELL, frame=0, variant=None):
+    """``(w, h)`` the sprite for ``t`` actually occupies at cell size ``s``.
+
+    Real-GD art keeps GD's own proportions, so the types GD draws bigger
+    than one cell (portals at 1.5 x 3 cells, the saw at 2 x 2, the speed
+    arrows) return more than ``(s, s)`` and overhang their cell.  Callers
+    that blit into a surface of their own — the editor's ghost previews —
+    need this to size that surface.
+    """
+    return _load_or_render(t, s, frame, variant).get_size()
+
+
 def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
-             scale=1.0, scale_y=None, alpha=255):
+             scale=1.0, scale_y=None, alpha=255, fit_cell=False):
     """Blit the pre-rendered sprite image for this object type.
+
+    ``(x, y)`` is the top-left of the object's grid cell.  The sprite is
+    centred on that cell rather than pinned to its corner, because the
+    real-GD art for portals, saws and speed arrows is legitimately bigger
+    than one cell and overhangs it symmetrically (see
+    :func:`sprite_extent`).  For a one-cell sprite this is the same blit
+    as before.
+
+    ``fit_cell`` shrinks an oversized sprite back down so its longest
+    side is ``s`` — for the editor palette and property previews, whose
+    buttons an overhanging sprite would spill out of.
 
     ``alpha`` (Checkpoint 5's Alpha Trigger) is applied to a *copy* of
     the cached sprite -- the cache is shared across every instance of a
@@ -1374,39 +1741,30 @@ def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
     sx, sy = _resolve_scale(scale, scale_y)
     frames = _frame_count(t)
     frame = int(pulse / (60 / frames)) % frames if frames > 1 else 0
-    if sx != 1.0 or sy != 1.0:
-        # Non-uniform path: render the sprite at the larger axis (so
-        # the smaller axis can shrink without rounding artefacts), then
-        # stretch to (sw, sh). One transform.scale per blit — caches
-        # don't help here because every sx/sy combination is unique.
-        img = _load_or_render(t, s, frame, variant)
-        sw = max(1, int(round(s * sx)))
-        sh = max(1, int(round(s * sy)))
-        if (sw, sh) != img.get_size():
-            img = pygame.transform.scale(img, (sw, sh))
-        if alpha < 255:
-            if (sw, sh) == img.get_size():
-                img = img.copy()  # transform.scale already returned a copy
-            img.set_alpha(alpha)
-        x = x + (s - sw) / 2.0
-        y = y + (s - sh) / 2.0
-        if rot:
-            rotated = pygame.transform.rotate(img, -rot)
-            rr = rotated.get_rect(center=(x + sw / 2, y + sh / 2))
-            surf.blit(rotated, rr)
-        else:
-            surf.blit(img, (x, y))
-        return
     img = _load_or_render(t, s, frame, variant)
+    iw, ih = img.get_size()
+    if fit_cell and max(iw, ih) > s:
+        shrink = s / max(iw, ih)
+        iw = max(1, int(round(iw * shrink)))
+        ih = max(1, int(round(ih * shrink)))
+    # Sizes are taken from the sprite, not the cell, so an oversized
+    # sprite scales about its own centre and keeps GD's proportions.
+    sw = max(1, int(round(iw * sx)))
+    sh = max(1, int(round(ih * sy)))
+    scaled = (sw, sh) != img.get_size()
+    if scaled:
+        # One transform.scale per blit — caches don't help here because
+        # every sx/sy combination is unique.
+        img = pygame.transform.scale(img, (sw, sh))
     if alpha < 255:
-        img = img.copy()
+        if not scaled:
+            img = img.copy()  # transform.scale already returned a copy
         img.set_alpha(alpha)
     if rot:
         rotated = pygame.transform.rotate(img, -rot)
-        rr = rotated.get_rect(center=(x + s / 2, y + s / 2))
-        surf.blit(rotated, rr)
+        surf.blit(rotated, rotated.get_rect(center=(x + s / 2, y + s / 2)))
     else:
-        surf.blit(img, (x, y))
+        surf.blit(img, (x + (s - sw) / 2.0, y + (s - sh) / 2.0))
 
 
 def clear_obj_cache():
@@ -1459,6 +1817,17 @@ def draw_end_wall(surf, screen_x, marker_screen_y, cell_size=CELL, pulse=0):
     pygame.draw.rect(surf, lighter(C_END, 60), fr, 2)
 
 
+def init_sprite_cache():
+    """Validate both sprite caches against the current signature.
+
+    Runs at import, but from the bottom of the module: the signature
+    hashes GD_ART_RECIPE, so the art recipe has to be defined first.
+    """
+    global _BUNDLED_OK
+    _check_sprite_cache_version()
+    _BUNDLED_OK = _bundled_sprites_valid()
+
+
 def regenerate_sprite_assets(size=CELL):
     """Force-regenerate every sprite PNG at the given size.
 
@@ -1469,6 +1838,11 @@ def regenerate_sprite_assets(size=CELL):
     from .objects import ALL_TYPES
     os.makedirs(SPRITES_DIR, exist_ok=True)
     _OBJECT_CACHE.clear()
+    gd_atlas.clear_caches()
+    # Atlas sheets may have been installed or removed since import, which
+    # moves the signature — re-stamp the marker so the PNGs written below
+    # are not wiped as "stale" on the next launch.
+    init_sprite_cache()
     for t in ALL_TYPES:
         for f in range(_frame_count(t)):
             path = _sprite_path(t, size, f)
@@ -1478,3 +1852,6 @@ def regenerate_sprite_assets(size=CELL):
             except OSError:
                 pass
             _load_or_render(t, size, f)
+
+
+init_sprite_cache()
