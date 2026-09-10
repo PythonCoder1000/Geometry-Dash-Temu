@@ -222,6 +222,15 @@ __marimo__/
 # boot. Regenerated on demand; no reason to version.
 sprite_cache/
 
+# Official Geometry Dash art: the GJ_GameSheet* texture atlases plus the
+# loose backgrounds/ and grounds/ PNGs. These are RobTop Games'
+# copyrighted art, downloaded by hand for LOCAL play only — never commit
+# or redistribute them. The game runs without them: src/sprites.py falls
+# back to its procedural renderers for every type, and graphics.draw_bg
+# to its gradient-and-stripe background. The directory entry covers every
+# subdirectory, so new art folders need no extra rule.
+assets/sprites/gd_official/
+
 # Auto-generated level thumbnails.
 levels/_thumbs/
 
