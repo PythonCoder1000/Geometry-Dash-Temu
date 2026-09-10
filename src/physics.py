@@ -29,10 +29,11 @@ from dataclasses import dataclass, fields
 import math
 
 # Unit-space (GD units / units-per-tick) constants — see
-# docs/development/UNITS_REFACTOR.md. PhysicsParams now hands out values
-# in real GD units so player/core.py's integration is unit-native; the
-# legacy px-per-tick constants in constants.py remain only as the
-# derivation source (value_ut * PX_PER_UNIT == value_px, exact).
+# docs/development/UNITS_REFACTOR.md. PhysicsParams hands out values in
+# real GD units so player/core.py's integration is unit-native. These
+# are the PRIMARY definitions, derived straight from the reference's
+# units/second figures; the px-per-tick names in constants.py are the
+# derived ones (value_ut * PX_PER_UNIT), for render/HUD code only.
 from .constants import (
     GRAVITY_UT as _GRAVITY,
     SHIP_GRAVITY_UT as _SHIP_GRAVITY,

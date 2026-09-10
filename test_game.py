@@ -1048,8 +1048,8 @@ _saw_jump = False
 _pre_tp_x = _dp.x
 for _f in range(480):
     _pre_tp_x = _dp.x
-    _dp.update(False, _dp.x + _dp.size >= 10 * C.UNITS_PER_BLOCK - C.px_to_units(3))
-    if _dp.x - _pre_tp_x > C.px_to_units(100):  # instant horizontal jump = teleport
+    _dp.update(False, _dp.x + _dp.size >= 10 * C.UNITS_PER_BLOCK - C.TOUCH_PAD_UNITS)
+    if _dp.x - _pre_tp_x > 2 * C.UNITS_PER_BLOCK:  # instant horizontal jump = teleport
         _saw_jump = True
         break
 check("Directional spider orb (r=90) teleports player horizontally",
@@ -1068,7 +1068,7 @@ _vp = Player(_vert_objs)
 _vp_grav_before = _vp.grav
 _saw_flip = False
 for _f in range(600):
-    _vp.update(False, _vp.x + _vp.size >= 10 * C.UNITS_PER_BLOCK - C.px_to_units(3))
+    _vp.update(False, _vp.x + _vp.size >= 10 * C.UNITS_PER_BLOCK - C.TOUCH_PAD_UNITS)
     if _vp.grav != _vp_grav_before:
         _saw_flip = True
         break
@@ -1237,7 +1237,7 @@ _bp.mode = MODE_SHIP
 _pressed_once = False
 for _ in range(600):
     orb1_left = _orb1_gx * C.UNITS_PER_BLOCK
-    about_to_touch = (orb1_left - (_bp.x + _bp.size)) <= C.px_to_units(25)
+    about_to_touch = (orb1_left - (_bp.x + _bp.size)) <= 0.5 * C.UNITS_PER_BLOCK
     press_now = about_to_touch and not _pressed_once
     if press_now:
         _pressed_once = True
@@ -1306,7 +1306,7 @@ def _orb_double_touch(multi):
     back to the orb).  Returns one bool per touch: did the orb fire?"""
     orb = {"t": T_ORB, "x": 6, "y": 9, "r": 0, "multi_activate": multi}
     p = Player(_dash_level([orb]))
-    while p.x + p.size < 6 * C.UNITS_PER_BLOCK + C.px_to_units(10):
+    while p.x + p.size < 6 * C.UNITS_PER_BLOCK + 6.0:
         p.update(False, False)
     pose = (p.x, p.y, p.vy)
     fired = []
@@ -1319,7 +1319,7 @@ def _orb_double_touch(multi):
         # JUMP_FORCE (and other per-tick velocities) is ~4x smaller at
         # 240 TPS than at the old 60 TPS, so the "did a jump fire" drop
         # threshold shrinks with it (was 5, now 5/4).
-        fired.append(p.vy < before - C.px_to_units(1.25))
+        fired.append(p.vy < before - 0.75)
         p.update(False, False)
     return fired
 
@@ -1331,7 +1331,7 @@ check("multi_activate orb fires again on a second discrete touch",
 
 _ma_orb = {"t": T_ORB, "x": 6, "y": 9, "r": 0, "multi_activate": True}
 _ma_p = Player(_dash_level([_ma_orb]))
-while _ma_p.x + _ma_p.size < 6 * C.UNITS_PER_BLOCK + C.px_to_units(10):
+while _ma_p.x + _ma_p.size < 6 * C.UNITS_PER_BLOCK + 6.0:
     _ma_p.update(False, False)
 _ma_pose = (_ma_p.x, _ma_p.y, _ma_p.vy)
 _ma_p.update(True, True)
@@ -1343,7 +1343,7 @@ _ma_p.update(True, False)
 # Threshold scaled 5 -> 1.25 for the same reason as _orb_double_touch's
 # 5 -> 1.25 (JUMP_FORCE shrank ~4x under the 240 TPS tick-rate migration).
 check("multi_activate orb does not refire during the same hold",
-      _ma_p.vy > -C.px_to_units(1.25))
+      _ma_p.vy > -0.75)
 _ma_p.update(False, False)
 check("releasing clears the multi-activate hold gate", not _ma_p.held_orbs)
 check("every orb type exposes the multi_activate field",
@@ -1388,12 +1388,12 @@ _pre_x_dir = None
 _post_x_dir = None
 for _f in range(800):
     _pre_x_dir = _dp_dir.x
-    _dp_dir.update(False, _dp_dir.x + _dp_dir.size >= 10 * C.UNITS_PER_BLOCK - C.px_to_units(3))
-    if _dp_dir.x - _pre_x_dir > C.px_to_units(100):
+    _dp_dir.update(False, _dp_dir.x + _dp_dir.size >= 10 * C.UNITS_PER_BLOCK - C.TOUCH_PAD_UNITS)
+    if _dp_dir.x - _pre_x_dir > 2 * C.UNITS_PER_BLOCK:
         _post_x_dir = _dp_dir.x
         break
 check("dir=right teleports the player horizontally",
-      _post_x_dir is not None and _post_x_dir > _pre_x_dir + C.px_to_units(200))
+      _post_x_dir is not None and _post_x_dir > _pre_x_dir + 4 * C.UNITS_PER_BLOCK)
 
 
 # ---------------------------------------------------------------------------
@@ -1450,7 +1450,7 @@ check("path_crosses_hazard misses when path sits well above hazard row",
 class _FakePlayer:
     pass
 _fp = _FakePlayer()
-_fp.x = C.px_to_units(50.0)
+_fp.x = C.UNITS_PER_BLOCK
 _fp.y = 5 * C.UNITS_PER_BLOCK
 _fp.vy = 0.0
 _fp.mode = _MW
@@ -1489,7 +1489,7 @@ check("wave lookahead flips decision when PD choice sails into a spike",
 #    a hazard the main's trajectory avoids. Expect the bot to prefer the
 #    alternative, even when main's own direction is safe.
 _fp2 = _FakePlayer()
-_fp2.x = C.px_to_units(50.0)
+_fp2.x = C.UNITS_PER_BLOCK
 _fp2.y = 5 * C.UNITS_PER_BLOCK
 _fp2.vy = 0.0
 _fp2.mode = _MW
@@ -2199,7 +2199,8 @@ check("spider teleport produces one end-of-frame hitbox sample",
 # fix, T_SLAB was filtered out of the teleport search, so the spider
 # phased right through the slab to the y=10 ceiling.
 from src.constants import T_SLAB as _TSL
-from src.graphics import slab_rect as _slab_rect, cell_rect as _cell_rect
+from src.geometry import (slab_rect_units as _slab_rect,
+                          cell_rect_units as _cell_rect)
 _slab_objs = [{'t': _TB, 'x': i, 'y': 15, 'r': 0} for i in range(40)]
 _slab_objs += [{'t': _TB, 'x': i, 'y': 10, 'r': 0} for i in range(40) if i != _PSG]
 _slab_objs += [{'t': _TSL, 'x': i, 'y': 12, 'r': 180} for i in range(40)]
@@ -2211,11 +2212,11 @@ for _ in range(160):
 _spslab.update(True, True)
 # Slabs span the whole row at y=12, so whichever column the spider is
 # in when the teleport fires, slab_bottom is cell_y=12 bottom = 625.
-_slab_bottom = C.px_to_units(_slab_rect(0, 12, 180, 1.0).bottom)
-_block_bottom = C.px_to_units(_cell_rect(0, 10, 1.0).bottom)
+_slab_bottom = _slab_rect(0, 12, 180, 1.0).bottom
+_block_bottom = _cell_rect(0, 10, 1.0).bottom
 check("spider teleport lands on slab's bottom face (not phasing through)",
-      abs(_spslab.y - _slab_bottom) < C.px_to_units(2)
-      and abs(_spslab.y - _block_bottom) > C.px_to_units(20))
+      abs(_spslab.y - _slab_bottom) < 1.2
+      and abs(_spslab.y - _block_bottom) > 12.0)
 
 # Invisible flag: persisted on ANY object type (universal invisibility),
 # visible is the default, and behavior still runs when set (player
@@ -3252,6 +3253,2718 @@ check("loading another level clears the previous level's bot path",
 check("finishing a solve no longer force-switches to the Bot Path tool",
       "st.edit_tool = TOOL_BOT_PATH"
       not in inspect.getsource(_ms_sess_mod.EditorSession.do_bot_menu))
+
+
+# ---------------------------------------------------------------------------
+# Trigger dispatch: handler registry + ordered same-frame event queue
+# (deep-research-report.md, "Same-frame precedence")
+# ---------------------------------------------------------------------------
+section("Trigger dispatch (registry + ordered event queue)")
+
+from src.constants import (
+    TRIGGER_TYPES as _TQ_TRIGGER_TYPES,
+    T_ITEM_EDIT_TRIGGER as _TQ_EDIT, T_ITEM_COMP_TRIGGER as _TQ_COMP,
+    T_TOGGLE_TRIGGER as _TQ_TOGGLE, T_SPAWN_TRIGGER as _TQ_SPAWN,
+    T_BG_TRIGGER as _TQ_BG,
+)
+from src.objects import SPECS as _TQ_SPECS
+from src.player.trigger_registry import (
+    TRIGGER_HANDLERS as _TQ_HANDLERS,
+    TRIGGER_FAMILY_SPAWN as _TQ_FAM_SPAWN,
+    TRIGGER_FAMILY_TOUCH as _TQ_FAM_TOUCH,
+    TRIGGER_DRAIN_MAX_PASSES as _TQ_MAX_PASSES,
+)
+
+check("every trigger type has exactly one registry handler",
+      set(_TQ_HANDLERS) == set(_TQ_TRIGGER_TYPES))
+check("_execute_trigger_effect is a registry lookup, not an if/elif chain",
+      "TRIGGER_HANDLERS.get" in inspect.getsource(
+          Player._execute_trigger_effect)
+      and "elif t ==" not in inspect.getsource(
+          Player._execute_trigger_effect))
+check("group-targeted triggers expose a Trigger Order field",
+      all(any(f.key == "trigger_order" for f in _TQ_SPECS[t].fields)
+          for t in (_TQ_SPAWN, _TQ_TOGGLE, _TQ_EDIT)))
+check("Trigger Order defaults to 0 and is not written when unset",
+      next(f for f in _TQ_SPECS[_TQ_SPAWN].fields
+           if f.key == "trigger_order").default == 0
+      and next(f for f in _TQ_SPECS[_TQ_SPAWN].fields
+               if f.key == "trigger_order").persist == "non_default")
+check("both activation paths enqueue instead of executing inline",
+      "_enqueue_trigger_event(o, TRIGGER_FAMILY_TOUCH)"
+      in inspect.getsource(Player._handle_interactions)
+      and "_enqueue_trigger_event(o, TRIGGER_FAMILY_SPAWN)"
+      in inspect.getsource(Player._fire_group))
+check("update() drains the queue as the tick's last step",
+      "self._drain_trigger_event_queue()" in inspect.getsource(Player.update))
+
+
+def _tq_item_level(order_add, order_mul):
+    """Two Item Edit triggers on item 1, same group, same x — only their
+    Trigger Order can decide which of (v+5)*3 and v*3+5 comes out."""
+    return make_flat_level(length=30, extras=[
+        {"t": _TQ_EDIT, "x": 12, "y": 5, "r": 0, "groups": [7], "item_id": 1,
+         "operation": "multiply", "operand": 3.0, "trigger_order": order_mul},
+        {"t": _TQ_EDIT, "x": 12, "y": 5, "r": 0, "groups": [7], "item_id": 1,
+         "operation": "add", "operand": 5.0, "trigger_order": order_add},
+    ])
+
+
+def _tq_run_group(objs, group, seed_items=None):
+    p = Player(objs)
+    if seed_items:
+        p.items.update(seed_items)
+    p._fire_group(group)
+    p._drain_trigger_event_queue()
+    return p
+
+
+# List order is multiply-first in both levels, so a result that tracks
+# Trigger Order proves the queue sorted rather than fired in place.
+_tq_add_first = _tq_run_group(_tq_item_level(0, 1), 7, {1: 2.0})
+_tq_mul_first = _tq_run_group(_tq_item_level(1, 0), 7, {1: 2.0})
+check("lower Trigger Order runs first (add then multiply: (2+5)*3)",
+      abs(_tq_add_first.items[1] - 21.0) < 1e-9)
+check("swapping Trigger Order swaps the result (multiply then add: 2*3+5)",
+      abs(_tq_mul_first.items[1] - 11.0) < 1e-9)
+
+
+class _TqLogPlayer(Player):
+    """Player that records the x of every trigger the queue executes."""
+    __slots__ = ("order_log",)
+
+    def _execute_trigger_effect(self, o):
+        self.order_log.append(o["x"])
+        Player._execute_trigger_effect(self, o)
+
+
+# Three spawn-chain members of one group, listed right-to-left, all at the
+# same (default) Trigger Order: only left-to-right x ordering can sort them.
+_tq_x_objs = make_flat_level(length=40, extras=[
+    {"t": _TQ_EDIT, "x": 30, "y": 5, "r": 0, "groups": [4], "item_id": 2,
+     "operation": "add", "operand": 1.0},
+    {"t": _TQ_EDIT, "x": 10, "y": 5, "r": 0, "groups": [4], "item_id": 2,
+     "operation": "add", "operand": 1.0},
+    {"t": _TQ_EDIT, "x": 20, "y": 5, "r": 0, "groups": [4], "item_id": 2,
+     "operation": "add", "operand": 1.0},
+])
+_tq_xp = _TqLogPlayer(_tq_x_objs)
+_tq_xp.order_log = []
+_tq_xp._fire_group(4)
+_tq_xp._drain_trigger_event_queue()
+check("spawned triggers execute left-to-right by x",
+      _tq_xp.order_log == [10, 20, 30])
+check("every spawned trigger in the group ran exactly once",
+      abs(_tq_xp.items[2] - 3.0) < 1e-9)
+
+# Recursion: group 3 = Item Edit (+1 on item 5) then Item Comp (fires group
+# 3 again while item 5 < 5) then a Toggle that disables group 6. The chain
+# must settle inside a single tick, and the Toggle it fires must still take
+# effect on the same tick's later activations.
+_tq_rec_objs = make_flat_level(length=40, extras=[
+    {"t": _TQ_EDIT, "x": 10, "y": 5, "r": 0, "groups": [3], "item_id": 5,
+     "operation": "add", "operand": 1.0},
+    {"t": _TQ_TOGGLE, "x": 11, "y": 5, "r": 0, "groups": [3],
+     "target_group": 6, "state": False},
+    {"t": _TQ_COMP, "x": 12, "y": 5, "r": 0, "groups": [3], "item_id": 5,
+     "comparator": "<", "value": 5.0, "target_group": 3},
+    {"t": _TQ_BG, "x": 13, "y": 5, "r": 0, "groups": [6], "bg": 4},
+])
+_tq_rec = _TqLogPlayer(_tq_rec_objs)
+_tq_rec.order_log = []
+_tq_rec._fire_group(3)
+_tq_rec._drain_trigger_event_queue()
+check("a recursive Spawn/Toggle/Comp chain terminates within one tick",
+      abs(_tq_rec.items[5] - 5.0) < 1e-9
+      and _tq_rec._trigger_event_queue == [])
+check("recursion re-runs the whole group each pass, still in x order",
+      _tq_rec.order_log[:3] == [10, 11, 12]
+      and len(_tq_rec.order_log) == 15)
+check("a Toggle fired mid-chain disables its group for the same tick",
+      6 in _tq_rec._trigger_disabled)
+_tq_rec._fire_group(6)
+_tq_rec._drain_trigger_event_queue()
+check("the disabled group's trigger never runs",
+      _tq_rec.bg_preset == 0)
+
+# Unbounded self-refire: the drain guard must drop the tick, not hang.
+_tq_loop_objs = make_flat_level(length=30, extras=[
+    {"t": _TQ_COMP, "x": 10, "y": 5, "r": 0, "groups": [8], "item_id": 9,
+     "comparator": ">=", "value": 0.0, "target_group": 8},
+])
+_tq_loop = _TqLogPlayer(_tq_loop_objs)
+_tq_loop.order_log = []
+_tq_loop._fire_group(8)
+_tq_loop._drain_trigger_event_queue()
+check("an infinite trigger loop is cut off by the pass guard",
+      len(_tq_loop.order_log) == _TQ_MAX_PASSES
+      and _tq_loop._trigger_event_queue == [])
+
+# End-to-end through update(): a touched trigger still fires on the tick it
+# was touched, and the queue is always empty between ticks.
+_tq_touch_objs = make_flat_level(length=40, extras=[
+    {"t": _TQ_BG, "x": 12, "y": 9, "r": 0, "bg": 3},
+])
+_tq_touch = Player(_tq_touch_objs)
+for _ in range(400):
+    _tq_touch.update(False, False)
+    if _tq_touch._trigger_event_queue:
+        break
+    if _tq_touch.bg_preset == 3 or not _tq_touch.alive or _tq_touch.won:
+        break
+check("a touched trigger still takes effect (bg_preset changed)",
+      _tq_touch.bg_preset == 3)
+check("the event queue is empty between ticks",
+      _tq_touch._trigger_event_queue == [])
+check("touch ranks after spawn in the same tick",
+      _TQ_FAM_SPAWN < _TQ_FAM_TOUCH)
+
+
+# ---------------------------------------------------------------------------
+# Area system: Area / Edit Area / Area Stop
+# (deep-research-report.md, "Area and keyframe system")
+# ---------------------------------------------------------------------------
+section("Area effects (Area / Edit Area / Area Stop)")
+
+from src.constants import (
+    AREA_TRIGGER_TYPES as _AR_TYPES,
+    AREA_START_TRIGGER_TYPES as _AR_START_TYPES,
+    EDIT_AREA_TRIGGER_TYPES as _AR_EDIT_TYPES,
+    T_AREA_MOVE_TRIGGER as _AR_MOVE, T_AREA_ROTATE_TRIGGER as _AR_ROT,
+    T_AREA_SCALE_TRIGGER as _AR_SCALE, T_AREA_FADE_TRIGGER as _AR_FADE,
+    T_AREA_TINT_TRIGGER as _AR_TINT, T_AREA_STOP_TRIGGER as _AR_STOP,
+    T_EDIT_AREA_MOVE_TRIGGER as _AR_EMOVE,
+    T_EDIT_AREA_ROTATE_TRIGGER as _AR_EROT,
+)
+from src.objects import (
+    CAT_AREA as _AR_CAT, CATEGORY_ORDER as _AR_CAT_ORDER,
+    PALETTE_CATEGORIES as _AR_PALETTE, spec_for as _ar_spec_for,
+)
+from src.geometry import obj_tint as _ar_obj_tint
+
+# --- registry / schema wiring (no gaps between the three tables) -----------
+check("all 11 Area types are registered as trigger types",
+      len(_AR_TYPES) == 11 and _AR_TYPES <= _TQ_TRIGGER_TYPES)
+check("all 11 Area types have a registry handler",
+      _AR_TYPES <= set(_TQ_HANDLERS))
+check("each Area type has its own distinct handler",
+      len({_TQ_HANDLERS[t] for t in _AR_TYPES}) == 11)
+check("the per-tick area stepper is NOT a queued trigger handler",
+      Player._step_area_effects not in set(_TQ_HANDLERS.values())
+      and "self._step_area_effects()" in inspect.getsource(Player.update))
+check("Edit Area / Area Stop stay gated by Toggle like Move/Rotate/Scale",
+      not (_AR_TYPES & C.CONTROL_TRIGGER_TYPES))
+check("the Area palette tab exists and holds exactly the 11 Area types",
+      _AR_CAT in _AR_CAT_ORDER
+      and set(dict(_AR_PALETTE)[_AR_CAT]) == set(_AR_TYPES))
+
+# Object ids straight off the report's table.
+_AR_REPORT_IDS = {
+    _AR_MOVE: 3006, _AR_ROT: 3007, _AR_SCALE: 3008, _AR_FADE: 3009,
+    _AR_TINT: 3010, _AR_EMOVE: 3011, _AR_EROT: 3012,
+    C.T_EDIT_AREA_SCALE_TRIGGER: 3013, C.T_EDIT_AREA_FADE_TRIGGER: 3014,
+    C.T_EDIT_AREA_TINT_TRIGGER: 3015, _AR_STOP: 3024,
+}
+check("every Area spec carries the report's GD object id",
+      all(_ar_spec_for(t).gd_object_id == gid
+          for t, gid in _AR_REPORT_IDS.items()))
+check("Area specs are marked partial (ids report-sourced, ranges engine-chosen)",
+      all(_ar_spec_for(t).verification == "partial" for t in _AR_TYPES))
+# Report's shared vocabulary: Length 222, Length+- 223, offset 220,
+# Y-offset 252, EffectID 225, target 51, center 71, priority 341.
+_AR_REPORT_KEYS = {"length": 222, "length_variance": 223, "offset": 220,
+                   "y_offset": 252, "effect_id": 225, "target_group": 51,
+                   "center_group": 71, "priority": 341}
+check("every Area field carries the report's GD property key",
+      all(_ar_spec_for(t).field(k).gd_key == v
+          for t in (_AR_START_TYPES | _AR_EDIT_TYPES)
+          for k, v in _AR_REPORT_KEYS.items()))
+check("Area Stop carries only the Effect id it ends",
+      [f.key for f in _ar_spec_for(_AR_STOP).fields][:1] == ["effect_id"]
+      and _ar_spec_for(_AR_STOP).field("target_group") is None
+      and _ar_spec_for(_AR_STOP).field("length") is None)
+check("Length is stored as a grid-square float, not GD's tenths int",
+      _ar_spec_for(_AR_MOVE).field("length").kind == "float"
+      and _ar_spec_for(_AR_MOVE).field("length").default == 3.0)
+check("every Area spec renders a schema-driven property panel with no new code",
+      all(_ar_spec_for(t).fields
+          and all(f.kind in ("int", "float", "bool", "choice")
+                  and f.label for f in _ar_spec_for(t).fields)
+          for t in _AR_TYPES))
+
+
+def _ar_trigger(t, group, **fields):
+    """One Area-family trigger, fired via _fire_group(``group``)."""
+    o = {"t": t, "x": 1, "y": 1, "r": 0, "groups": [group]}
+    o.update(fields)
+    return o
+
+
+def _ar_level(*extras):
+    """Center-group anchor at (10, 5), an in-range target 2 squares away
+    and an out-of-range one 30 squares away, both in target group 50."""
+    return make_flat_level(length=60, extras=[
+        {"t": T_BLOCK, "x": 10, "y": 5, "r": 0, "groups": [51]},
+        {"t": T_BLOCK, "x": 12, "y": 5, "r": 0, "groups": [50]},
+        {"t": T_BLOCK, "x": 40, "y": 5, "r": 0, "groups": [50]},
+        *extras,
+    ])
+
+
+_AR_NEAR = -3   # indices into the list _ar_level builds (extras go last)
+_AR_FAR = -2
+
+
+def _ar_area_move(group=60, **over):
+    fields = {"effect_id": 3, "length": 5.0, "length_variance": 0.0,
+              "offset": 0.0, "y_offset": 0.0, "center_group": 51,
+              "target_group": 50, "priority": 0, "dx": 10, "dy": 0}
+    fields.update(over)
+    return _ar_trigger(_AR_MOVE, group, **fields)
+
+
+def _ar_fire(p, group):
+    p._fire_group(group)
+    p._drain_trigger_event_queue()
+
+
+def _ar_step(p, ticks):
+    for _ in range(ticks):
+        p._step_area_effects()
+
+
+def _ar_pos(o):
+    return float(o.get("_fx", o["x"]))
+
+
+# --- 1: inside the radius animates, outside does not -----------------------
+_ar_objs = _ar_level(_ar_area_move())
+_ar_p = Player(_ar_objs)
+_ar_near = _ar_p.objects[-3]
+_ar_far = _ar_p.objects[-2]
+_ar_fire(_ar_p, 60)
+check("an Area Move registers a live effect under its Effect id",
+      list(_ar_p.active_areas) == [3]
+      and _ar_p.active_areas[3]["kind"] == "move")
+_ar_step(_ar_p, 60)
+check("an object inside the Area Move radius animates",
+      _ar_pos(_ar_near) > 12.0)
+check("an identical object outside the radius does not move",
+      _ar_pos(_ar_far) == 40.0)
+# 60 ticks at 10 grid/s = 0.25s = 2.5 squares, at full strength (dist 2
+# start, dist 4.5 end -- still inside Length 5).
+check("the drift rate is the authored grid squares per second",
+      abs(_ar_pos(_ar_near) - 14.5) < 0.05)
+
+# --- 2: falloff between Length and Length +- -------------------------------
+_ar_fall_objs = _ar_level(_ar_area_move(length=2.0, length_variance=10.0),
+                          {"t": T_BLOCK, "x": 17, "y": 5, "r": 0,
+                           "groups": [50]})
+_ar_fall = Player(_ar_fall_objs)
+_ar_inside = _ar_fall.objects[-4]      # dist 2 -> full strength
+_ar_band = _ar_fall.objects[-1]        # dist 7 -> half strength
+_ar_fire(_ar_fall, 60)
+_ar_step(_ar_fall, 12)
+check("an object in the Length +- band moves, but slower than one at full "
+      "strength",
+      0.0 < (_ar_pos(_ar_band) - 17.0) < (_ar_pos(_ar_inside) - 12.0))
+
+# --- 3: Edit Area Move retunes a live effect mid-flight ---------------------
+_ar_edit_objs = _ar_level(
+    _ar_area_move(),
+    _ar_trigger(_AR_EMOVE, 61, effect_id=3, length=40.0),
+    _ar_trigger(_AR_EMOVE, 62, effect_id=99, length=40.0),
+    _ar_trigger(_AR_EROT, 63, effect_id=3, degrees=180.0))
+_ar_ed = Player(_ar_edit_objs)
+_ar_ed_near = _ar_ed.objects[-6]
+_ar_ed_far = _ar_ed.objects[-5]
+_ar_fire(_ar_ed, 60)
+_ar_step(_ar_ed, 30)
+check("before the edit the far object is out of range",
+      _ar_pos(_ar_ed_far) == 40.0)
+_ar_fire(_ar_ed, 62)
+check("an Edit Area naming an unknown Effect id changes nothing",
+      _ar_ed.active_areas[3]["length"] == 5.0)
+_ar_fire(_ar_ed, 63)
+check("an Edit Area of the wrong kind leaves the effect alone",
+      _ar_ed.active_areas[3]["kind"] == "move"
+      and "degrees" not in _ar_ed.active_areas[3])
+_ar_fire(_ar_ed, 61)
+check("Edit Area Move patches the live effect's length in place",
+      _ar_ed.active_areas[3]["length"] == 40.0)
+check("Edit Area only patches the fields it carries",
+      _ar_ed.active_areas[3]["dx"] == 10.0
+      and _ar_ed.active_areas[3]["target_group"] == 50)
+_ar_step(_ar_ed, 30)
+check("the grown radius pulls the previously-out-of-range object in",
+      _ar_pos(_ar_ed_far) > 40.0)
+check("an Edit Area never creates an effect of its own",
+      list(_ar_ed.active_areas) == [3])
+
+# --- 4: Area Stop ends the effect ------------------------------------------
+_ar_stop_objs = _ar_level(_ar_area_move(),
+                          _ar_trigger(_AR_STOP, 64, effect_id=3))
+_ar_st = Player(_ar_stop_objs)
+_ar_st_near = _ar_st.objects[-4]
+_ar_fire(_ar_st, 60)
+_ar_step(_ar_st, 30)
+_ar_moved_to = _ar_pos(_ar_st_near)
+_ar_fire(_ar_st, 64)
+check("Area Stop drops the effect with that Effect id",
+      3 not in _ar_st.active_areas and _ar_st.active_areas == {})
+_ar_step(_ar_st, 60)
+check("the previously-affected object stops animating after Area Stop",
+      _ar_pos(_ar_st_near) == _ar_moved_to and _ar_moved_to > 12.0)
+
+# --- 5: reusing an Effect id replaces the effect (documented last-wins) -----
+_ar_reuse = Player(_ar_level(_ar_area_move(),
+                             _ar_area_move(group=65, dx=0, dy=7)))
+_ar_fire(_ar_reuse, 60)
+_ar_fire(_ar_reuse, 65)
+check("re-firing an Effect id replaces the live effect, never stacks",
+      len(_ar_reuse.active_areas) == 1
+      and _ar_reuse.active_areas[3]["dy"] == 7.0)
+
+# --- 6: the non-move kinds ---------------------------------------------------
+_ar_fade = Player(_ar_level(_ar_trigger(
+    _AR_FADE, 60, effect_id=4, length=5.0, length_variance=0.0, offset=0.0,
+    y_offset=0.0, center_group=51, target_group=50, priority=0,
+    target_alpha=0.0)))
+_ar_fire(_ar_fade, 60)
+_ar_step(_ar_fade, 1)
+check("Area Fade fades what is inside the radius and not what is outside",
+      _ar_fade.objects[-3]["_alpha"] == 0.0
+      and _ar_fade.objects[-2]["_alpha"] == 1.0)
+
+_ar_sc = Player(_ar_level(_ar_trigger(
+    _AR_SCALE, 60, effect_id=5, length=5.0, length_variance=0.0, offset=0.0,
+    y_offset=0.0, center_group=51, target_group=50, priority=0,
+    sx=3.0, sy=3.0)))
+_ar_fire(_ar_sc, 60)
+_ar_step(_ar_sc, 1)
+check("Area Scale scales what is inside the radius and not what is outside",
+      _ar_sc.objects[-3]["sx"] == 3.0
+      and _ar_sc.objects[-2].get("sx", 1.0) == 1.0)
+
+_ar_ro = Player(_ar_level(_ar_trigger(
+    _AR_ROT, 60, effect_id=6, length=5.0, length_variance=0.0, offset=0.0,
+    y_offset=0.0, center_group=51, target_group=50, priority=0,
+    degrees=240.0)))
+_ar_fire(_ar_ro, 60)
+_ar_step(_ar_ro, C.PHYSICS_TPS // 2)
+check("Area Rotate spins what is inside the radius at the authored deg/s",
+      abs(_ar_ro.objects[-3]["r"] - 120.0) < 1.0
+      and _ar_ro.objects[-2].get("r", 0) == 0)
+
+_ar_ti = Player(_ar_level(_ar_trigger(
+    _AR_TINT, 60, effect_id=7, length=5.0, length_variance=0.0, offset=0.0,
+    y_offset=0.0, center_group=51, target_group=50, priority=0,
+    target_channel=2)))
+_ar_fire(_ar_ti, 60)
+_ar_step(_ar_ti, 1)
+check("Area Tint tints what is inside the radius and not what is outside",
+      _ar_obj_tint(_ar_ti.objects[-3]) is not None
+      and _ar_obj_tint(_ar_ti.objects[-2]) is None)
+
+# --- 7: the offset keys shift the effect's center ---------------------------
+_ar_off = Player(_ar_level(_ar_area_move(length=1.0, offset=30.0)))
+_ar_fire(_ar_off, 60)
+_ar_step(_ar_off, 30)
+check("Offset x shifts the falloff center away from the center group",
+      _ar_pos(_ar_off.objects[-2]) > 40.0
+      and _ar_pos(_ar_off.objects[-3]) == 12.0)
+
+# --- 8: end to end through update(), fired by a real touch ------------------
+_ar_touch = Player(make_flat_level(length=60, extras=[
+    {"t": T_BLOCK, "x": 20, "y": 5, "r": 0, "groups": [51]},
+    {"t": T_BLOCK, "x": 21, "y": 5, "r": 0, "groups": [50]},
+    _ar_area_move(group=60, **{"touch_activated": True}) | {"x": 12, "y": 9},
+]))
+_ar_touch_target = _ar_touch.objects[-2]   # extras order: anchor, target, trigger
+for _ in range(600):
+    _ar_touch.update(False, False)
+    if not _ar_touch.alive or _ar_touch.won:
+        break
+check("a touched Area Move starts a live effect through the normal queue",
+      3 in _ar_touch.active_areas)
+check("update()'s stepper advances the live area effect",
+      _ar_pos(_ar_touch_target) > 21.0)
+
+# --- 9: save/load round-trip of all 11 new types ----------------------------
+
+
+def _ar_alt_value(f):
+    """A legal, non-default value for one Field, so the round-trip proves
+    the value survived rather than that both sides defaulted."""
+    if f.kind == "bool":
+        return not bool(f.default)
+    if f.kind == "choice":
+        return f.choices[1] if len(f.choices) > 1 else f.choices[0]
+    return f.coerce(f.default + (f.step if f.kind == "float" else 1))
+
+
+_ar_rt_objs = []
+_ar_rt_expect = {}
+for _ar_i, _ar_t in enumerate(sorted(_AR_TYPES)):
+    _ar_o = {"t": _ar_t, "x": _ar_i, "y": 4, "r": 0}
+    for _ar_f in _ar_spec_for(_ar_t).fields:
+        _ar_o[_ar_f.key] = _ar_alt_value(_ar_f)
+    _ar_rt_expect[_ar_t] = dict(_ar_o)
+    _ar_rt_objs.append(_ar_o)
+_ar_rt_path = save_level(_ar_rt_objs, "Area RT", "area-roundtrip")
+_ar_rt_loaded = {o["t"]: o for o in load_level(_ar_rt_path)[1]}
+check("every Area type survives a save/load round-trip",
+      set(_ar_rt_loaded) == set(_AR_TYPES))
+_ar_rt_bad = [
+    (t, f.key)
+    for t in _AR_TYPES
+    for f in _ar_spec_for(t).fields
+    if _ar_rt_loaded[t].get(f.key) != _ar_rt_expect[t][f.key]
+]
+check("every Area field round-trips with its authored value",
+      _ar_rt_bad == [])
+check("the round-trip wrote no numeric GD keys into the save format",
+      all(not any(str(k).isdigit() for k in o)
+          for o in _ar_rt_loaded.values()))
+
+
+# ---------------------------------------------------------------------------
+# Random Trigger, Advanced Random Trigger, Force Block
+# (deep-research-report.md, "Core object, paired, and item triggers" +
+#  "Force and state precedence" + "Representative full-format records")
+# ---------------------------------------------------------------------------
+section("Random / Advanced Random / Force Block")
+
+import random as _rn_random
+
+from src.constants import (
+    T_RANDOM_TRIGGER as _RN_RANDOM,
+    T_ADVANCED_RANDOM_TRIGGER as _RN_ADV,
+    T_FORCE_BLOCK as _RN_FORCE,
+    RANDOM_TRIGGER_TYPES as _RN_TYPES,
+    ADVANCED_RANDOM_MAX_PAIRS as _RN_MAX_PAIRS,
+    ADVANCED_RANDOM_EDITOR_SLOTS as _RN_SLOTS,
+    UNITS_PER_BLOCK as _RN_UPB,
+)
+from src.objects import (
+    parse_weighted_list as _rn_parse,
+    format_weighted_list as _rn_format,
+    advanced_random_weighted_list as _rn_list_for,
+)
+
+# --- registry / schema wiring (no gaps, and no *wrong* entries either) ------
+check("both random triggers are registered as trigger types",
+      _RN_TYPES == {_RN_RANDOM, _RN_ADV} and _RN_TYPES <= _TQ_TRIGGER_TYPES)
+check("both random triggers have a registry handler",
+      _RN_TYPES <= set(_TQ_HANDLERS))
+check("each random trigger has its own distinct handler",
+      len({_TQ_HANDLERS[t] for t in _RN_TYPES}) == 2)
+check("the registry still has no gaps after adding them",
+      set(_TQ_HANDLERS) == set(_TQ_TRIGGER_TYPES))
+# Falsification: Force Block fires no group, so a future contributor
+# "helpfully" adding it to either table must break the suite.
+check("Force Block is NOT a trigger type",
+      _RN_FORCE not in _TQ_TRIGGER_TYPES
+      and _RN_FORCE not in C.CONTROL_TRIGGER_TYPES)
+check("Force Block has NO registry handler",
+      _RN_FORCE not in _TQ_HANDLERS)
+check("Force Block targets no group and carries no activation fields",
+      all(_ar_spec_for(_RN_FORCE).field(k) is None
+          for k in ("target_group", "target_group2", "touch_activated",
+                    "multi_activate", "trigger_order")))
+check("the random triggers ARE the run-other-triggers family (Toggle bypass)",
+      _RN_TYPES <= C.CONTROL_TRIGGER_TYPES)
+check("Advanced Random targets its own slots, not a single target_group",
+      _ar_spec_for(_RN_ADV).field("target_group") is None
+      and _ar_spec_for(_RN_ADV).field("group1") is not None)
+check("Random Trigger picks between target_group and target_group2",
+      _ar_spec_for(_RN_RANDOM).field("target_group") is not None
+      and _ar_spec_for(_RN_RANDOM).field("target_group2") is not None)
+check("the Target group row is not duplicated on the Random Trigger",
+      [f.key for f in _ar_spec_for(_RN_RANDOM).fields].count("target_group")
+      == 1)
+
+# Object ids straight off the report's table.
+check("every new spec carries the report's GD object id",
+      _ar_spec_for(_RN_RANDOM).gd_object_id == 1912
+      and _ar_spec_for(_RN_ADV).gd_object_id == 2068
+      and _ar_spec_for(_RN_FORCE).gd_object_id == 2069)
+check("all three specs are marked partial (ids report-sourced, rest chosen)",
+      all(_ar_spec_for(t).verification == "partial"
+          for t in (_RN_RANDOM, _RN_ADV, _RN_FORCE)))
+# FlowVix's force field map, quoted by the report.
+_RN_FORCE_KEYS = {"relative": 528, "force": 149, "min_force": 526,
+                  "max_force": 527, "force_range": 529, "force_id": 530}
+check("every Force Block field carries FlowVix's GD property key",
+      all(_ar_spec_for(_RN_FORCE).field(k).gd_key == v
+          for k, v in _RN_FORCE_KEYS.items()))
+check("Force Block sits in the same palette tab as the letter blocks",
+      _ar_spec_for(_RN_FORCE).category
+      == _ar_spec_for(C.T_DASH_STOP).category)
+check("both random triggers sit in the Triggers tab beside Spawn/Sequence",
+      _ar_spec_for(_RN_RANDOM).category
+      == _ar_spec_for(_RN_ADV).category
+      == _ar_spec_for(_TQ_SPAWN).category)
+check("all three render a schema-driven property panel with no new code",
+      all(_ar_spec_for(t).fields
+          and all(f.kind in ("int", "float", "bool", "choice") and f.label
+                  for f in _ar_spec_for(t).fields)
+          for t in (_RN_RANDOM, _RN_ADV, _RN_FORCE)))
+check("the editor exposes exactly ADVANCED_RANDOM_EDITOR_SLOTS pairs",
+      all(_ar_spec_for(_RN_ADV).field(f"group{i}") is not None
+          and _ar_spec_for(_RN_ADV).field(f"weight{i}") is not None
+          for i in range(1, _RN_SLOTS + 1))
+      and _ar_spec_for(_RN_ADV).field(f"group{_RN_SLOTS + 1}") is None)
+
+# --- weighted-list format (the engine side stays generic over 20 pairs) -----
+check("the report's own sample list parses to its documented pairs",
+      _rn_parse("2.10.3.15") == [(2, 10), (3, 15)])
+check("the weighted list round-trips through the report's string form",
+      _rn_format(_rn_parse("2.10.3.15")) == "2.10.3.15")
+check("the parser accepts the full 20-pair format the editor cannot show",
+      len(_rn_parse(_rn_format([(i, i) for i in range(1, 40)])))
+      == _RN_MAX_PAIRS == 20)
+check("zero-weight slots drop out instead of taking 0% of the draw",
+      _rn_parse("2.10.0.0.3.15.0.0") == [(2, 10), (3, 15)])
+check("a malformed or truncated list is ignored, not crashed on",
+      _rn_parse("2.10.3") == [(2, 10)] and _rn_parse("x.y") == []
+      and _rn_parse("") == [] and _rn_parse(None) == [])
+check("editor slots serialize into the report's string form",
+      _rn_list_for({"group1": 2, "weight1": 10, "group2": 3, "weight2": 15})
+      == "2.10.3.15")
+check("an unauthored Advanced Random serializes to an empty list",
+      _rn_list_for({}) == "")
+check("an explicit weighted_list string wins over the editor slots",
+      _rn_list_for({"group1": 9, "weight1": 1, "weighted_list": "4.1.5.2"})
+      == "4.1.5.2")
+
+
+def _rn_counter(group, item_id):
+    """An Item Edit trigger in ``group`` that adds 1 to ``item_id`` --
+    a group whose firing is observable in Player.items."""
+    return {"t": _TQ_EDIT, "x": 1, "y": 1, "r": 0, "groups": [group],
+            "item_id": item_id, "operation": "add", "operand": 1.0}
+
+
+def _rn_fire(p, obj):
+    """Enqueue + drain one trigger, the same path a touch/spawn takes."""
+    p._enqueue_trigger_event(obj, _TQ_FAM_SPAWN)
+    p._drain_trigger_event_queue()
+
+
+def _rn_player(trigger):
+    return Player(make_flat_level(length=30, extras=[
+        _rn_counter(70, 1), _rn_counter(71, 2), _rn_counter(72, 3),
+        trigger,
+    ]))
+
+
+def _rn_run(trigger, trials, seed=1234):
+    """Fire ``trigger`` ``trials`` times; return the per-item tallies."""
+    p = _rn_player(trigger)
+    obj = p.objects[-1]
+    _rn_random.seed(seed)
+    for _ in range(trials):
+        _rn_fire(p, obj)
+    return p.items
+
+
+# --- Random Trigger: the two deterministic edges ----------------------------
+_RN_TRIG = {"t": _RN_RANDOM, "x": 5, "y": 5, "r": 0,
+            "target_group": 70, "target_group2": 71}
+_rn_always = _rn_run(_RN_TRIG | {"chance": 100.0}, 500)
+check("chance=100 always fires the first target group",
+      _rn_always.get(1) == 500 and _rn_always.get(2, 0) == 0)
+_rn_never = _rn_run(_RN_TRIG | {"chance": 0.0}, 500)
+check("chance=0 always fires the second target group",
+      _rn_never.get(2) == 500 and _rn_never.get(1, 0) == 0)
+_rn_even = _rn_run(_RN_TRIG | {"chance": 50.0}, 2000)
+check("chance=50 splits both ways (neither group is dead code)",
+      800 < _rn_even.get(1, 0) < 1200 and 800 < _rn_even.get(2, 0) < 1200
+      and _rn_even.get(1, 0) + _rn_even.get(2, 0) == 2000)
+check("a Random Trigger with an empty second group simply fires nothing",
+      _rn_run(_RN_TRIG | {"chance": 0.0, "target_group2": 0}, 50) == {})
+
+# --- Advanced Random: P(i) = 100 * w_i / sum(w_j) ---------------------------
+# The report's own sample payload: groups weighted 10 and 15, i.e. 40/60.
+_RN_ADV_TRIG = {"t": _RN_ADV, "x": 5, "y": 5, "r": 0,
+                "group1": 70, "weight1": 10, "group2": 71, "weight2": 15,
+                "group3": 0, "weight3": 0, "group4": 0, "weight4": 0}
+_RN_TRIALS = 2000
+_rn_weighted = _rn_run(_RN_ADV_TRIG, _RN_TRIALS)
+_rn_a = _rn_weighted.get(1, 0)
+_rn_b = _rn_weighted.get(2, 0)
+check("every Advanced Random draw picks exactly one group",
+      _rn_a + _rn_b == _RN_TRIALS and _rn_weighted.get(3, 0) == 0)
+# Seeded RNG + a +/-5pp band: ~4.4 standard deviations at n=2000, so this
+# cannot flake on the seed while still failing any real mis-weighting
+# (an even 50/50 split, or the two groups swapped, is 10pp out).
+check("weights 10/15 land within 5pp of the report's 40/60 split",
+      abs(_rn_a / _RN_TRIALS - 0.40) < 0.05
+      and abs(_rn_b / _RN_TRIALS - 0.60) < 0.05)
+check("the heavier weight really is the more likely one", _rn_b > _rn_a)
+check("an Advanced Random with every weight at 0 is inert",
+      _rn_run({"t": _RN_ADV, "x": 5, "y": 5, "r": 0}, 100) == {})
+check("a single weighted slot always wins",
+      _rn_run({"t": _RN_ADV, "x": 5, "y": 5, "r": 0,
+               "group1": 72, "weight1": 7}, 200).get(3) == 200)
+check("the handler reads a full weighted_list string, not just the slots",
+      _rn_run({"t": _RN_ADV, "x": 5, "y": 5, "r": 0,
+               "weighted_list": "72.5"}, 200).get(3) == 200)
+
+# --- Force Block: the report's stacking law ---------------------------------
+_RN_FORCE_UP = -6.0   # units/tick, ~2x a cube jump
+
+
+def _rn_force_block(force_id, **over):
+    o = {"t": _RN_FORCE, "x": 3, "y": 9, "r": 0, "force": _RN_FORCE_UP,
+         "relative": False, "min_force": 0.0, "max_force": 0.0,
+         "force_range": 1.0, "force_id": force_id}
+    o.update(over)
+    return o
+
+
+def _rn_force_player(*blocks):
+    """A player sitting exactly on the spawn cell the blocks occupy."""
+    return Player(make_flat_level(length=30, extras=list(blocks)))
+
+
+def _rn_vy_after_one_tick(*blocks):
+    p = _rn_force_player(*blocks)
+    p.update(False, False)
+    return p.vy
+
+
+_rn_vy_none = _rn_vy_after_one_tick()
+_rn_vy_one = _rn_vy_after_one_tick(_rn_force_block(7))
+_rn_vy_same = _rn_vy_after_one_tick(_rn_force_block(7), _rn_force_block(7))
+_rn_vy_diff = _rn_vy_after_one_tick(_rn_force_block(7), _rn_force_block(8))
+check("a Force Block reaches vy through _handle_interactions",
+      abs((_rn_vy_one - _rn_vy_none) - _RN_FORCE_UP) < 1e-6)
+# The report, verbatim: "same ForceID -> forces do not stack".
+check("two Force Blocks sharing a ForceID apply exactly one impulse",
+      abs(_rn_vy_same - _rn_vy_one) < 1e-6)
+# The report, verbatim: "different ForceID -> forces stack".
+check("two Force Blocks with different ForceIDs both apply (they stack)",
+      abs((_rn_vy_diff - _rn_vy_none) - 2 * _RN_FORCE_UP) < 1e-6)
+check("stacking is a real doubling, not the single-impulse result",
+      abs(_rn_vy_diff - _rn_vy_same) > abs(_RN_FORCE_UP) / 2)
+_rn_ground = _rn_force_player()
+_rn_ground.update(False, False)
+_rn_ground.on_ground = True
+_rn_ground.vy = 0.0
+_rn_ground._force_ids_this_frame.clear()
+_rn_ground._apply_force_block(_rn_ground, _rn_force_block(20))
+check("a push away from the floor ungrounds the player",
+      _rn_ground.on_ground is False)
+_rn_ground.on_ground = True
+_rn_ground.vy = 0.0
+_rn_ground._force_ids_this_frame.clear()
+_rn_ground._apply_force_block(_rn_ground,
+                             _rn_force_block(21, force=-_RN_FORCE_UP))
+check("a push into the floor leaves the player grounded",
+      _rn_ground.on_ground is True and _rn_ground.vy > 0)
+
+# The ForceID set is per-FRAME, not per-attempt: the same block must be
+# able to push again on the next tick.
+_rn_multi = _rn_force_player(_rn_force_block(7))
+_rn_multi.update(False, False)
+_rn_first = _rn_multi.vy
+_rn_ids_mid = set(_rn_multi._force_ids_this_frame)
+_rn_multi.update(False, False)
+check("a ForceID applied last frame is free to apply again this frame",
+      _rn_multi.vy < _rn_first)
+check("the ForceID set records the block that fired, then clears next tick",
+      _rn_ids_mid == {7})
+check("the ForceID set is empty on a fresh reset",
+      Player(make_flat_level(length=10))._force_ids_this_frame == set())
+
+# Direct-call checks for the field semantics, so the clamp/range/relative
+# readings are pinned independently of a whole simulation tick.
+_rn_direct = _rn_force_player()
+_rn_direct.vy = 0.0
+check("min/max of 0 leave the impulse unclamped (pure ADD)",
+      _rn_direct._apply_force_block(_rn_direct, _rn_force_block(1))
+      and abs(_rn_direct.vy - _RN_FORCE_UP) < 1e-6)
+_rn_direct.vy = 0.0
+check("max_force clamps the resulting speed magnitude",
+      _rn_direct._apply_force_block(_rn_direct,
+                                    _rn_force_block(2, max_force=2.0))
+      and abs(_rn_direct.vy + 2.0) < 1e-6)
+_rn_direct.vy = 0.0
+check("min_force floors the resulting speed magnitude along the push",
+      _rn_direct._apply_force_block(_rn_direct,
+                                    _rn_force_block(3, force=-0.25,
+                                                    min_force=4.0))
+      and abs(_rn_direct.vy + 4.0) < 1e-6)
+_rn_direct.vy = 0.0
+_rn_direct.grav = -1
+check("relative=True mirrors the push when gravity is flipped",
+      _rn_direct._apply_force_block(_rn_direct,
+                                    _rn_force_block(4, relative=True))
+      and abs(_rn_direct.vy + _RN_FORCE_UP) < 1e-6)
+_rn_direct.grav = 1
+_rn_direct.vy = 0.0
+check("a block outside its own range does nothing",
+      _rn_direct._apply_force_block(
+          _rn_direct, _rn_force_block(5, x=3, y=6, force_range=0.5)) is False
+      and _rn_direct.vy == 0.0)
+_rn_direct.vy = 0.0
+check("a wider range reaches a block the default range would miss",
+      _rn_direct._apply_force_block(
+          _rn_direct, _rn_force_block(6, x=3, y=8, force_range=2.0)) is True)
+# Scope guard: the impulse is a contact response next to the letter
+# blocks, NOT a physics/collision change (plan Checkpoint 3's one hard
+# constraint). If someone moves it into the gravity or hitbox code this
+# fails rather than silently drifting.
+_RN_CONTACT_SRC = inspect.getsource(Player._handle_interactions)
+check("the Force Block branch lives beside the letter blocks' contact tests",
+      "T_FORCE_BLOCK" in _RN_CONTACT_SRC and "T_DASH_STOP" in _RN_CONTACT_SRC
+      and "_apply_force_block" in _RN_CONTACT_SRC)
+check("neither physics.py nor collision.py knows Force Block exists",
+      "force_block" not in inspect.getsource(sys.modules["src.physics"]).lower()
+      and "force_block" not in inspect.getsource(
+          sys.modules["src.player.collision"]).lower())
+
+# --- save/load round-trip of all three new types ----------------------------
+_RN_RT_TYPES = (_RN_RANDOM, _RN_ADV, _RN_FORCE)
+_rn_rt_objs = []
+_rn_rt_expect = {}
+for _rn_i, _rn_t in enumerate(_RN_RT_TYPES):
+    _rn_o = {"t": _rn_t, "x": _rn_i, "y": 4, "r": 0}
+    for _rn_f in _ar_spec_for(_rn_t).fields:
+        _rn_o[_rn_f.key] = _ar_alt_value(_rn_f)
+    _rn_rt_expect[_rn_t] = dict(_rn_o)
+    _rn_rt_objs.append(_rn_o)
+_rn_rt_objs[1]["weighted_list"] = "2.10.3.15"
+_rn_rt_path = save_level(_rn_rt_objs, "Random RT", "random-roundtrip")
+_rn_rt_loaded = {o["t"]: o for o in load_level(_rn_rt_path)[1]}
+check("all three new types survive a save/load round-trip",
+      set(_rn_rt_loaded) == set(_RN_RT_TYPES))
+_rn_rt_bad = [
+    (t, f.key)
+    for t in _RN_RT_TYPES
+    for f in _ar_spec_for(t).fields
+    if _rn_rt_loaded[t].get(f.key) != _rn_rt_expect[t][f.key]
+]
+check("every new field round-trips with its authored value", _rn_rt_bad == [])
+check("Advanced Random's full weighted_list string survives the round-trip",
+      _rn_rt_loaded[_RN_ADV].get("weighted_list") == "2.10.3.15")
+check("a slot-authored Advanced Random writes no weighted_list key",
+      "weighted_list" not in {o["t"]: o for o in load_level(save_level(
+          [{"t": _RN_ADV, "x": 1, "y": 1, "r": 0, "group1": 5,
+            "weight1": 2}], "Random RT2", "random-roundtrip-2"))[1]}[_RN_ADV])
+check("the round-trip wrote no numeric GD keys into the save format",
+      all(not any(str(k).isdigit() for k in o)
+          for o in _rn_rt_loaded.values()))
+
+
+# ---------------------------------------------------------------------------
+# Shader / screen effects, Checkpoint 4
+# (deep-research-report.md, "Shader and visual effects": Shader 2904,
+#  Chromatic 2910, Radial Blur 2914, Motion Blur 2915, Bulge 2916,
+#  Pinch 2917, Split Screen 2924)
+# ---------------------------------------------------------------------------
+section("Shader effects (Chromatic / Radial Blur / Motion Blur / Bulge / "
+        "Pinch / Split Screen / Shader)")
+
+import numpy as _sh_np
+
+from src.constants import (
+    T_SHADER_TRIGGER as _SH_SHADER, T_CHROMATIC_TRIGGER as _SH_CHROMA,
+    T_RADIAL_BLUR_TRIGGER as _SH_RBLUR, T_MOTION_BLUR_TRIGGER as _SH_MBLUR,
+    T_BULGE_TRIGGER as _SH_BULGE, T_PINCH_TRIGGER as _SH_PINCH,
+    T_SPLIT_SCREEN_TRIGGER as _SH_SPLIT,
+    T_GRAYSCALE_TRIGGER as _SH_GRAY, T_INVERT_TRIGGER as _SH_INVERT,
+    T_PIXELATE_TRIGGER as _SH_PIXEL,
+    SCREEN_EFFECT_TRIGGER_TYPES as _SH_FX_TYPES,
+    RADIAL_BLUR_MAX_SAMPLES as _SH_MAX_SAMPLES,
+    MOTION_BLUR_MAX_FRAMES as _SH_MAX_FRAMES,
+    CHROMATIC_MAX_OFFSET_PX as _SH_MAX_OFFSET,
+    PHYSICS_TPS as _SH_TPS,
+)
+from src.play_render import (
+    apply_screen_effects as _sh_apply, build_screen_effects as _sh_build,
+    apply_camera_post as _sh_post,
+)
+from src.player.triggers import SCREEN_EFFECT_PARAMS as _SH_PARAMS
+
+# The six new effects that animate, plus the base trigger that does not.
+_SH_ANIMATED = (_SH_CHROMA, _SH_RBLUR, _SH_MBLUR, _SH_BULGE, _SH_PINCH,
+                _SH_SPLIT)
+_SH_NEW = _SH_ANIMATED + (_SH_SHADER,)
+# type -> the active_effect_anims key its handler writes.
+_SH_ANIM_NAME = {_SH_CHROMA: "chromatic", _SH_RBLUR: "radial_blur",
+                 _SH_MBLUR: "motion_blur", _SH_BULGE: "bulge",
+                 _SH_PINCH: "pinch", _SH_SPLIT: "split_screen"}
+
+# --- registry / schema wiring (no gaps, and no wrong entries either) --------
+check("all 7 new shader types are registered as trigger types",
+      all(t in _TQ_TRIGGER_TYPES for t in _SH_NEW) and len(set(_SH_NEW)) == 7)
+check("all 7 new shader types have a registry handler",
+      all(t in _TQ_HANDLERS for t in _SH_NEW))
+check("each new shader type has its own distinct handler",
+      len({_TQ_HANDLERS[t] for t in _SH_NEW}) == 7)
+check("the registry still has no gaps after adding them",
+      set(_TQ_HANDLERS) == set(_TQ_TRIGGER_TYPES))
+check("the per-tick effect stepper is NOT a queued trigger handler",
+      Player._step_screen_effects not in set(_TQ_HANDLERS.values())
+      and "self._step_screen_effects()" in inspect.getsource(Player.update))
+check("the 6 animated effects join the 5 existing ones in "
+      "SCREEN_EFFECT_TRIGGER_TYPES",
+      _SH_FX_TYPES == {_SH_GRAY, C.T_SEPIA_TRIGGER, _SH_INVERT,
+                       C.T_HUE_TRIGGER, _SH_PIXEL} | set(_SH_ANIMATED))
+# Falsification: Shader Trigger animates nothing, so promising
+# build_screen_effects a "shader_trigger" anim entry must break the suite.
+check("Shader Trigger is deliberately NOT a screen-effect (animating) type",
+      _SH_SHADER not in _SH_FX_TYPES)
+check("Shader Trigger carries no tween fields at all",
+      all(_ar_spec_for(_SH_SHADER).field(k) is None
+          for k in ("state", "intensity", "duration", "easing")))
+check("every animated effect type does carry the shared tween quartet",
+      all(all(_ar_spec_for(t).field(k) is not None
+              for k in ("state", "intensity", "duration", "easing"))
+          for t in _SH_ANIMATED))
+check("all 7 sit in the Camera palette tab beside the existing 5 effects",
+      all(_ar_spec_for(t).category == _ar_spec_for(_SH_GRAY).category
+          for t in _SH_NEW))
+check("all 7 render a schema-driven property panel with no new code",
+      all(_ar_spec_for(t).fields
+          and all(f.kind in ("int", "float", "bool", "choice") and f.label
+                  for f in _ar_spec_for(t).fields)
+          for t in _SH_NEW))
+
+# Object ids straight off the report's table.
+_SH_REPORT_IDS = {_SH_SHADER: 2904, _SH_CHROMA: 2910, _SH_RBLUR: 2914,
+                  _SH_MBLUR: 2915, _SH_BULGE: 2916, _SH_PINCH: 2917,
+                  _SH_SPLIT: 2924}
+check("every new shader spec carries the report's GD object id",
+      all(_ar_spec_for(t).gd_object_id == gid
+          for t, gid in _SH_REPORT_IDS.items()))
+check("all 7 specs are marked partial (ids report-sourced, ranges chosen)",
+      all(_ar_spec_for(t).verification == "partial" for t in _SH_NEW))
+# FlowVix's base-shader property map, quoted by the report.
+check("Shader Trigger carries FlowVix's disable_all/layer-range keys",
+      _ar_spec_for(_SH_SHADER).field("disable_all").gd_key == 192
+      and _ar_spec_for(_SH_SHADER).field("lowest_layer").gd_key == 196
+      and _ar_spec_for(_SH_SHADER).field("highest_layer").gd_key == 197)
+check("Split Screen's engine-invented axis field claims no GD key",
+      _ar_spec_for(_SH_SPLIT).field("axis").gd_key is None
+      and _ar_spec_for(_SH_SPLIT).field("axis").verification == "unverified")
+
+# Falsification: the six effects the report itself flags as needing a real
+# GPU shader stay deferred. A half-wired type must fail here, not ship.
+_SH_DEFERRED_NAMES = ("T_GRADIENT", "T_SHOCK_WAVE", "T_SHOCK_LINE",
+                      "T_GLITCH", "T_CHROMATIC_GLITCH", "T_LENS_CIRCLE")
+check("no half-wired type exists for the 6 deferred GPU-only shaders",
+      not any(hasattr(C, n) for n in _SH_DEFERRED_NAMES))
+check("no deferred shader id leaked into a spec",
+      not ({2903, 2905, 2907, 2909, 2911, 2913}
+           & {s.gd_object_id for s in _TQ_SPECS.values()}))
+
+# --- every effect's knobs are declared once, and reach the anim entry -------
+check("every animated effect declares its knobs in SCREEN_EFFECT_PARAMS",
+      all(_SH_ANIM_NAME[t] in _SH_PARAMS for t in _SH_ANIMATED))
+_sh_param_gap = [
+    (t, key)
+    for t in _SH_ANIMATED
+    for key, _d, _c in _SH_PARAMS[_SH_ANIM_NAME[t]]
+    if _ar_spec_for(t).field(key) is None
+]
+check("every declared knob is a real authorable field on its spec",
+      _sh_param_gap == [])
+
+
+def _sh_level(*extras):
+    return make_flat_level(length=20, extras=list(extras))
+
+
+def _sh_trigger(t, group=70, **fields):
+    o = {"t": t, "x": 1, "y": 1, "r": 0, "groups": [group]}
+    o.update(fields)
+    return o
+
+
+def _sh_run(objs, ticks=None):
+    """Fire group 70, then step the effect tween to completion."""
+    p = Player(_sh_level(*objs))
+    p._fire_group(70)
+    p._drain_trigger_event_queue()
+    for _ in range(ticks if ticks is not None else int(_SH_TPS) + 2):
+        p._step_screen_effects()
+    return p
+
+
+_sh_full = {"duration": 0.1, "intensity": 1.0, "state": True}
+_SH_AUTHORED = {
+    _SH_CHROMA: {"offset_px": 8},
+    _SH_RBLUR: {"strength": 1.0, "sample_count": 4},
+    _SH_MBLUR: {"strength": 1.0, "frame_count": 3},
+    _SH_BULGE: {"strength": 1.0, "radius": 120.0},
+    _SH_PINCH: {"strength": 1.0, "radius": 120.0},
+    _SH_SPLIT: {"axis": "vertical"},
+}
+_sh_players = {t: _sh_run([_sh_trigger(t, **_sh_full, **_SH_AUTHORED[t])])
+               for t in _SH_ANIMATED}
+check("firing each new trigger registers its own named animation entry",
+      all(set(_sh_players[t].active_effect_anims) == {_SH_ANIM_NAME[t]}
+          for t in _SH_ANIMATED))
+check("each animation reaches full intensity once its duration elapses",
+      all(abs(_sh_players[t].active_effect_anims[_SH_ANIM_NAME[t]]["cur"]
+              - 1.0) < 1e-6 for t in _SH_ANIMATED))
+check("each authored knob is copied onto the animation entry verbatim",
+      all(_sh_players[t].active_effect_anims[_SH_ANIM_NAME[t]][k] == v
+          for t, knobs in _SH_AUTHORED.items() for k, v in knobs.items()))
+_sh_built = {t: _sh_build(_sh_players[t].active_effect_anims)[_SH_ANIM_NAME[t]]
+             for t in _SH_ANIMATED}
+check("build_screen_effects emits exactly the declared knobs plus an amount "
+      "(no tween bookkeeping leaks into the render side)",
+      all(set(_sh_built[t]) == {"amount"}
+          | {k for k, _d, _c in _SH_PARAMS[_SH_ANIM_NAME[t]]}
+          for t in _SH_ANIMATED))
+check("build_screen_effects hands every authored knob through verbatim",
+      all(_sh_built[t]["amount"] == 1.0
+          and all(_sh_built[t][k] == v for k, v in _SH_AUTHORED[t].items())
+          for t in _SH_ANIMATED))
+check("a state=False trigger tweens the effect back toward 0",
+      _sh_run([_sh_trigger(_SH_BULGE, **{**_sh_full, "state": False},
+                           **_SH_AUTHORED[_SH_BULGE])]
+              ).active_effect_anims["bulge"]["cur"] == 0.0)
+# The runtime floor under objects.py's Field ranges: a hand-edited level
+# must not be able to buy unbounded per-frame work.
+_sh_wild = _sh_run([_sh_trigger(_SH_RBLUR, **_sh_full, strength=99.0,
+                                sample_count=999),
+                    _sh_trigger(_SH_MBLUR, **_sh_full, frame_count=999),
+                    _sh_trigger(_SH_CHROMA, **_sh_full, offset_px=99999)])
+check("out-of-range authored knobs are clamped to the constants.py caps",
+      _sh_wild.active_effect_anims["radial_blur"]["sample_count"]
+      == _SH_MAX_SAMPLES
+      and _sh_wild.active_effect_anims["motion_blur"]["frame_count"]
+      == _SH_MAX_FRAMES
+      and _sh_wild.active_effect_anims["chromatic"]["offset_px"]
+      == _SH_MAX_OFFSET
+      and _sh_wild.active_effect_anims["radial_blur"]["strength"] == 1.0)
+check("build_screen_effects still drops a near-zero-intensity effect",
+      _sh_build({"bulge": {"cur": 0.0005, "start": 0.0, "target": 1.0,
+                           "frame": 1, "duration": 6, "easing": "linear",
+                           "strength": 1.0}}) == {})
+
+# --- each effect actually changes pixels (numpy diff, not golden image) -----
+_SH_W, _SH_H = 320, 240
+
+
+def _sh_pattern():
+    """A busy, non-symmetric test frame: a mirror or a roll of a flat or
+    symmetric image would compare equal and pass vacuously."""
+    s = pygame.Surface((_SH_W, _SH_H))
+    a = _sh_np.zeros((_SH_W, _SH_H, 3), _sh_np.uint8)
+    xs = _sh_np.arange(_SH_W)[:, None]
+    ys = _sh_np.arange(_SH_H)[None, :]
+    a[..., 0] = (xs * 7) % 256
+    a[..., 1] = (ys * 11) % 256
+    a[..., 2] = ((xs + ys * 3) * 13) % 256
+    pygame.surfarray.blit_array(s, a)
+    return s
+
+
+def _sh_changed(effects, history=None):
+    """How many pixels apply_screen_effects moved on the test pattern."""
+    surf = _sh_pattern()
+    before = pygame.surfarray.array3d(surf).copy()
+    out = _sh_apply(surf, effects, history)
+    return int((before != pygame.surfarray.array3d(out)).any(axis=2).sum())
+
+
+check("the test pattern is not symmetric on either axis (mirrors would "
+      "pass vacuously)",
+      _sh_changed({"split_screen": {"amount": 1.0, "axis": "vertical"}}) > 0
+      and _sh_changed({"split_screen": {"amount": 1.0,
+                                        "axis": "horizontal"}}) > 0)
+_sh_diffs = {}
+for _sh_t in _SH_ANIMATED:
+    _sh_name = _SH_ANIM_NAME[_sh_t]
+    _sh_fx = _sh_build(_sh_players[_sh_t].active_effect_anims)
+    if _sh_name == "motion_blur":
+        # Nothing to blend on the very first frame by construction, so
+        # prime the ring buffer with a visibly different frame first.
+        _sh_hist = [_sh_np.zeros((_SH_W, _SH_H, 3), _sh_np.uint8)]
+        _sh_diffs[_sh_name] = _sh_changed(_sh_fx, _sh_hist)
+    else:
+        _sh_diffs[_sh_name] = _sh_changed(_sh_fx)
+check("every new effect is a non-identity transform of the frame",
+      all(v > 0 for v in _sh_diffs.values()) and len(_sh_diffs) == 6)
+check("Bulge and Pinch displace pixels in opposite directions",
+      not _sh_np.array_equal(
+          pygame.surfarray.array3d(_sh_apply(
+              _sh_pattern(), _sh_build(
+                  _sh_players[_SH_BULGE].active_effect_anims))),
+          pygame.surfarray.array3d(_sh_apply(
+              _sh_pattern(), _sh_build(
+                  _sh_players[_SH_PINCH].active_effect_anims)))))
+check("a zero-amount effect leaves the frame untouched",
+      all(_sh_changed({n: dict(_SH_AUTHORED[t], amount=0.0)}) == 0
+          for t, n in _SH_ANIM_NAME.items() if n != "motion_blur"))
+check("the 5 pre-existing effects still transform the frame after the "
+      "params-dict change",
+      all(_sh_changed({n: p}) > 0 for n, p in (
+          ("grayscale", {"amount": 1.0}), ("sepia", {"amount": 1.0}),
+          ("invert", {"amount": 1.0}),
+          ("hue", {"amount": 1.0, "hue_shift": 120.0}),
+          ("pixelate", {"amount": 0.5, "pixel_size": 8}))))
+check("an empty effects dict is still the no-op fast path",
+      _sh_changed({}) == 0)
+
+# --- Motion Blur's ring buffer stays bounded and attempt-local -------------
+_sh_hist = []
+for _sh_i in range(10):
+    _sh_apply(_sh_pattern(), {"motion_blur": {"amount": 1.0, "strength": 0.5,
+                                              "frame_count": 3}}, _sh_hist)
+check("the Motion Blur ring buffer never grows past frame_count - 1",
+      len(_sh_hist) == 2)
+_sh_screen = pygame.Surface((_SH_W, _SH_H))
+_sh_post(_sh_screen, 1.0, 0.0, {"grayscale": {"amount": 1.0}}, _sh_hist)
+check("stopping Motion Blur drops the retained frames immediately",
+      _sh_hist == [])
+check("Player carries no frame buffers -- the ring buffer is render-side",
+      "motion_blur_frames" not in set(Player.__slots__)
+      and "motion_blur_frames" in inspect.getsource(
+          sys.modules["src.play"]))
+
+# --- Shader Trigger: the one documented behavior, disable_all -------------
+_sh_dis = _sh_run([_sh_trigger(_SH_CHROMA, **_sh_full, **_SH_AUTHORED[_SH_CHROMA]),
+                   _sh_trigger(_SH_BULGE, **_sh_full, **_SH_AUTHORED[_SH_BULGE]),
+                   _sh_trigger(_SH_GRAY, **_sh_full)])
+check("three effects are live before the Shader Trigger fires",
+      set(_sh_dis.active_effect_anims) == {"chromatic", "bulge", "grayscale"})
+_sh_dis._apply_shader_trigger({"disable_all": True})
+check("Shader Trigger with disable_all=True clears active_effect_anims",
+      _sh_dis.active_effect_anims == {})
+check("and the cleared state renders as no effects at all",
+      _sh_build(_sh_dis.active_effect_anims) == {})
+_sh_keep = _sh_run([_sh_trigger(_SH_CHROMA, **_sh_full,
+                                **_SH_AUTHORED[_SH_CHROMA]),
+                    _sh_trigger(_SH_SHADER, disable_all=False,
+                                lowest_layer=3, highest_layer=9)])
+check("Shader Trigger with disable_all=False leaves live effects alone",
+      set(_sh_keep.active_effect_anims) == {"chromatic"})
+# The engine has no render-layer concept: the fields are authored and
+# saved but nothing consumes them. Pinned so a future layer system has to
+# come back here rather than silently half-wiring itself.
+_sh_layer_readers = [
+    (mod, key)
+    for mod in ("src.player.triggers", "src.player.core", "src.play_render",
+                "src.play")
+    for key in ("lowest_layer", "highest_layer")
+    if f'get("{key}"' in inspect.getsource(sys.modules[mod])
+]
+check("lowest_layer/highest_layer are stored but never read at runtime",
+      _sh_layer_readers == [])
+check("Shader Trigger has no render-side branch (it only clears state)",
+      "shader" not in _sh_build({"chromatic": {"cur": 1.0, "start": 0.0,
+                                               "target": 1.0, "frame": 6,
+                                               "duration": 6,
+                                               "easing": "linear",
+                                               "offset_px": 8}}))
+
+# --- perf sanity: everything on at once stays bounded ----------------------
+_sh_all = {n: dict(_SH_AUTHORED[t], amount=1.0)
+           for t, n in _SH_ANIM_NAME.items()}
+_sh_all.update({"grayscale": {"amount": 0.5}, "sepia": {"amount": 0.5},
+                "invert": {"amount": 0.5},
+                "hue": {"amount": 0.5, "hue_shift": 90.0},
+                "pixelate": {"amount": 0.5, "pixel_size": 8}})
+_sh_all["radial_blur"] = dict(_sh_all["radial_blur"], amount=1.0,
+                              sample_count=_SH_MAX_SAMPLES)
+_sh_perf_hist = []
+_sh_apply(_sh_pattern(), _sh_all, _sh_perf_hist)   # warm the caches
+_sh_t0 = _time_perf.perf_counter()
+for _ in range(3):
+    _sh_apply(_sh_pattern(), _sh_all, _sh_perf_hist)
+_sh_ms = (_time_perf.perf_counter() - _sh_t0) / 3 * 1000
+# Deliberately generous: all 11 effects at once with the maximum sample
+# count is a pathological authoring case, not a shipping one, and CI
+# machines are slow. This only has to catch an accidental per-pixel
+# Python loop, which would be orders of magnitude past this.
+check(f"all 11 effects at once stay bounded ({_sh_ms:.0f} ms/frame at "
+      f"{_SH_W}x{_SH_H})", _sh_ms < 2000)
+
+# --- save/load round-trip of all 7 new types -------------------------------
+_sh_rt_objs = []
+_sh_rt_expect = {}
+for _sh_i, _sh_t in enumerate(_SH_NEW):
+    _sh_o = {"t": _sh_t, "x": _sh_i, "y": 4, "r": 0}
+    for _sh_f in _ar_spec_for(_sh_t).fields:
+        _sh_o[_sh_f.key] = _ar_alt_value(_sh_f)
+    _sh_rt_expect[_sh_t] = dict(_sh_o)
+    _sh_rt_objs.append(_sh_o)
+_sh_rt_path = save_level(_sh_rt_objs, "Shader RT", "shader-roundtrip")
+_sh_rt_loaded = {o["t"]: o for o in load_level(_sh_rt_path)[1]}
+check("all 7 new shader types survive a save/load round-trip",
+      set(_sh_rt_loaded) == set(_SH_NEW))
+_sh_rt_bad = [
+    (t, f.key)
+    for t in _SH_NEW
+    for f in _ar_spec_for(t).fields
+    if _sh_rt_loaded[t].get(f.key) != _sh_rt_expect[t][f.key]
+]
+check("every new shader field round-trips with its authored value",
+      _sh_rt_bad == [])
+check("Split Screen's axis choice round-trips as a string",
+      _sh_rt_loaded[_SH_SPLIT]["axis"] == "horizontal")
+check("a centered Bulge writes no center_x/center_y keys (non_default)",
+      not ({"center_x", "center_y"} & set({o["t"]: o for o in load_level(
+          save_level([{"t": _SH_BULGE, "x": 1, "y": 1, "r": 0}],
+                     "Shader RT2", "shader-roundtrip-2"))[1]}[_SH_BULGE])))
+check("the round-trip wrote no numeric GD keys into the save format",
+      all(not any(str(k).isdigit() for k in o)
+          for o in _sh_rt_loaded.values()))
+
+
+# ---------------------------------------------------------------------------
+# Audio triggers: Song / SFX / Edit Song / Edit SFX
+# (deep-research-report.md, "Audio, timers, and arithmetic")
+# ---------------------------------------------------------------------------
+section("Audio triggers (Song / SFX / Edit Song / Edit SFX)")
+
+from src import music as _au_music
+from src import sfx as _au_sfx
+from src.constants import (
+    T_SONG_TRIGGER as _AU_SONG, T_SFX_TRIGGER as _AU_SFX,
+    T_EDIT_SONG_TRIGGER as _AU_ESONG, T_EDIT_SFX_TRIGGER as _AU_ESFX,
+    AUDIO_TRIGGER_TYPES as _AU_TYPES,
+    AUDIO_START_TRIGGER_TYPES as _AU_START_TYPES,
+    EDIT_AUDIO_TRIGGER_TYPES as _AU_EDIT_TYPES,
+    SONG_CHANNEL_MAX as _AU_CHAN_MAX,
+)
+from src.objects import CAT_AUDIO as _AU_CAT
+from src.bots.sim import SimPlayer as _AU_SIM
+from src.editor import ui as _ed_ui
+
+_au_sfx.init()
+
+# --- registry / schema wiring (no gaps between the three tables) -----------
+check("all 4 audio types are registered as trigger types",
+      len(_AU_TYPES) == 4 and _AU_TYPES <= _TQ_TRIGGER_TYPES)
+check("all 4 audio types have a registry handler",
+      _AU_TYPES <= set(_TQ_HANDLERS))
+check("each audio type has its own distinct handler",
+      len({_TQ_HANDLERS[t] for t in _AU_TYPES}) == 4)
+check("the start/edit split covers the family with no overlap",
+      _AU_START_TYPES == {_AU_SONG, _AU_SFX}
+      and _AU_EDIT_TYPES == {_AU_ESONG, _AU_ESFX}
+      and not (_AU_START_TYPES & _AU_EDIT_TYPES))
+check("audio triggers stay gated by Toggle (they run no other triggers)",
+      not (_AU_TYPES & C.CONTROL_TRIGGER_TYPES))
+check("the Audio palette tab exists and holds exactly the 4 audio types",
+      _AU_CAT in _AR_CAT_ORDER
+      and set(dict(_AR_PALETTE)[_AU_CAT]) == set(_AU_TYPES))
+# Falsification: audio is event-driven only. Playback advances in the
+# mixer's own thread, so there must be no per-tick audio stepper the way
+# the area/screen-effect families have one.
+check("there is no per-tick audio stepper anywhere on Player",
+      not [n for n in dir(Player) if n.startswith("_step") and "audio" in n]
+      and "audio" not in inspect.getsource(Player.update))
+
+# Object ids + the report's property-key map, quoted verbatim.
+_AU_REPORT_IDS = {_AU_SONG: 1934, _AU_SFX: 3602, _AU_ESFX: 3603,
+                  _AU_ESONG: 3605}
+check("every audio spec carries the report's GD object id",
+      all(_ar_spec_for(t).gd_object_id == gid
+          for t, gid in _AU_REPORT_IDS.items()))
+check("audio specs are marked partial (ids report-sourced, ranges engine-chosen)",
+      all(_ar_spec_for(t).verification == "partial" for t in _AU_TYPES))
+_AU_REPORT_KEYS = {
+    _AU_SONG: {"song": 392, "speed": 404, "volume": 406, "start": 408,
+               "fade_in": 409, "end": 410, "fade_out": 411, "loop": 413,
+               "channel": 432},
+    _AU_SFX: {"pitch": 405, "volume": 406, "reverb": 407, "loop": 413,
+              "unique_id": 416},
+    _AU_ESONG: {"speed": 404, "volume": 406, "channel": 432},
+    _AU_ESFX: {"pitch": 405, "volume": 406, "unique_id": 416},
+}
+check("every audio field carries the report's GD property key",
+      all(_ar_spec_for(t).field(k).gd_key == v
+          for t, keys in _AU_REPORT_KEYS.items() for k, v in keys.items()))
+check("the fields the report gives no key for claim none",
+      _ar_spec_for(_AU_SFX).field("sfx").gd_key is None
+      and _ar_spec_for(_AU_ESFX).field("stop").gd_key is None
+      and _ar_spec_for(_AU_ESONG).field("stop").gd_key is None)
+check("the SFX sound list is sfx.py's own, not a second hand-kept copy",
+      _ar_spec_for(_AU_SFX).field("sfx").choices == _au_sfx.SOUND_NAMES
+      and set(_au_sfx.SOUND_NAMES) == set(_au_sfx.SOUND_GENERATORS))
+check("no audio trigger carries a target group (they act on the mixer)",
+      all(_ar_spec_for(t).field("target_group") is None for t in _AU_TYPES))
+check("every audio spec renders a schema-driven property panel with no new code",
+      all(_ar_spec_for(t).fields
+          and all(f.kind in ("int", "float", "bool", "choice") and f.label
+                  for f in _ar_spec_for(t).fields)
+          for t in _AU_TYPES))
+# The palette tabs are laid out in one unwrapped row, so a new tab is a
+# real layout risk, not just a list entry (editor/ui.py _build_buttons).
+_au_tab_x = _ed_ui.CONTENT_X
+for _au_name, _ in _AR_PALETTE:
+    _au_tab_x += (78 if len(_au_name) > 5 else 64) + 4
+check(f"the 14-tab palette row still fits the window ({_au_tab_x} of {C.WIDTH})",
+      _au_tab_x <= C.WIDTH)
+
+
+# --- spies: the mixer is silent under a dummy driver, so assert the calls --
+class _AuSpy:
+    """Records what the handlers ask music.py / sfx.py to do, and passes
+    the level-volume calls through to the real module so the non-persisted
+    scaling can still be asserted for real."""
+
+    def __init__(self):
+        self.calls = []
+        self._saved = {}
+
+    def __enter__(self):
+        for mod, name in ((_au_music, "play_track"), (_au_music, "fadeout"),
+                          (_au_music, "stop"), (_au_sfx, "play"),
+                          (_au_sfx, "stop_channel")):
+            self._saved[(mod, name)] = getattr(mod, name)
+            setattr(mod, name, self._recorder(name))
+        return self
+
+    def __exit__(self, *exc):
+        for (mod, name), fn in self._saved.items():
+            setattr(mod, name, fn)
+        return False
+
+    def _recorder(self, name):
+        def record(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+            return None
+        return record
+
+    def named(self, name):
+        return [(a, k) for n, a, k in self.calls if n == name]
+
+
+def _au_level(*extras):
+    return make_flat_level(length=40, extras=list(extras))
+
+
+def _au_trigger(t, group, **fields):
+    o = {"t": t, "x": 1, "y": 1, "r": 0, "groups": [group]}
+    o.update(fields)
+    return o
+
+
+def _au_fire(p, group):
+    p._fire_group(group)
+    p._drain_trigger_event_queue()
+
+
+# --- 1: a Song Trigger reaches music.py's play primitive -------------------
+_au_song_obj = _au_trigger(_AU_SONG, 70, song=2, channel=1, volume=0.25,
+                           loop=True, start=3.0, fade_in=0.5, fade_out=2.0,
+                           speed=2.0, end=99.0)
+_au_user_vol_before = _au_music.get_volume()
+_au_user_pref_before = _prefs_mod.get("music_vol", 0.5)
+_au_p = Player(_au_level(_au_song_obj))
+with _AuSpy() as _au_spy:
+    _au_fire(_au_p, 70)
+_au_play_calls = _au_spy.named("play_track")
+check("a Song Trigger calls music.play_track with the authored track",
+      len(_au_play_calls) == 1 and _au_play_calls[0][0] == (2,))
+check("loop=True becomes pygame's endless loops=-1",
+      _au_play_calls[0][1]["loops"] == -1)
+check("Start seconds are passed to music.py's seek",
+      _au_play_calls[0][1]["start_sec"] == 3.0)
+check("Fade in seconds become pygame's fade_ms",
+      _au_play_calls[0][1]["fade_ms"] == 500)
+check("the authored volume reaches the mixer as a level-volume scale",
+      _au_music.get_level_volume() == 0.25)
+# Falsification: the trigger must NEVER write the user's saved volume.
+check("a Song Trigger does not touch the user's saved music volume",
+      _au_music.get_volume() == _au_user_vol_before
+      and _prefs_mod.get("music_vol", 0.5) == _au_user_pref_before)
+check("the live song is tracked under its channel (GD key 432)",
+      list(_au_p.active_songs) == [1]
+      and _au_p.active_songs[1]["song"] == 2
+      and _au_p.active_songs[1]["volume"] == 0.25)
+check("the sounding channel is recorded (one music stream, many addresses)",
+      _au_p.active_song_channel == 1)
+check("no-op fields are still recorded on the live entry",
+      _au_p.active_songs[1]["speed"] == 2.0
+      and _au_p.active_songs[1]["end"] == 99.0)
+check("a channel above the engine's range clamps instead of vanishing",
+      _AU_CHAN_MAX >= 1
+      and _ar_spec_for(_AU_SONG).field("channel").hi == _AU_CHAN_MAX)
+
+# --- 2: SFX instances are tracked by unique id -----------------------------
+_au_sp = Player(_au_level(
+    _au_trigger(_AU_SFX, 71, sfx="orb", volume=0.8, unique_id=7, loop=True),
+    _au_trigger(_AU_SFX, 72, sfx="pad", volume=0.5, unique_id=0, loop=True),
+    _au_trigger(_AU_SFX, 73, sfx="click", volume=0.3, unique_id=7),
+    _au_trigger(_AU_ESFX, 74, unique_id=7, stop=True),
+    _au_trigger(_AU_ESFX, 75, unique_id=4242, stop=True),
+    _au_trigger(_AU_ESFX, 76, unique_id=7, volume=0.1, pitch=5.0)))
+with _AuSpy() as _au_spy:
+    _au_fire(_au_sp, 71)
+    _au_sfx_calls = _au_spy.named("play")
+check("an SFX Trigger plays the authored sound at the authored volume",
+      len(_au_sfx_calls) == 1
+      and _au_sfx_calls[0][0][:2] == ("orb", 0.8))
+check("a looping SFX with a unique id loops endlessly",
+      _au_sfx_calls[0][0][2] == -1)
+check("firing an SFX with a unique id registers a live instance",
+      list(_au_sp.active_sfx) == [7]
+      and _au_sp.active_sfx[7]["sfx"] == "orb"
+      and _au_sp.active_sfx[7]["volume"] == 0.8)
+with _AuSpy() as _au_spy:
+    _au_fire(_au_sp, 72)
+    _au_anon = _au_spy.named("play")
+check("unique_id 0 plays but is never tracked (nothing could stop it)",
+      list(_au_sp.active_sfx) == [7] and len(_au_anon) == 1)
+check("and an anonymous instance refuses to loop forever",
+      _au_anon[0][0][2] == 0)
+with _AuSpy() as _au_spy:
+    _au_fire(_au_sp, 73)
+    _au_replaced = _au_spy.named("stop_channel")
+check("re-firing a unique id replaces the live instance (last-fired-wins)",
+      list(_au_sp.active_sfx) == [7]
+      and _au_sp.active_sfx[7]["sfx"] == "click"
+      and len(_au_replaced) == 1)
+with _AuSpy() as _au_spy:
+    _au_fire(_au_sp, 76)
+check("Edit SFX patches volume and pitch on the live instance",
+      _au_sp.active_sfx[7]["volume"] == 0.1
+      and _au_sp.active_sfx[7]["pitch"] == 5.0
+      and _au_sp.active_sfx[7]["sfx"] == "click")
+_au_sfx_before_unknown = dict(_au_sp.active_sfx)
+with _AuSpy() as _au_spy:
+    _au_fire(_au_sp, 75)
+    _au_unknown_calls = list(_au_spy.calls)
+check("Edit SFX for an unknown unique id is a complete no-op",
+      _au_sp.active_sfx == _au_sfx_before_unknown and _au_unknown_calls == [])
+with _AuSpy() as _au_spy:
+    _au_fire(_au_sp, 74)
+    _au_stop_calls = _au_spy.named("stop_channel")
+check("Edit SFX with stop=True drops and stops the tracked instance",
+      _au_sp.active_sfx == {} and len(_au_stop_calls) == 1)
+
+# --- 3: Edit Song patches a live channel, and no-ops on a silent one -------
+_au_ed = Player(_au_level(
+    _au_trigger(_AU_SONG, 80, song=0, channel=0, volume=0.9, fade_out=1.5),
+    _au_trigger(_AU_ESONG, 81, channel=2, volume=0.1),
+    _au_trigger(_AU_ESONG, 82, channel=0, volume=0.4),
+    _au_trigger(_AU_ESONG, 83, channel=0, stop=True)))
+with _AuSpy() as _au_spy:
+    _au_fire(_au_ed, 81)
+    _au_silent_calls = list(_au_spy.calls)
+check("Edit Song on a channel with nothing playing is a complete no-op",
+      _au_ed.active_songs == {} and _au_silent_calls == []
+      and _au_ed.active_song_channel is None)
+with _AuSpy():
+    _au_fire(_au_ed, 80)
+check("a live song is registered before the edit",
+      _au_ed.active_songs[0]["volume"] == 0.9)
+with _AuSpy():
+    _au_fire(_au_ed, 82)
+check("Edit Song patches the live entry's volume (absolute, not a delta)",
+      _au_ed.active_songs[0]["volume"] == 0.4
+      and _au_music.get_level_volume() == 0.4)
+with _AuSpy() as _au_spy:
+    _au_fire(_au_ed, 83)
+    _au_fade_calls = _au_spy.named("fadeout")
+    _au_hard_stops = _au_spy.named("stop")
+check("Edit Song stop fades out over the song's own Fade out",
+      _au_ed.active_songs == {} and _au_ed.active_song_channel is None
+      and _au_fade_calls == [((1500,), {})] and _au_hard_stops == [])
+# A song with no authored fade stops outright instead.
+_au_hard = Player(_au_level(
+    _au_trigger(_AU_SONG, 84, song=0, channel=0, volume=1.0),
+    _au_trigger(_AU_ESONG, 85, channel=0, stop=True)))
+with _AuSpy() as _au_spy:
+    _au_fire(_au_hard, 84)
+    _au_fire(_au_hard, 85)
+    check("a song with no Fade out stops immediately",
+          _au_spy.named("stop") and not _au_spy.named("fadeout"))
+
+# --- 4: end to end through update(), fired by a real touch -----------------
+_au_touch = Player(make_flat_level(length=40, extras=[
+    _au_trigger(_AU_SONG, 90, song=1, channel=0, volume=0.6,
+                touch_activated=True) | {"x": 12, "y": 9},
+]))
+with _AuSpy() as _au_spy:
+    for _ in range(600):
+        _au_touch.update(False, False)
+        if not _au_touch.alive or _au_touch.won or _au_touch.active_songs:
+            break
+    _au_touch_calls = _au_spy.named("play_track")
+check("a touched Song Trigger plays through the normal queue+registry path",
+      0 in _au_touch.active_songs and len(_au_touch_calls) == 1
+      and _au_touch_calls[0][0] == (1,))
+check("the trigger event queue is still empty after the audio tick",
+      _au_touch._trigger_event_queue == [])
+
+# --- 5: retry silences what the previous attempt started -------------------
+_au_retry = Player(_au_level(
+    _au_trigger(_AU_SFX, 91, sfx="orb", volume=0.5, unique_id=3, loop=True),
+    _au_trigger(_AU_SONG, 92, song=0, channel=0, volume=0.5)))
+with _AuSpy() as _au_spy:
+    _au_fire(_au_retry, 91)
+    _au_fire(_au_retry, 92)
+    _au_retry.reset()
+    _au_reset_stops = _au_spy.named("stop_channel")
+    _au_reset_music = _au_spy.named("stop")
+check("reset() stops the looping SFX the previous attempt left playing",
+      _au_retry.active_sfx == {} and len(_au_reset_stops) == 1)
+check("reset() stops music only because this player started a song",
+      _au_retry.active_songs == {} and len(_au_reset_music) == 1)
+_au_quiet = Player(_au_level())
+with _AuSpy() as _au_spy:
+    _au_quiet.reset()
+    check("reset() leaves music alone when no Song Trigger ever fired",
+          _au_spy.named("stop") == [])
+
+# --- 6: a bot search never reaches the mixer -------------------------------
+check("SimPlayer opts out of audio output; the real Player opts in",
+      _AU_SIM.audio_output_enabled is False
+      and Player.audio_output_enabled is True)
+_au_bot = _AU_SIM(_au_level(
+    _au_trigger(_AU_SONG, 93, song=0, channel=0, volume=0.5),
+    _au_trigger(_AU_SFX, 94, sfx="orb", volume=0.5, unique_id=9)))
+with _AuSpy() as _au_spy:
+    _au_fire(_au_bot, 93)
+    _au_fire(_au_bot, 94)
+    _au_bot_calls = list(_au_spy.calls)
+check("a bot sim records the same audio state but emits nothing",
+      _au_bot_calls == [] and 0 in _au_bot.active_songs
+      and _au_bot.active_sfx[9]["channel"] is None)
+
+# --- 7: headless-safety of the real (unspied) primitives -------------------
+check("the suite really is running on the dummy audio driver",
+      os.environ.get("SDL_AUDIODRIVER") == "dummy")
+_au_live = Player(_au_level(
+    _au_trigger(_AU_SFX, 95, sfx="orb", volume=0.5, unique_id=11),
+    _au_trigger(_AU_ESFX, 96, unique_id=11, volume=0.2),
+    _au_trigger(_AU_ESFX, 97, unique_id=11, stop=True),
+    _au_trigger(_AU_SONG, 98, song=0, channel=0, volume=0.5, fade_in=0.2),
+    _au_trigger(_AU_ESONG, 99, channel=0, stop=True)))
+for _au_g in (95, 96, 97, 98, 99):
+    _au_fire(_au_live, _au_g)
+check("every audio handler survives real mixer calls under a dummy driver",
+      _au_live.active_sfx == {} and _au_live.active_songs == {})
+check("an unknown sound name is a safe no-op, not a crash",
+      _au_sfx.play("no_such_sound", 0.5) is None)
+check("sfx.play still returns a channel handle for a real sound",
+      _au_sfx.stop_channel(_au_sfx.play("click", 0.4)) is None)
+
+# --- 8: save/load round-trip of all 4 new types ----------------------------
+_au_rt_objs = []
+_au_rt_expect = {}
+for _au_i, _au_t in enumerate(sorted(_AU_TYPES)):
+    _au_o = {"t": _au_t, "x": _au_i, "y": 4, "r": 0}
+    for _au_f in _ar_spec_for(_au_t).fields:
+        _au_o[_au_f.key] = _ar_alt_value(_au_f)
+    _au_rt_expect[_au_t] = dict(_au_o)
+    _au_rt_objs.append(_au_o)
+_au_rt_path = save_level(_au_rt_objs, "Audio RT", "audio-roundtrip")
+_au_rt_loaded = {o["t"]: o for o in load_level(_au_rt_path)[1]}
+check("every audio type survives a save/load round-trip",
+      set(_au_rt_loaded) == set(_AU_TYPES))
+_au_rt_bad = [
+    (t, f.key)
+    for t in _AU_TYPES
+    for f in _ar_spec_for(t).fields
+    if _au_rt_loaded[t].get(f.key) != _au_rt_expect[t][f.key]
+]
+check("every audio field round-trips with its authored value",
+      _au_rt_bad == [])
+check("the documented no-op fields round-trip too (speed/end/pitch/reverb)",
+      _au_rt_loaded[_AU_SONG]["speed"] == _au_rt_expect[_AU_SONG]["speed"]
+      and _au_rt_loaded[_AU_SONG]["end"] == _au_rt_expect[_AU_SONG]["end"]
+      and _au_rt_loaded[_AU_SFX]["pitch"] == _au_rt_expect[_AU_SFX]["pitch"]
+      and _au_rt_loaded[_AU_SFX]["reverb"] == _au_rt_expect[_AU_SFX]["reverb"])
+check("the SFX sound choice round-trips as a name string",
+      _au_rt_loaded[_AU_SFX]["sfx"] == _au_sfx.SOUND_NAMES[1])
+check("the audio round-trip wrote no numeric GD keys into the save format",
+      all(not any(str(k).isdigit() for k in o)
+          for o in _au_rt_loaded.values()))
+# Falsification: the no-op fields must reach no mixer call at all -- an
+# engine with no playback-rate, scheduled-stop, pitch or reverb primitive
+# must not smuggle those values into one of the calls it does make.
+_au_noop = Player(_au_level(
+    _au_trigger(_AU_SONG, 100, song=0, channel=0, volume=0.5, speed=3.7,
+                end=42.0),
+    _au_trigger(_AU_SFX, 101, sfx="orb", volume=0.5, unique_id=13, pitch=9.0,
+                reverb=0.77)))
+with _AuSpy() as _au_spy:
+    _au_fire(_au_noop, 100)
+    _au_fire(_au_noop, 101)
+    _au_noop_args = [v for _n, a, k in _au_spy.calls
+                     for v in (list(a) + list(k.values()))]
+check("no no-op field value is smuggled into a music.py / sfx.py call",
+      _au_spy.calls
+      and not ({3.7, 42.0, 9.0, 0.77} & {v for v in _au_noop_args
+                                         if isinstance(v, float)}))
+check("but they are all still recorded on the live entries",
+      _au_noop.active_songs[0]["speed"] == 3.7
+      and _au_noop.active_songs[0]["end"] == 42.0
+      and _au_noop.active_sfx[13]["pitch"] == 9.0
+      and _au_noop.active_sfx[13]["reverb"] == 0.77)
+_au_noop_readers = [
+    (mod, key)
+    for mod in ("src.music", "src.sfx")
+    for key in ("speed", "end", "pitch", "reverb")
+    if f'"{key}"' in inspect.getsource(sys.modules[mod])
+]
+check("speed/end/pitch/reverb are stored but never reach music.py/sfx.py",
+      _au_noop_readers == [])
+
+
+# ---------------------------------------------------------------------------
+# Player-state triggers: Gameplay Rotation / Reverse / Teleport / Checkpoint
+# (deep-research-report.md, "Gameplay, camera, UI, and environment")
+# ---------------------------------------------------------------------------
+section("Player-state triggers (Gameplay Rotation / Reverse / Teleport / "
+        "Checkpoint)")
+
+from src.constants import (
+    T_GAMEPLAY_ROTATION_TRIGGER as _G6_ROT, T_REVERSE_TRIGGER as _G6_REV,
+    T_TELEPORT_TRIGGER as _G6_TP, T_CHECKPOINT_TRIGGER as _G6_CP,
+    PLAYER_STATE_TRIGGER_TYPES as _G6_TYPES,
+    GAMEPLAY_CHANNEL_DEFAULT as _G6_CHAN_DEFAULT,
+)
+from src.objects import CAT_TRIGGERS as _G6_CAT
+from src.bots.sim import (
+    SimPlayer as _G6_SIM, snapshot as _g6_snapshot, restore as _g6_restore,
+    dedup_key as _g6_dedup,
+)
+
+_G6_ROW = 9            # the lane make_flat_level's player runs along
+_G6_DEST_GX = 20       # teleport destination cell
+_G6_DEST_GY = 6
+
+
+def _g6_level(*extras):
+    return make_flat_level(length=40, extras=list(extras))
+
+
+def _g6_trigger(t, group, **fields):
+    """A trigger off the player's lane, reachable only by group fire."""
+    o = {"t": t, "x": 1, "y": 1, "r": 0, "groups": [group]}
+    o.update(fields)
+    return o
+
+
+def _g6_fire(p, group):
+    p._fire_group(group)
+    p._drain_trigger_event_queue()
+
+
+def _g6_state(p):
+    return (round(p.x, 6), round(p.y, 6), round(p.vy, 6), p.grav,
+            p.on_ground, p.alive, p.move_dir)
+
+
+def _g6_trace(extra, ticks=200):
+    """Tick-by-tick player state down a flat level holding one extra
+    object in the player's lane (``None`` = an empty lane)."""
+    p = Player(_g6_level(*([extra] if extra else [])))
+    out = []
+    for _ in range(ticks):
+        p.update(False, False)
+        out.append(_g6_state(p))
+    return out
+
+
+# --- 1: registry / schema wiring (no gaps between the three tables) --------
+check("all 4 player-state types are registered as trigger types",
+      len(_G6_TYPES) == 4 and _G6_TYPES <= _TQ_TRIGGER_TYPES)
+check("all 4 player-state types have a registry handler",
+      _G6_TYPES <= set(_TQ_HANDLERS))
+check("each player-state type has its own distinct handler",
+      len({_TQ_HANDLERS[t] for t in _G6_TYPES}) == 4)
+check("every trigger type still has exactly one registry handler",
+      set(_TQ_HANDLERS) == set(_TQ_TRIGGER_TYPES))
+check("player-state triggers stay gated by Toggle (they run no triggers)",
+      not (_G6_TYPES & C.CONTROL_TRIGGER_TYPES))
+check("all 4 are placeable in the Triggers palette tab",
+      _G6_CAT in _AR_CAT_ORDER
+      and _G6_TYPES <= set(dict(_AR_PALETTE)[_G6_CAT]))
+_G6_REPORT_IDS = {_G6_ROT: 2900, _G6_REV: 1917, _G6_TP: 3022, _G6_CP: 2063}
+check("every player-state spec carries the report's GD object id",
+      all(_ar_spec_for(t).gd_object_id == i
+          for t, i in _G6_REPORT_IDS.items()))
+check("all 4 share the standard group-fired activation vocabulary",
+      all({"target_group", "touch_activated", "multi_activate",
+           "trigger_order"} <= {f.key for f in _ar_spec_for(t).fields}
+          for t in _G6_TYPES))
+# The report's one hard default in this family, and its one honest gap.
+_g6_chan = _ar_spec_for(_G6_ROT).field("channel")
+check("Gameplay Rotation's gameplay channel defaults to the report's 0",
+      _g6_chan.default == _G6_CHAN_DEFAULT == 0)
+check("the channel field is marked unverified with no invented GD key",
+      _g6_chan.gd_key is None and _g6_chan.verification == "unverified")
+# Stored-only means stored-only: no handler ever reads the key back.
+check("no handler reads the channel (this engine has no channel gating)",
+      all('"channel"' not in inspect.getsource(_TQ_HANDLERS[t])
+          for t in _G6_TYPES))
+# Falsification: retargeting the player is an instant state change, so
+# unlike the area/screen-effect/keyframe families this one must add no
+# per-tick stepper.
+check("the player-state family adds no per-tick stepper",
+      not [n for n in dir(Player)
+           if n.startswith("_step")
+           and any(w in n for w in ("gameplay", "reverse", "teleport",
+                                    "checkpoint"))])
+# The pre-existing transient marker must be left exactly as it was.
+check("the new Checkpoint Trigger is a different type from the marker",
+      _G6_CP != T_CHECKPOINT)
+check("the transient Checkpoint marker is still unplaceable and untriggered",
+      _ar_spec_for(T_CHECKPOINT).category is None
+      and T_CHECKPOINT not in _TQ_TRIGGER_TYPES
+      and T_CHECKPOINT not in _TQ_HANDLERS)
+
+# --- 2: gravity_dir is the EXISTING grav-portal mechanism ------------------
+_g6_portal_trace = _g6_trace({"t": T_GRAV_UP, "x": 8, "y": _G6_ROW, "r": 0})
+_g6_rot_trace = _g6_trace({"t": _G6_ROT, "x": 8, "y": _G6_ROW, "r": 0,
+                           "gravity_dir": "up", "touch_activated": True})
+# Guard against a vacuous equivalence: the reference run must really flip.
+check("reference: touching a Gravity Up portal does flip gravity mid-run",
+      any(s[3] == -1 for s in _g6_portal_trace)
+      and _g6_portal_trace[0][3] == 1)
+check("Gameplay Rotation gravity_dir=up is tick-for-tick identical to "
+      "touching a Gravity Up portal",
+      _g6_rot_trace == _g6_portal_trace)
+_g6_empty_trace = _g6_trace(None)
+_g6_down_portal_trace = _g6_trace({"t": T_GRAV_DOWN, "x": 8, "y": _G6_ROW,
+                                   "r": 0})
+_g6_down_rot_trace = _g6_trace({"t": _G6_ROT, "x": 8, "y": _G6_ROW, "r": 0,
+                                "gravity_dir": "down", "touch_activated": True})
+check("gravity_dir=down on an already-down player is the same no-op a "
+      "Gravity Down portal is",
+      _g6_down_rot_trace == _g6_down_portal_trace == _g6_empty_trace
+      and _g6_empty_trace != _g6_portal_trace)
+# The mechanism is shared because there is only one copy of it left.
+check("both gravity paths go through the one set_body_gravity primitive",
+      "set_body_gravity" in inspect.getsource(Player._handle_interactions)
+      and "set_body_gravity" in inspect.getsource(
+          Player._apply_gameplay_rotation_trigger)
+      and "b.grav = target" not in inspect.getsource(
+          Player._handle_interactions))
+_g6_prim = Player(_g6_level())
+_g6_prim.grav = 1
+_g6_prim.on_ground = True
+_g6_prim.set_body_gravity(_g6_prim, 1)
+check("set_body_gravity leaves a body already pointing that way grounded",
+      _g6_prim.grav == 1 and _g6_prim.on_ground is True)
+_g6_prim.set_body_gravity(_g6_prim, -1)
+check("set_body_gravity unsticks the body only when it really flips",
+      _g6_prim.grav == -1 and _g6_prim.on_ground is False)
+_g6_gnone = Player(_g6_level(_g6_trigger(_G6_ROT, 60, gravity_dir="none")))
+_g6_gnone.on_ground = True
+_g6_fire(_g6_gnone, 60)
+check("gravity_dir=none leaves gravity (and grounding) alone",
+      _g6_gnone.grav == 1 and _g6_gnone.on_ground is True)
+
+# --- 3: direction + velocity override --------------------------------------
+_g6_dir_cases = [("none", 1, 1), ("none", -1, -1), ("forward", -1, 1),
+                 ("forward", 1, 1), ("reverse", 1, -1), ("reverse", -1, -1),
+                 ("flip", 1, -1), ("flip", -1, 1)]
+_g6_dir_bad = []
+for _g6_val, _g6_before, _g6_after in _g6_dir_cases:
+    _g6_dp = Player(_g6_level(_g6_trigger(_G6_ROT, 61, direction=_g6_val)))
+    _g6_dp.move_dir = _g6_before
+    _g6_fire(_g6_dp, 61)
+    if _g6_dp.move_dir != _g6_after:
+        _g6_dir_bad.append((_g6_val, _g6_before, _g6_dp.move_dir))
+check("Gameplay Rotation's direction field sets/flips gameplay direction",
+      _g6_dir_bad == [])
+_g6_v0 = Player(_g6_level(_g6_trigger(_G6_ROT, 62, velocity_override=0.0)))
+_g6_v0.vy = 1.25
+_g6_v0.on_ground = True
+_g6_fire(_g6_v0, 62)
+check("velocity_override 0 means 'keep', not 'stop dead'",
+      _g6_v0.vy == 1.25 and _g6_v0.on_ground is True)
+_g6_v1 = Player(_g6_level(_g6_trigger(_G6_ROT, 63, velocity_override=-4.5)))
+_g6_v1.vy = 1.25
+_g6_v1.on_ground = True
+_g6_fire(_g6_v1, 63)
+check("a nonzero velocity_override writes vy in absolute screen space",
+      _g6_v1.vy == -4.5 and _g6_v1.on_ground is False)
+
+# --- 4: Reverse -- what "direction" actually means in this engine ----------
+# Scope, documented: before this checkpoint the engine had no gameplay
+# direction at all. Reverse flips the SIGN of the auto-scroll step
+# (Player.move_dir), leaving move_speed the positive magnitude every speed
+# portal / HUD / bot heuristic already treats it as.
+_g6_rev = Player(_g6_level(_g6_trigger(_G6_REV, 64, multi_activate=True)))
+check("gameplay direction starts rightwards, as it always has",
+      _g6_rev.move_dir == 1)
+_g6_fire(_g6_rev, 64)
+_g6_rev_once = _g6_rev.move_dir
+_g6_fire(_g6_rev, 64)
+check("a Reverse Trigger flips gameplay direction, and flips it back",
+      _g6_rev_once == -1 and _g6_rev.move_dir == 1)
+_g6_mot = Player(_g6_level(_g6_trigger(_G6_REV, 65)))
+for _ in range(10):
+    _g6_mot.update(False, False)
+_g6_mot_x0 = _g6_mot.x
+_g6_mot.update(False, False)
+_g6_dx_fwd = _g6_mot.x - _g6_mot_x0
+_g6_mot_before = (_g6_mot.move_speed, _g6_mot.grav, _g6_mot.mode,
+                  _g6_mot.size, _g6_mot.y)
+_g6_fire(_g6_mot, 65)
+_g6_mot_x1 = _g6_mot.x
+_g6_mot.update(False, False)
+_g6_dx_rev = _g6_mot.x - _g6_mot_x1
+check("after a Reverse the player auto-scrolls backwards at the same speed",
+      _g6_dx_fwd > 0 and abs(_g6_dx_rev + _g6_dx_fwd) < 1e-9)
+check("Reverse changes direction ONLY -- speed/gravity/mode/size untouched",
+      (_g6_mot.move_speed, _g6_mot.grav, _g6_mot.mode, _g6_mot.size)
+      == _g6_mot_before[:4]
+      and _g6_mot.move_speed > 0)
+check("move_speed stays a positive magnitude (the sign lives in move_dir)",
+      "self.move_speed * self.move_dir" in inspect.getsource(Player.update))
+# Practice checkpoints and bot snapshots both have to carry the new field
+# or a restore silently teleports the player back to running rightwards.
+_g6_cpdir = Player(_g6_level())
+_g6_cpdir.set_gameplay_direction(-1)
+_g6_cpdir.save_checkpoint()
+_g6_cpdir.set_gameplay_direction(1)
+_g6_cpdir.load_checkpoint()
+check("a practice checkpoint restores the gameplay direction",
+      _g6_cpdir.move_dir == -1)
+_g6_cpdir.checkpoints[-1].pop("move_dir")
+_g6_cpdir.set_gameplay_direction(-1)
+_g6_cpdir.load_checkpoint()
+check("a checkpoint saved before the field existed restores rightwards",
+      _g6_cpdir.move_dir == 1)
+_g6_sim = _G6_SIM(_g6_level())
+_g6_sim.set_gameplay_direction(-1)
+_g6_snap_rev = _g6_snapshot(_g6_sim)
+_g6_sim.set_gameplay_direction(1)
+_g6_snap_fwd = _g6_snapshot(_g6_sim)
+_g6_restore(_g6_sim, _g6_snap_rev)
+check("a bot snapshot round-trips the gameplay direction",
+      _g6_sim.move_dir == -1)
+check("the bot dedup key keeps the two gameplay directions apart",
+      _g6_dedup(_g6_snap_rev) != _g6_dedup(_g6_snap_fwd))
+
+# --- 5: Teleport Trigger ---------------------------------------------------
+
+
+def _g6_teleport(**fields):
+    """Fire a Teleport Trigger at a marker in group 78; returns the player
+    and the position it started from."""
+    target = {"t": T_COIN, "x": _G6_DEST_GX, "y": _G6_DEST_GY, "r": 0,
+              "groups": [78]}
+    p = Player(_g6_level(target,
+                         _g6_trigger(_G6_TP, 66, target_group=78, **fields)))
+    start = (p.x, p.y)
+    p.vy = 4.0
+    _g6_fire(p, 66)
+    return p, start
+
+
+_g6_cell_x = _G6_DEST_GX * C.UNITS_PER_BLOCK
+_g6_cell_y = _G6_DEST_GY * C.UNITS_PER_BLOCK
+_g6_tp_p, _g6_tp_start = _g6_teleport()
+_g6_centre = (C.UNITS_PER_BLOCK - _g6_tp_p.size) / 2
+check("a Teleport Trigger snaps the player onto the target group's member",
+      _g6_tp_p.x == _g6_cell_x + _g6_centre
+      and _g6_tp_p.y == _g6_cell_y + _g6_centre)
+_g6_tp_x, _g6_tp_xstart = _g6_teleport(x_only=True)
+check("x_only moves the player on x and leaves y where it was",
+      _g6_tp_x.x == _g6_cell_x + _g6_centre
+      and _g6_tp_x.y == _g6_tp_xstart[1])
+_g6_tp_y, _g6_tp_ystart = _g6_teleport(y_only=True)
+check("y_only moves the player on y and leaves x where it was",
+      _g6_tp_y.y == _g6_cell_y + _g6_centre
+      and _g6_tp_y.x == _g6_tp_ystart[0])
+_g6_tp_both, _g6_tp_bstart = _g6_teleport(x_only=True, y_only=True)
+check("both axis flags on is the documented contradiction: neither moves",
+      (_g6_tp_both.x, _g6_tp_both.y) == _g6_tp_bstart)
+_g6_tp_none = Player(_g6_level(_g6_trigger(_G6_TP, 67, target_group=999)))
+_g6_tp_none_start = (_g6_tp_none.x, _g6_tp_none.y)
+_g6_fire(_g6_tp_none, 67)
+check("a Teleport Trigger with no destination is a clean no-op",
+      (_g6_tp_none.x, _g6_tp_none.y) == _g6_tp_none_start
+      and _g6_tp_none.teleport_cooldown == 0)
+# Real equivalence with the pre-existing touch-based orb: same primitive,
+# so the same end state (centring, quarter-damped vy, cooldown, trail).
+_g6_orb_p = Player(_g6_level(
+    {"t": T_TELEPORT_ORB, "x": 6, "y": _G6_ROW, "r": 0, "group_id": 9},
+    {"t": T_TELEPORT_ORB, "x": _G6_DEST_GX, "y": _G6_DEST_GY, "r": 0,
+     "group_id": 9, "dest": True}))
+_g6_orb_p.vy = 4.0
+_g6_orb_src = [o for o in _g6_orb_p.objects
+               if o.get("group_id") == 9 and not o.get("dest")][0]
+_g6_orb_p.activate_teleport(_g6_orb_src)
+check("a triggered teleport lands exactly where the Teleport Orb lands",
+      (_g6_orb_p.x, _g6_orb_p.y, _g6_orb_p.vy, _g6_orb_p.teleport_cooldown,
+       _g6_orb_p.trail)
+      == (_g6_tp_p.x, _g6_tp_p.y, _g6_tp_p.vy, _g6_tp_p.teleport_cooldown,
+          _g6_tp_p.trail))
+check("both teleport paths go through the one teleport_to_cell primitive",
+      "teleport_to_cell" in inspect.getsource(Player.activate_teleport)
+      and "teleport_to_cell" in inspect.getsource(
+          Player._apply_teleport_trigger)
+      and "self.x =" not in inspect.getsource(Player.activate_teleport))
+
+# --- 6: Checkpoint Trigger -------------------------------------------------
+_g6_cp_trigger = _g6_trigger(_G6_CP, 68)
+_g6_cp_a = Player(_g6_level(dict(_g6_cp_trigger)))
+_g6_cp_b = Player(_g6_level(dict(_g6_cp_trigger)))
+for _g6_cp_p in (_g6_cp_a, _g6_cp_b):
+    _g6_cp_p.practice_mode = True
+    for _ in range(20):
+        _g6_cp_p.update(False, False)
+_g6_fire(_g6_cp_a, 68)          # the new placeable trigger
+_g6_cp_b.save_checkpoint()      # the existing manual practice-mode path
+check("a Checkpoint Trigger writes exactly one checkpoint entry",
+      len(_g6_cp_a.checkpoints) == 1 and len(_g6_cp_b.checkpoints) == 1)
+check("its checkpoint is identical to the manual practice-mode one",
+      _g6_cp_a.checkpoints[0] == _g6_cp_b.checkpoints[0])
+check("and it is restorable through the existing load_checkpoint()",
+      _g6_cp_a.load_checkpoint() is True
+      and (_g6_cp_a.x, _g6_cp_a.y) == (_g6_cp_b.checkpoints[0]["x"],
+                                       _g6_cp_b.checkpoints[0]["y"]))
+_g6_cp_off = Player(_g6_level(dict(_g6_cp_trigger)))
+_g6_fire(_g6_cp_off, 68)
+check("outside practice mode it saves nothing (nothing would read it)",
+      _g6_cp_off.practice_mode is False and _g6_cp_off.checkpoints == [])
+_g6_cp_src = inspect.getsource(Player._apply_checkpoint_trigger)
+check("the handler only calls the existing save_checkpoint(), builds no "
+      "restore logic of its own",
+      "self.save_checkpoint()" in _g6_cp_src
+      and "checkpoints.append" not in _g6_cp_src
+      and "load_checkpoint" not in _g6_cp_src)
+
+# --- 7: save/load round-trip of all 4 new types ----------------------------
+_g6_rt_objs = []
+_g6_rt_expect = {}
+for _g6_i, _g6_t in enumerate(sorted(_G6_TYPES)):
+    _g6_o = {"t": _g6_t, "x": _g6_i, "y": 4, "r": 0}
+    for _g6_f in _ar_spec_for(_g6_t).fields:
+        _g6_o[_g6_f.key] = _ar_alt_value(_g6_f)
+    _g6_rt_expect[_g6_t] = dict(_g6_o)
+    _g6_rt_objs.append(_g6_o)
+# The transient marker rides along to prove the placeable Checkpoint
+# Trigger is NOT caught by the save-time strip that drops the marker.
+_g6_rt_objs.append({"t": T_CHECKPOINT, "x": 30, "y": 4, "r": 0})
+_g6_rt_path = save_level(_g6_rt_objs, "Player state RT", "playerstate-rt")
+_g6_rt_loaded = {o["t"]: o for o in load_level(_g6_rt_path)[1]}
+check("every player-state type survives a save/load round-trip",
+      set(_g6_rt_loaded) == set(_G6_TYPES))
+check("the transient Checkpoint marker is still stripped on save",
+      T_CHECKPOINT not in _g6_rt_loaded)
+_g6_rt_bad = [
+    (t, f.key)
+    for t in _G6_TYPES
+    for f in _ar_spec_for(t).fields
+    if _g6_rt_loaded[t].get(f.key) != _g6_rt_expect[t][f.key]
+]
+check("every player-state field round-trips with its authored value",
+      _g6_rt_bad == [])
+check("the round-trip wrote no numeric GD keys into the save format",
+      all(not any(str(k).isdigit() for k in o)
+          for o in _g6_rt_loaded.values()))
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint 7: BG/Ground/MG Change + Speed, UI, Event, End Trigger,
+# legacy transitions
+# (deep-research-report.md, "Gameplay, camera, UI, and environment" +
+#  "Transition, letter, and legacy objects")
+# ---------------------------------------------------------------------------
+section("Environment / UI / Event / End triggers + level transitions")
+
+from src.constants import (
+    T_GROUND_TRIGGER as _C7_GROUND, T_MG_TRIGGER as _C7_MG,
+    T_BG_SPEED_TRIGGER as _C7_BGS, T_MG_SPEED_TRIGGER as _C7_MGS,
+    T_UI_TRIGGER as _C7_UI, T_EVENT_TRIGGER as _C7_EVENT,
+    T_END_TRIGGER as _C7_END, T_BG_TRIGGER as _C7_BG,
+    ENVIRONMENT_TRIGGER_TYPES as _C7_ENV_TYPES,
+    INERT_PRESET_TRIGGER_TYPES as _C7_INERT_TYPES,
+    BG_SPEED_DEFAULT_X as _C7_BGX, BG_SPEED_DEFAULT_Y as _C7_BGY,
+    MG_SPEED_DEFAULT_X as _C7_MGX, MG_SPEED_DEFAULT_Y as _C7_MGY,
+    LEVEL_EVENTS as _C7_EVENTS, LEVEL_TRANSITIONS as _C7_TRANSITIONS,
+    LEVEL_TRANSITION_FRAMES as _C7_TR_FRAMES,
+    LEVEL_TRANSITION_SCALE_START as _C7_TR_SCALE,
+    UI_TEXT_CHOICES as _C7_UI_TEXTS, T_ITEM_EDIT_TRIGGER as _C7_ITEM_EDIT,
+)
+from src.play_render import (
+    render_hud as _c7_render_hud,
+    level_transition_state as _c7_transition,
+)
+from src.graphics import draw_bg as _c7_draw_bg
+from src.levels import _migrate as _c7_migrate_meta
+from src.objects import CAT_MISC as _C7_CAT_MISC
+import ast as _c7_ast
+import copy as _c7_copy
+import textwrap as _c7_textwrap
+
+_C7_TYPES = frozenset({_C7_GROUND, _C7_MG, _C7_BGS, _C7_MGS, _C7_UI,
+                       _C7_EVENT, _C7_END})
+_C7_ROW = 9            # the lane make_flat_level's player runs along
+
+
+def _c7_trigger(t, group, **fields):
+    """A trigger off the player's lane, reachable only by group fire."""
+    o = {"t": t, "x": 1, "y": 1, "r": 0, "groups": [group]}
+    o.update(fields)
+    return o
+
+
+def _c7_fire(p, group):
+    p._fire_group(group)
+    p._drain_trigger_event_queue()
+
+
+# --- 1: registry / schema wiring (no gaps between the three tables) --------
+check("all 7 Checkpoint-7 types are registered as trigger types",
+      len(_C7_TYPES) == 7 and _C7_TYPES <= _TQ_TRIGGER_TYPES)
+check("all 7 have a registry handler",
+      _C7_TYPES <= set(_TQ_HANDLERS))
+check("each of the 7 has its own distinct handler",
+      len({_TQ_HANDLERS[t] for t in _C7_TYPES}) == 7)
+check("every trigger type still has exactly one registry handler",
+      set(_TQ_HANDLERS) == set(_TQ_TRIGGER_TYPES))
+check("none of them runs other triggers as its own effect (Toggle gates them)",
+      not (_C7_TYPES & C.CONTROL_TRIGGER_TYPES))
+check("all 7 are placeable in the existing Triggers palette tab",
+      _C7_TYPES <= set(dict(_AR_PALETTE)[_G6_CAT]))
+check("no new palette tab was opened for them (the tab row is full)",
+      len(_AR_CAT_ORDER) == 14)
+_C7_REPORT_IDS = {_C7_BG: 3029, _C7_GROUND: 3030, _C7_MG: 3031,
+                  _C7_BGS: 3606, _C7_MGS: 3612, _C7_UI: 3613,
+                  _C7_EVENT: 3604, _C7_END: 3600}
+check("every new spec carries the report's own GD object id",
+      all(_ar_spec_for(t).gd_object_id == i
+          for t, i in _C7_REPORT_IDS.items()))
+check("the Event Trigger is marked unverified (the report gives no fields)",
+      _ar_spec_for(_C7_EVENT).verification == "unverified")
+check("the scenery family names its members, BG Trigger included",
+      _C7_ENV_TYPES == {_C7_BG, _C7_GROUND, _C7_MG, _C7_BGS, _C7_MGS})
+check("the pre-existing BG Trigger kept its preset field and handler",
+      _ar_spec_for(_C7_BG).field("bg") is not None
+      and _TQ_HANDLERS[_C7_BG] is Player._apply_bg_trigger)
+
+# --- 2: BG/MG Speed -- the report's exact defaults, verbatim ---------------
+# The report's values table gives four hard numbers for this family and
+# nothing else; they are checked literally, not approximately, because
+# they are also the renderer's identity point (see below).
+check("BG Speed defaults are the report's 0.1 / 0.1, exactly",
+      (_ar_spec_for(_C7_BGS).field("speed_x").default,
+       _ar_spec_for(_C7_BGS).field("speed_y").default) == (0.1, 0.1)
+      and (_C7_BGX, _C7_BGY) == (0.1, 0.1))
+check("MG Speed defaults are the report's 0.3 / 0.5, exactly",
+      (_ar_spec_for(_C7_MGS).field("speed_x").default,
+       _ar_spec_for(_C7_MGS).field("speed_y").default) == (0.3, 0.5)
+      and (_C7_MGX, _C7_MGY) == (0.3, 0.5))
+check("both speed pairs are marked verified (report-sourced defaults)",
+      all(_ar_spec_for(t).field(k).verification == "verified"
+          for t in (_C7_BGS, _C7_MGS) for k in ("speed_x", "speed_y")))
+check("and they invent no GD property key the report never cites",
+      all(_ar_spec_for(t).field(k).gd_key is None
+          for t in (_C7_BGS, _C7_MGS) for k in ("speed_x", "speed_y")))
+_c7_sp = Player(make_flat_level(length=40))
+check("a fresh player starts at the report's documented speeds",
+      (_c7_sp.bg_speed_x, _c7_sp.bg_speed_y) == (0.1, 0.1)
+      and (_c7_sp.mg_speed_x, _c7_sp.mg_speed_y) == (0.3, 0.5))
+check("which is the renderer's identity point: scale 1.0 on both layers",
+      _c7_sp.bg_scroll_scale() == (1.0, 1.0)
+      and _c7_sp.mg_scroll_scale() == (1.0, 1.0))
+_c7_spd = Player(make_flat_level(length=40, extras=[
+    _c7_trigger(_C7_BGS, 70, speed_x=0.2, speed_y=0.05),
+    _c7_trigger(_C7_MGS, 71, speed_x=0.6, speed_y=0.25)]))
+_c7_fire(_c7_spd, 70)
+_c7_fire(_c7_spd, 71)
+check("a BG Speed trigger scales the background parallax rate",
+      _c7_spd.bg_scroll_scale() == (2.0, 0.5))
+check("an MG Speed trigger scales the middleground parallax rate",
+      _c7_spd.mg_scroll_scale() == (2.0, 0.5))
+_c7_spd_def = Player(make_flat_level(length=40, extras=[
+    _c7_trigger(_C7_BGS, 72, speed_x=_C7_BGX, speed_y=_C7_BGY)]))
+_c7_fire(_c7_spd_def, 72)
+check("a trigger carrying the report's defaults is a visual no-op",
+      _c7_spd_def.bg_scroll_scale() == (1.0, 1.0))
+_c7_spd_bad = Player(make_flat_level(length=40, extras=[
+    _c7_trigger(_C7_BGS, 73, speed_x="nonsense", speed_y=999.0)]))
+_c7_fire(_c7_spd_bad, 73)
+check("an unparseable speed falls back to the default, a huge one clamps",
+      _c7_spd_bad.bg_speed_x == _C7_BGX
+      and _c7_spd_bad.bg_speed_y == C.ENV_SPEED_MAX)
+# Real render check: the scale reaches actual pixels, and the identity
+# scale is pixel-for-pixel what draw_bg painted before this checkpoint.
+_C7_STARS = [(120, 60, 2, 200), (640, 140, 1, 120), (1500, 300, 3, 180)]
+_C7_MOUNTAINS = [[(0, 320), (300, 240), (700, 300), (1200, 220)]]
+
+
+def _c7_bg_pixels(bg_scale=None, mg_scale=None):
+    surf = pygame.Surface((C.WIDTH, C.HEIGHT))
+    _c7_draw_bg(surf, 900, _C7_STARS, _C7_MOUNTAINS, cam_y=40,
+                bg_scale=bg_scale, mg_scale=mg_scale)
+    return pygame.image.tostring(surf, "RGB")
+
+
+_c7_px_stock = _c7_bg_pixels()
+check("the identity scale renders the stock background pixel-for-pixel",
+      _c7_bg_pixels((1.0, 1.0), (1.0, 1.0)) == _c7_px_stock)
+check("a scaled BG speed really does move the background layer",
+      _c7_bg_pixels((3.0, 1.0), (1.0, 1.0)) != _c7_px_stock)
+check("a scaled MG speed really does move the middleground layer",
+      _c7_bg_pixels((1.0, 1.0), (1.0, 3.0)) != _c7_px_stock)
+check("the play render path hands the player's scales to draw_bg",
+      "bg_scroll_scale()" in inspect.getsource(sys.modules["src.play"])
+      and "bg_scale=bg_scale" in inspect.getsource(
+          sys.modules["src.play_render"].render_world))
+
+# --- 3: Ground / MG Change -- stored, and provably never read -------------
+# The Checkpoint-4 lowest_layer/highest_layer precedent: there is no
+# ground or middleground preset table in this engine, so the authored
+# index is saved and round-tripped but nothing consumes it. Pinned so a
+# future palette has to come back here rather than silently half-wiring.
+check("the two inert scenery triggers are named as a set",
+      _C7_INERT_TYPES == {_C7_GROUND, _C7_MG})
+_c7_inert_readers = [
+    (mod, key)
+    for mod in ("src.player.triggers", "src.player.core", "src.play_render",
+                "src.play", "src.graphics")
+    for key in ("ground", "mg")
+    if f'get("{key}"' in inspect.getsource(sys.modules[mod])
+]
+check("the ground/mg preset indices are stored but never read at runtime",
+      _c7_inert_readers == [])
+check("their fields say so in the editor label, not just in a comment",
+      all("no-op" in _ar_spec_for(t).fields[0].label
+          for t in _C7_INERT_TYPES))
+_c7_inert_p = Player(make_flat_level(length=40, extras=[
+    _c7_trigger(_C7_GROUND, 74, ground=5),
+    _c7_trigger(_C7_MG, 75, mg=6)]))
+
+
+def _c7_player_state(p):
+    """A copy of every Player attribute, so a mutation shows up as a diff
+    rather than being invisible behind a shared reference."""
+    return tuple(_c7_copy.copy(getattr(p, n)) for n in Player.__slots__)
+
+
+_c7_inert_before = _c7_player_state(_c7_inert_p)
+_c7_fire(_c7_inert_p, 74)
+_c7_fire(_c7_inert_p, 75)
+check("firing them changes nothing at all about the player",
+      _c7_player_state(_c7_inert_p) == _c7_inert_before)
+def _c7_body_is_only_a_docstring(fn):
+    tree = _c7_ast.parse(_c7_textwrap.dedent(inspect.getsource(fn)))
+    body = tree.body[0].body
+    return (len(body) == 1 and isinstance(body[0], _c7_ast.Expr)
+            and isinstance(body[0].value, _c7_ast.Constant)
+            and isinstance(body[0].value.value, str))
+
+
+check("their handlers are documented no-ops: a docstring and nothing else",
+      all(_c7_body_is_only_a_docstring(_TQ_HANDLERS[t])
+          for t in _C7_INERT_TYPES))
+
+# --- 4: End Trigger -- a second path into the EXISTING win flag -----------
+# Equivalence, not "it sets a bool": the fired-by-Spawn player must end up
+# in the same won state as one that crossed the pre-existing T_END wall.
+def _c7_run(extras, ticks=900, fire=None):
+    p = Player(make_flat_level(length=40, extras=list(extras)))
+    for i in range(ticks):
+        if fire is not None and i == 5:
+            _c7_fire(p, fire)
+        p.update(False, False)
+        if p.won or not p.alive:
+            break
+    return p
+
+
+_c7_wall = _c7_run([])
+check("reference: the existing T_END finish wall still wins the level",
+      _c7_wall.won is True and _c7_wall.alive is True)
+_c7_endtrig = Player(make_flat_level(length=40, extras=[
+    _c7_trigger(_C7_END, 76),
+    {"t": C.T_SPAWN_TRIGGER, "x": 6, "y": _C7_ROW, "r": 0,
+     "target_group": 76, "touch_activated": True}]))
+for _ in range(400):
+    _c7_endtrig.update(False, False)
+    if _c7_endtrig.won:
+        break
+check("an End Trigger fired via Spawn wins the level too",
+      _c7_endtrig.won is True and _c7_endtrig.alive is True)
+check("and it wins EARLIER than the wall would -- the Spawn really did it",
+      _c7_endtrig.x < (40 - 5) * C.UNITS_PER_BLOCK)
+_c7_no_end = Player([o for o in make_flat_level(length=40)
+                     if o["t"] != T_END])
+for _ in range(400):
+    _c7_no_end.update(False, False)
+check("falsification: with no finish wall and no End Trigger, nobody wins",
+      _c7_no_end.won is False)
+_c7_end_src = inspect.getsource(Player._apply_end_trigger)
+check("the End Trigger handler writes the same flag and no new win logic",
+      "self.won = True" in _c7_end_src
+      and "death" not in _c7_end_src
+      and "alive" not in _c7_end_src)
+check("T_END itself is untouched: still a placeable, still not a trigger",
+      T_END not in _TQ_TRIGGER_TYPES and T_END not in _TQ_HANDLERS
+      and _ar_spec_for(T_END).category == _C7_CAT_MISC)
+
+# --- 5: Event Trigger -- fired by the engine, end to end ------------------
+# Every case below goes through the REAL code path (a spike kills the
+# player, the finish wall wins, save/load_checkpoint runs) rather than
+# calling the handler, so a broken hook point fails the test.
+def _c7_event_level(event, *, spike=False, length=40):
+    extras = [{"t": _C7_EVENT, "x": 1, "y": 1, "r": 0,
+               "event_type": event, "target_group": 77},
+              _c7_trigger(_C7_BG, 77, bg=3)]
+    if spike:
+        extras.append({"t": T_SPIKE, "x": 12, "y": _C7_ROW, "r": 0})
+    return make_flat_level(length=length, extras=extras)
+
+
+_c7_ev_start = Player(_c7_event_level("level_start"))
+check("the level_start activation is queued by reset(), not applied early",
+      _c7_ev_start.bg_preset == 0)
+_c7_ev_start.update(False, False)
+check("...and the first tick's drain runs its target group (bg changed)",
+      _c7_ev_start.bg_preset == 3)
+_c7_ev_death = Player(_c7_event_level("death", spike=True))
+for _ in range(900):
+    _c7_ev_death.update(False, False)
+    if not _c7_ev_death.alive:
+        break
+check("reference: the spike really killed the player",
+      _c7_ev_death.alive is False and _c7_ev_death.bg_preset == 3)
+_c7_ev_wrong = Player(_c7_event_level("win", spike=True))
+for _ in range(900):
+    _c7_ev_wrong.update(False, False)
+    if not _c7_ev_wrong.alive:
+        break
+check("falsification: a 'win' Event Trigger does NOT fire on death",
+      _c7_ev_wrong.alive is False and _c7_ev_wrong.bg_preset == 0)
+_c7_ev_win = Player(_c7_event_level("win"))
+for _ in range(900):
+    _c7_ev_win.update(False, False)
+    if _c7_ev_win.won:
+        break
+check("win fires when the finish wall sets the win flag",
+      _c7_ev_win.won is True and _c7_ev_win.bg_preset == 3)
+_c7_ev_win_trig = Player(make_flat_level(length=40, extras=[
+    {"t": _C7_EVENT, "x": 1, "y": 1, "r": 0, "event_type": "win",
+     "target_group": 77},
+    _c7_trigger(_C7_BG, 77, bg=3),
+    _c7_trigger(_C7_END, 79)]))
+_c7_fire(_c7_ev_win_trig, 79)
+check("...and equally when an End Trigger sets it (one win flag, one event)",
+      _c7_ev_win_trig.won is True and _c7_ev_win_trig.bg_preset == 3)
+_c7_ev_cp = Player(_c7_event_level("checkpoint"))
+_c7_ev_cp.practice_mode = True
+_c7_ev_cp.save_checkpoint()
+_c7_ev_cp._drain_trigger_event_queue()
+check("checkpoint fires from the existing save_checkpoint() path",
+      len(_c7_ev_cp.checkpoints) == 1 and _c7_ev_cp.bg_preset == 3)
+_c7_ev_rs = Player(_c7_event_level("respawn"))
+_c7_ev_rs.practice_mode = True
+_c7_ev_rs.save_checkpoint()
+_c7_ev_rs._drain_trigger_event_queue()
+_c7_ev_rs.bg_preset = 0
+_c7_ev_rs.load_checkpoint()
+_c7_ev_rs._drain_trigger_event_queue()
+check("respawn fires from the existing load_checkpoint() path",
+      _c7_ev_rs.bg_preset == 3)
+# Fires ONCE per event, not once per tick after it.
+_c7_ev_count = Player(make_flat_level(length=40, extras=[
+    {"t": _C7_EVENT, "x": 1, "y": 1, "r": 0, "event_type": "death",
+     "target_group": 80},
+    _c7_trigger(_C7_ITEM_EDIT, 80, item_id=1, operation="add", operand=1.0),
+    {"t": T_SPIKE, "x": 12, "y": _C7_ROW, "r": 0}]))
+for _ in range(900):
+    _c7_ev_count.update(False, False)
+check("the death event fires exactly once, not once per tick after it",
+      _c7_ev_count.items.get(1) == 1.0)
+check("Event Triggers are indexed once at level load, not per attempt",
+      "for o in self.objects" in inspect.getsource(Player._arm_event_triggers)
+      and "_arm_event_triggers" in inspect.getsource(Player.__init__)
+      and "_arm_event_triggers" not in inspect.getsource(Player.reset))
+check("but the level_start event still fires on every attempt (retries too)",
+      "_fire_event(EVENT_LEVEL_START)" in inspect.getsource(Player.reset))
+_c7_ev_retry = Player(_c7_event_level("level_start"))
+_c7_ev_retry.update(False, False)
+_c7_ev_retry.reset()
+_c7_ev_retry.bg_preset = 0
+_c7_ev_retry.update(False, False)
+check("...proved by a real retry: reset() re-fires it",
+      _c7_ev_retry.bg_preset == 3)
+check("every documented event name is reachable from the spec's choices",
+      set(_ar_spec_for(_C7_EVENT).field("event_type").choices)
+      == set(_C7_EVENTS) and len(_C7_EVENTS) == 5)
+check("the engine fires each of the five from a real code path",
+      all(f'_fire_event({n})' in
+          (inspect.getsource(sys.modules["src.player.core"])
+           + inspect.getsource(sys.modules["src.player.triggers"]))
+          for n in ("EVENT_LEVEL_START", "EVENT_DEATH", "EVENT_WIN",
+                    "EVENT_CHECKPOINT", "EVENT_RESPAWN")))
+
+# --- 6: UI Trigger -- a HUD-readable label ---------------------------------
+_c7_ui = Player(make_flat_level(length=40, extras=[
+    _c7_trigger(_C7_UI, 81, ui_id=2, text="Go!", x_offset=40, y_offset=-60,
+                duration=0.0),
+    _c7_trigger(_C7_UI, 82, ui_id=2, text="Nice!", duration=0.0),
+    _c7_trigger(_C7_UI, 83, ui_id=2, state=False),
+    _c7_trigger(_C7_UI, 84, ui_id=3, text="Wait", duration=1.0)]))
+check("no UI label exists before any UI Trigger fires",
+      _c7_ui.active_ui_labels() == ())
+_c7_fire(_c7_ui, 81)
+_c7_labels = _c7_ui.active_ui_labels()
+check("a UI Trigger posts a HUD-readable label with its text and offsets",
+      len(_c7_labels) == 1 and _c7_labels[0]["text"] == "Go!"
+      and (_c7_labels[0]["x_offset"], _c7_labels[0]["y_offset"]) == (40, -60))
+_c7_fire(_c7_ui, 82)
+check("the same ui_id replaces that label instead of stacking a second",
+      len(_c7_ui.active_ui_labels()) == 1
+      and _c7_ui.active_ui_labels()[0]["text"] == "Nice!")
+_c7_fire(_c7_ui, 84)
+check("a different ui_id posts its own row",
+      len(_c7_ui.active_ui_labels()) == 2)
+_c7_ui.frame += C.PHYSICS_TPS      # one second later
+check("a timed label expires; a duration-0 label persists",
+      [e["text"] for e in _c7_ui.active_ui_labels()] == ["Nice!"])
+_c7_fire(_c7_ui, 83)
+check("a UI Trigger with Show off clears its ui_id",
+      _c7_ui.active_ui_labels() == ())
+check("the label text vocabulary is the documented fixed choice list",
+      _ar_spec_for(_C7_UI).field("text").choices == _C7_UI_TEXTS)
+check("the UI Trigger targets no group (it is untargeted, like the camera "
+      "family)",
+      "target_group" not in {f.key for f in _ar_spec_for(_C7_UI).fields})
+
+
+def _c7_hud_pixels(player):
+    surf = pygame.Surface((C.WIDTH, C.HEIGHT))
+    _c7_render_hud(surf, player, 1000.0, 1, 0, None, False, [], 0, False, 0,
+                   0, "L", 0, False, False, None, "", False, 0, (1.0,), None,
+                   None, 0, None, 0, 0.0)
+    return pygame.image.tostring(surf, "RGB")
+
+
+_c7_hud_p = Player(make_flat_level(length=40, extras=[
+    _c7_trigger(_C7_UI, 85, ui_id=1, text="Danger", duration=0.0)]))
+_c7_hud_before = _c7_hud_pixels(_c7_hud_p)
+_c7_fire(_c7_hud_p, 85)
+check("the real HUD render pass draws the label (pixels change)",
+      _c7_hud_pixels(_c7_hud_p) != _c7_hud_before)
+check("and it reuses the Item Counter's HUD pass rather than a new layer",
+      "active_ui_labels" in inspect.getsource(_c7_render_hud)
+      and "T_ITEM_COUNTER" in inspect.getsource(_c7_render_hud))
+
+# --- 7: level meta "transition" -------------------------------------------
+check("a fresh level's meta defaults to no transition",
+      _default_meta("x")["transition"] == "none"
+      and "none" in _C7_TRANSITIONS)
+_c7_tr_path = save_level([{"t": T_BLOCK, "x": 0, "y": 10, "r": 0}],
+                         "Transition RT", "transition-rt",
+                         meta=dict(_default_meta("Transition RT"),
+                                   transition="fade"))
+check("the transition setting round-trips through save/load",
+      load_level_full(_c7_tr_path)[0].get("transition") == "fade")
+_c7_tr_bad = _c7_migrate_meta({"name": "x", "transition": "wobble"})
+check("an unknown transition falls back to the default on load",
+      _c7_tr_bad["transition"] == "none")
+check("none is a true identity: no fade, no zoom, at any frame",
+      all(_c7_transition("none", f) == (0.0, 1.0)
+          for f in (0, 1, _C7_TR_FRAMES // 2, _C7_TR_FRAMES, 10 ** 6)))
+check("fade starts fully black and ends fully clear",
+      _c7_transition("fade", 0) == (1.0, 1.0)
+      and _c7_transition("fade", _C7_TR_FRAMES) == (0.0, 1.0)
+      and 0.0 < _c7_transition("fade", _C7_TR_FRAMES // 2)[0] < 1.0)
+check("scale starts zoomed in and ends at 1.0, never fading",
+      _c7_transition("scale", 0) == (0.0, _C7_TR_SCALE)
+      and _c7_transition("scale", _C7_TR_FRAMES) == (0.0, 1.0)
+      and 1.0 < _c7_transition("scale", _C7_TR_FRAMES // 2)[1] < _C7_TR_SCALE)
+_c7_play_src = inspect.getsource(sys.modules["src.play"])
+check("the transition rides the EXISTING blackout and zoom stages",
+      "max(p.blackout_value, tr_fade)" in _c7_play_src
+      and "p.zoom * tr_zoom" in _c7_play_src)
+check("it is derived from the per-attempt tick counter, not new state",
+      "level_transition_state(self.transition,\n"
+      "                                                  self.attempt_frames)"
+      in _c7_play_src)
+
+# --- 8: save/load round-trip of all 7 new types ---------------------------
+_c7_rt_objs = []
+_c7_rt_expect = {}
+for _c7_i, _c7_t in enumerate(sorted(_C7_TYPES)):
+    _c7_o = {"t": _c7_t, "x": _c7_i, "y": 4, "r": 0}
+    for _c7_f in _ar_spec_for(_c7_t).fields:
+        _c7_o[_c7_f.key] = _ar_alt_value(_c7_f)
+    _c7_rt_expect[_c7_t] = dict(_c7_o)
+    _c7_rt_objs.append(_c7_o)
+_c7_rt_path = save_level(_c7_rt_objs, "Env RT", "env-roundtrip")
+_c7_rt_loaded = {o["t"]: o for o in load_level(_c7_rt_path)[1]}
+check("every Checkpoint-7 type survives a save/load round-trip",
+      set(_c7_rt_loaded) == set(_C7_TYPES))
+_c7_rt_bad = [
+    (t, f.key)
+    for t in _C7_TYPES
+    for f in _ar_spec_for(t).fields
+    if _c7_rt_loaded[t].get(f.key) != _c7_rt_expect[t][f.key]
+]
+check("every Checkpoint-7 field round-trips with its authored value",
+      _c7_rt_bad == [])
+check("the stored-only ground/mg indices survive the round-trip too",
+      _c7_rt_loaded[_C7_GROUND].get("ground")
+      == _c7_rt_expect[_C7_GROUND]["ground"]
+      and _c7_rt_loaded[_C7_MG].get("mg") == _c7_rt_expect[_C7_MG]["mg"])
+check("the round-trip wrote no numeric GD keys into the save format",
+      all(not any(str(k).isdigit() for k in o)
+          for o in _c7_rt_loaded.values()))
+
+
+print("\n=== Z-Layer / Z-Order (GD-style draw order) ===")
+from src.objects import get_z_layer, get_z_order, default_z_layer
+from src.play_render import render_world as _zl_render_world
+from src.play import PlaySession as _ZLPlaySession
+from src.graphics import make_stars as _zl_make_stars, make_mountains as _zl_make_mountains
+
+check("Z_LAYERS lists all 7 GD layers back-to-front",
+      C.Z_LAYERS == ("b4", "b3", "b2", "b1", "t1", "t2", "t3"))
+
+_zl_block = {"t": C.T_BLOCK, "x": 0, "y": 0}
+_zl_deco = {"t": C.T_DECO_CRYSTAL, "x": 0, "y": 0}
+check("a normal object defaults to Z-Layer t1 (unchanged draw order)",
+      get_z_layer(_zl_block) == "t1" and default_z_layer(C.T_BLOCK) == "t1")
+check("a decoration object defaults to Z-Layer b1 (behind gameplay)",
+      get_z_layer(_zl_deco) == "b1" and default_z_layer(C.T_DECO_CRYSTAL) == "b1")
+check("Z-Order defaults to 0",
+      get_z_order(_zl_block) == 0)
+check("an invalid/garbage z_layer value falls back to the type default",
+      get_z_layer({"t": C.T_BLOCK, "z_layer": "nonsense"}) == "t1")
+
+_zl_explicit = {"t": C.T_BLOCK, "x": 1, "y": 0, "z_layer": "b4", "z_order": 7}
+_zl_path = save_level([_zl_explicit], "ZLayerRT", "zlayer-roundtrip")
+_zl_loaded = load_level(_zl_path)[1][0]
+check("an explicit z_layer/z_order survives a save/load round-trip",
+      _zl_loaded.get("z_layer") == "b4" and _zl_loaded.get("z_order") == 7)
+_zl_default_saved = load_level(
+    save_level([dict(_zl_block)], "ZLayerLean", "zlayer-lean"))[1][0]
+check("an object left at its default z_layer/z_order saves lean (no keys written)",
+      "z_layer" not in _zl_default_saved and "z_order" not in _zl_default_saved)
+
+# Draw order: Z-Layer wins over Z-Order, and within a layer higher
+# Z-Order draws later (on top). Track draw calls via a fake objects list
+# rendered directly through render_world's own bisect-sliced layers.
+_zl_draw_order = []
+
+
+def _zl_fake_draw(obj):
+    _zl_draw_order.append((obj["t"], get_z_layer(obj), get_z_order(obj)))
+
+
+_zl_probe_objs = [
+    {"t": "back", "x": 0, "y": 0, "_orig_x": 0, "z_layer": "b1", "z_order": 5},
+    {"t": "front_low_order", "x": 0, "y": 0, "_orig_x": 0, "z_layer": "t1", "z_order": -5},
+    {"t": "back_high_order", "x": 0, "y": 0, "_orig_x": 0, "z_layer": "b1", "z_order": 50},
+]
+_zl_by_layer = {name: [] for name in C.Z_LAYERS}
+for _zl_o in _zl_probe_objs:
+    _zl_by_layer[get_z_layer(_zl_o)].append(_zl_o)
+_zl_layers = [
+    (sorted(_zl_by_layer[name], key=lambda o: o["_orig_x"]),
+     [o["_orig_x"] for o in sorted(_zl_by_layer[name], key=lambda o: o["_orig_x"])])
+    for name in C.Z_LAYERS
+]
+import src.play_render as _zl_pr_mod
+_zl_orig_draw_obj = _zl_pr_mod.draw_obj
+_zl_pr_mod.draw_obj = lambda screen, t, *a, **k: _zl_draw_order.append(t)
+try:
+    _zl_render_world(pygame.Surface((200, 200)), 0, 0, 0, 0,
+                      _zl_make_stars(), _zl_make_mountains(),
+                      C.C_BG_TOP, C.C_BG_BOT, 0.0, _zl_layers, set())
+finally:
+    _zl_pr_mod.draw_obj = _zl_orig_draw_obj
+check("Z-Layer beats Z-Order: b1/50 still draws before t1/-5",
+      _zl_draw_order.index("back_high_order") < _zl_draw_order.index("front_low_order"))
+check("within a Z-Layer, higher Z-Order draws later (in front)",
+      _zl_draw_order.index("back") < _zl_draw_order.index("back_high_order"))
+
+check("the editor canvas sorts by Z-Layer/Z-Order ahead of the Editor Layer",
+      "Z_LAYER_INDEX[get_z_layer(o)]" in
+      inspect.getsource(sys.modules["src.editor.render"]))
+
+print("\n=== Swap Trigger (random position swap, interval x count) ===")
+from src.constants import T_SWAP_TRIGGER
+from src.player.trigger_registry import TRIGGER_HANDLERS as _SWAP_HANDLERS
+
+
+def _swap_level(swap_group=90, target_group=91, **fields):
+    trig = {"t": T_SWAP_TRIGGER, "x": 1, "y": 1, "r": 0,
+           "groups": [swap_group], "target_group": target_group,
+           "interval": 1.0, "count": 3}
+    trig.update(fields)
+    return make_flat_level(length=60, extras=[
+        {"t": T_BLOCK, "x": 5, "y": 3, "r": 0, "groups": [target_group]},
+        {"t": T_BLOCK, "x": 8, "y": 6, "r": 0, "groups": [target_group]},
+        {"t": T_BLOCK, "x": 12, "y": 9, "r": 0, "groups": [target_group]},
+        trig,
+    ])
+
+
+def _swap_fire(p, group):
+    p._fire_group(group)
+    p._drain_trigger_event_queue()
+
+
+def _swap_positions(members):
+    return [(float(o.get("_fx", o["x"])), float(o.get("_fy", o["y"])))
+           for o in members]
+
+
+check("Swap Trigger is registered as a trigger type with a handler",
+      T_SWAP_TRIGGER in C.TRIGGER_TYPES and T_SWAP_TRIGGER in _SWAP_HANDLERS)
+check("Swap Trigger is NOT a control trigger (it moves objects directly, "
+      "like Move/Rotate/Scale, not 'fire other triggers')",
+      T_SWAP_TRIGGER not in C.CONTROL_TRIGGER_TYPES)
+
+# --- 1: an instant swap actually permutes positions, once per interval ----
+_sw_objs = _swap_level()
+_sw_p = Player(_sw_objs)
+_sw_members = [o for o in _sw_p.objects if 91 in o.get("groups", ())]
+_sw_before = _swap_positions(_sw_members)
+_swap_fire(_sw_p, 90)
+check("firing a Swap Trigger with < 1s elapsed does nothing yet (Interval gate)",
+      _swap_positions(_sw_members) == _sw_before)
+for _ in range(int(C.PHYSICS_TPS * 1.0) + 2):
+    _sw_p.frame += 1
+    _sw_p._step_pending_swaps()
+_sw_after_1 = _swap_positions(_sw_members)
+check("after one Interval, the three targets' positions are a permutation "
+      "of their originals (nobody teleported off-formation)",
+      sorted(_sw_after_1) == sorted(_sw_before))
+check("...and it actually changed something (not a no-op identity shuffle)",
+      _sw_after_1 != _sw_before)
+
+# --- 2: fires exactly Count times, then stops -----------------------------
+for _ in range(int(C.PHYSICS_TPS * 1.0) + 2):
+    _sw_p.frame += 1
+    _sw_p._step_pending_swaps()
+_sw_after_2 = _swap_positions(_sw_members)
+for _ in range(int(C.PHYSICS_TPS * 1.0) + 2):
+    _sw_p.frame += 1
+    _sw_p._step_pending_swaps()
+_sw_after_3 = _swap_positions(_sw_members)
+check("Count=3 means exactly 3 permutation events are scheduled",
+      len(_sw_p.pending_swaps) == 0)
+for _ in range(int(C.PHYSICS_TPS * 1.0) + 2):
+    _sw_p.frame += 1
+    _sw_p._step_pending_swaps()
+check("a 4th interval firing nothing more: positions hold after Count runs out",
+      _swap_positions(_sw_members) == _sw_after_3)
+
+# --- 3: fewer than 2 targets is a safe no-op ------------------------------
+_sw_solo = make_flat_level(length=30, extras=[
+    {"t": T_BLOCK, "x": 5, "y": 3, "r": 0, "groups": [93]},
+    {"t": T_SWAP_TRIGGER, "x": 1, "y": 1, "r": 0, "groups": [92],
+     "target_group": 93, "interval": 0.05, "count": 1},
+])
+_sw_solo_p = Player(_sw_solo)
+_sw_solo_member = next(o for o in _sw_solo_p.objects if 93 in o.get("groups", ()))
+_sw_solo_before = (_sw_solo_member["x"], _sw_solo_member["y"])
+_swap_fire(_sw_solo_p, 92)
+for _ in range(int(C.PHYSICS_TPS * 0.05) + 2):
+    _sw_solo_p.frame += 1
+    _sw_solo_p._step_pending_swaps()
+check("a target group with fewer than 2 members is a safe no-op",
+      (_sw_solo_member["x"], _sw_solo_member["y"]) == _sw_solo_before)
+
+# --- 4: Smooth tweens through move_animations, clamped to <= Interval -----
+_sw_smooth_objs = _swap_level(swap_group=94, target_group=95,
+                              interval=0.2, count=1, smooth=True,
+                              smooth_duration=10.0, easing="ease_in_out")
+_sw_smooth_p = Player(_sw_smooth_objs)
+_sw_smooth_members = [o for o in _sw_smooth_p.objects
+                      if 95 in o.get("groups", ())]
+_sw_smooth_before = _swap_positions(_sw_smooth_members)
+_swap_fire(_sw_smooth_p, 94)
+_sw_interval_frames = int(round(0.2 * C.PHYSICS_TPS))
+_sw_smooth_p.frame += _sw_interval_frames
+_sw_smooth_p._step_pending_swaps()
+check("a 10s Smooth Duration is clamped to at most the 0.2s Interval",
+      all(a["duration"] <= _sw_interval_frames
+          for a in _sw_smooth_p.move_animations
+          if a["obj"] in _sw_smooth_members))
+for _ in range(_sw_interval_frames + 2):
+    _sw_smooth_p._step_move_animations()
+check("the clamped tween fully resolves within one Interval",
+      all(a["obj"] not in _sw_smooth_members for a in _sw_smooth_p.move_animations))
+_sw_smooth_after = _swap_positions(_sw_smooth_members)
+check("Smooth swap still lands on a permutation of the original positions",
+      sorted(_sw_smooth_after) == sorted(_sw_smooth_before))
+
+# --- 5: round-trips through save/load like any other trigger --------------
+_sw_rt_obj = {"t": T_SWAP_TRIGGER, "x": 2, "y": 2, "r": 0, "target_group": 5,
+             "interval": 2.5, "count": 7, "smooth": True,
+             "smooth_duration": 1.5, "easing": "ease_out"}
+_sw_rt_path = save_level([_sw_rt_obj], "SwapRT", "swap-roundtrip")
+_sw_rt_loaded = load_level(_sw_rt_path)[1][0]
+check("Swap Trigger's fields survive a save/load round-trip",
+      _sw_rt_loaded.get("interval") == 2.5
+      and _sw_rt_loaded.get("count") == 7
+      and _sw_rt_loaded.get("smooth") is True
+      and _sw_rt_loaded.get("smooth_duration") == 1.5
+      and _sw_rt_loaded.get("easing") == "ease_out")
+
+
+section("Real-GD sprite geometry (overhang, spin loop, cache signature)")
+
+from src import gd_atlas as _gda
+from src.sprites import (GD_SPRITE_MAP as _GDMAP, GD_ART_RECIPE as _GDRECIPE,
+                         SPRITE_FRAMES as _GDFRAMES,
+                         sprite_cache_signature as _gdsig,
+                         sprite_extent as _gdextent, draw_obj as _gddraw)
+from src.constants import (T_SAW as _T_SAW, T_MODE_MINI as _T_MINI,
+                           T_MODE_BIG as _T_BIG, T_BLOCK as _T_BLK)
+
+# --- 1: cell_extent is the contract draw_obj relies on -------------------
+check("cell_extent keeps a one-cell (30 unit) sprite exactly one cell",
+      _gda.cell_extent(50, 30, 30) == (50, 50))
+check("cell_extent grows the canvas for art bigger than a cell "
+      "(a 60x60 saw is 2x2 cells)",
+      _gda.cell_extent(50, 60, 60) == (100, 100))
+check("cell_extent never returns less than one cell for small art",
+      _gda.cell_extent(50, 25, 4) == (50, 50))
+check('cell_extent under fit="contain" always stays one cell',
+      _gda.cell_extent(50, 44, 90, fit="contain") == (50, 50))
+check("cell_extent ignores pad, so a breathing sprite's canvas is stable "
+      "across its frames (a per-frame canvas would jitter the blit)",
+      _gda.cell_extent(50, 33, 33) == _gda.cell_extent(50, 33, 33))
+
+# --- 2: the specs that must NOT be shrunk into one cell ------------------
+check("portals render at true GD scale, not shrunk to fit a cell",
+      all(_GDMAP[t].get("fit", "cell") == "cell"
+          for t in (_T_MINI, _T_BIG)))
+check("the saw renders at true GD scale (it is a real 2x2 cells)",
+      _GDMAP[_T_SAW].get("fit", "cell") == "cell")
+
+# --- 3: the spin loop must wrap ------------------------------------------
+# `sawblade_02`'s radial profile repeats every 30 degrees (12 teeth). A
+# sweep that is not a whole number of those periods leaves the last frame
+# out of phase with the first, and the blade lurches backwards once per
+# loop -- which is what "the saw oscillates for no reason" was.
+_SAW_TOOTH_DEG = 30.0
+_saw_spin = _GDMAP[_T_SAW]["spin"]
+check("the saw's spin sweep is a whole number of tooth periods, so frame 7 "
+      "wraps back to frame 0 seamlessly",
+      abs(_saw_spin / _SAW_TOOTH_DEG - round(_saw_spin / _SAW_TOOTH_DEG)) < 1e-6)
+check("...and each frame turns less than half a tooth, so the direction of "
+      "rotation is never ambiguous",
+      _saw_spin / _GDFRAMES < _SAW_TOOTH_DEG / 2)
+
+# --- 4: the size portals are not swapped ---------------------------------
+# GD's wiki is explicit that mini is pink and normal-size is green, and the
+# frames measure that way, so the mapping is pinned to the frame index.
+check("Mini Portal uses GD's pink size-portal frame (09), not the green one",
+      _GDMAP[_T_MINI]["frames"][1] == "portal_09_front_001.png")
+check("Big Portal uses GD's green size-portal frame (08)",
+      _GDMAP[_T_BIG]["frames"][1] == "portal_08_front_001.png")
+check("...so the two size portals are not the same art",
+      _GDMAP[_T_MINI]["frames"] != _GDMAP[_T_BIG]["frames"])
+
+# --- 5: the cache signature tracks the art recipe ------------------------
+# Editing a frame/tint/spin used to leave already-baked frames on disk
+# under the old recipe while the rest re-rendered under the new one.
+_sig_before = _gdsig()
+_GDMAP[_T_SAW] = dict(_GDMAP[_T_SAW], spin=_saw_spin + 30.0)
+_sig_after = _gdsig()
+_GDMAP[_T_SAW] = dict(_GDMAP[_T_SAW], spin=_saw_spin)
+check("changing GD_SPRITE_MAP changes the sprite cache signature "
+      "(no hand-bump needed to invalidate stale PNGs)",
+      _sig_before != _sig_after or not _gda.atlas_installed())
+check("...and restoring it restores the signature (the digest is of the "
+      "recipe, not of edit history)",
+      _gdsig() == _sig_before)
+check("GD_ART_RECIPE carries the sprite map, so the digest covers it",
+      _GDMAP in _GDRECIPE)
+
+# --- 6: draw_obj centres a sprite on its cell, oversized or not ----------
+_ext_blk = _gdextent(_T_BLK, 50)
+check("a one-cell type's sprite is exactly one cell", _ext_blk == (50, 50))
+_gd_surf = pygame.Surface((300, 300), pygame.SRCALPHA)
+_gddraw(_gd_surf, _T_BLK, 100, 100, 50)
+_gd_bb = _gd_surf.get_bounding_rect()
+check("draw_obj still lands a one-cell sprite on the cell's top-left "
+      "(no drift from the centring change)",
+      _gd_bb.x == 100 and _gd_bb.y == 100)
+_gd_surf2 = pygame.Surface((300, 300), pygame.SRCALPHA)
+_gddraw(_gd_surf2, _T_SAW, 100, 100, 50)
+_gd_bb2 = _gd_surf2.get_bounding_rect()
+check("an oversized sprite is CENTRED on its cell, overhanging evenly, "
+      "rather than pinned to the cell's corner",
+      abs(_gd_bb2.centerx - 125) <= 2 and abs(_gd_bb2.centery - 125) <= 2)
+_gd_surf3 = pygame.Surface((300, 300), pygame.SRCALPHA)
+_gddraw(_gd_surf3, _T_SAW, 100, 100, 50, fit_cell=True)
+_gd_bb3 = _gd_surf3.get_bounding_rect()
+check("fit_cell keeps an oversized sprite inside the cell, for the editor "
+      "palette tiles it would otherwise spill out of",
+      _gd_bb3.width <= 50 and _gd_bb3.height <= 50)
+
+# --- 7: the procedural fallback discipline still holds -------------------
+_gd_missing = _gda.compose("GJ_NoSuchSheet", "nope.png", 50)
+check("compose returns None for a missing sheet, so the procedural "
+      "renderer takes over instead of crashing", _gd_missing is None)
+
+
+# ---------------------------------------------------------------------------
+section("CELL is render-only")
+# The camera-zoom fix turned CELL from a secretly load-bearing physics
+# constant into a pure render scale. These guard that: if a physics or
+# collision length ever routes through pixels again, one of them fails.
+
+_UNIT_MODULES = [
+    "src/geometry.py", "src/player/core.py", "src/player/collision.py",
+    "src/player/triggers.py", "src/player/body.py", "src/physics.py",
+    "src/bots/sim.py", "src/bots/brute_force.py", "src/bots/human.py",
+    "src/bots/progress.py", "src/bots/action_space.py",
+]
+_px_callers = [m for m in _UNIT_MODULES
+               if "px_to_units" in open(m, encoding="utf-8").read()]
+check("no physics/collision/bot module converts a px literal to units",
+      _px_callers == [])
+
+# geometry.py had a private second copy of the px->unit ratio that
+# desynced from constants' when only one was frozen.
+check("geometry.py has no private px<->unit ratio of its own",
+      "_PX_TO_UNIT_RATIO" not in open("src/geometry.py", encoding="utf-8").read())
+
+# The px hitbox builders must be the unit ones scaled, not independent
+# pixel literals — that desync is what made a bare CELL change unsafe.
+from src.geometry import (
+    cell_rect as _g_cr, cell_rect_units as _g_cru,
+    slab_rect as _g_sr, slab_rect_units as _g_sru,
+    spike_hitboxes as _g_sp, spike_hitboxes_units as _g_spu,
+    pad_trigger_rect as _g_pt, pad_trigger_rect_units as _g_ptu,
+)
+_geo_ok = True
+for _gx, _gy, _r in ((0, 0, 0), (3, 7, 90), (5, 2, 180), (9, 4, 270)):
+    _pairs = [(_g_cr(_gx, _gy), _g_cru(_gx, _gy)),
+              (_g_sr(_gx, _gy, _r), _g_sru(_gx, _gy, _r)),
+              (_g_pt(_gx, _gy, _r), _g_ptu(_gx, _gy, _r))]
+    for _half in (False, True):
+        _pairs += list(zip(_g_sp(_gx, _gy, _r, _half),
+                           _g_spu(_gx, _gy, _r, _half)))
+    for _px_rect, _u_rect in _pairs:
+        for _a, _b in zip(_px_rect, _u_rect):
+            if abs(_a - _b * C.PX_PER_UNIT) > 1.0:
+                _geo_ok = False
+check("px hitbox builders track their unit twins at the live render scale",
+      _geo_ok)
+
+# The camera framing is the sourced one, and the play-field bound the
+# dual mirror / fall-off / bot-void code wants is NOT the camera height.
+check("vertical FOV is GD's 320 units (10.67 blocks), within rounding",
+      abs(C.CAMERA_HEIGHT_UNITS - C.CAMERA_FOV_UNITS) < 2.0)
+check("play-field height stays 14 blocks, independent of the FOV",
+      C.PLAYFIELD_HEIGHT_UNITS == 14 * C.UNITS_PER_BLOCK)
+check("default camera framing is 0 at the legacy 14-block FOV",
+      abs((11 * C.UNITS_PER_BLOCK - C.GROUND_SCREEN_FRACTION
+           * C.PLAYFIELD_HEIGHT_UNITS)) < 1e-9)
 
 
 print(f"\n=== Summary: {passed} passed, {failed} failed ===")

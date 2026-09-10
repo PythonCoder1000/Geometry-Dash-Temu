@@ -24,12 +24,14 @@ import pygame
 
 from .constants import (
     WIDTH, HEIGHT, CELL, UNITS_PER_BLOCK, PLAYER_START_GX, PHYSICS_TPS,
+    CAMERA_BASE_Y_PX,
     C_PLAYER, C_BG_TOP, C_BG_BOT, C_DASH_ORB,
-    DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES,
+    DECORATION_TYPES, TRIGGER_TYPES, BG_PRESETS, PAD_TYPES, Z_LAYERS,
     T_COIN, T_ORB, T_DASH_ORB, T_DASH_ORB_GRAV, T_BLACK_ORB,
     T_BLUE_ORB, T_GREEN_ORB, T_SPIDER_ORB, T_RED_ORB, T_PINK_ORB,
     T_GRAV_UP, T_GRAV_DOWN, T_TIME_WARP, SPEED_VALUES, T_END,
     TELEPORT_LINK_TYPES, px_to_units, PX_PER_UNIT,
+    LEVEL_TRANSITION_DEFAULT,
 )
 from .graphics import (
     make_rect, make_stars, make_mountains,
@@ -46,7 +48,7 @@ from .physics import PhysicsParams
 from .channels import channels_from_meta
 from .player import Player
 from .levels import update_meta, get_group_id
-from .objects import cycle_active_start, start_objects
+from .objects import cycle_active_start, start_objects, get_z_layer
 from .play_render import (
     render_world, render_hint_overlay, render_predicted_path,
     render_ghost_paths, render_death_hitbox_marker, render_best_run_ghost,
@@ -55,7 +57,7 @@ from .play_render import (
     render_blackout, render_toast,
     render_hud, render_debug_overlay, render_state_hud,
     render_pause_overlay, render_win_overlay,
-    build_screen_effects, apply_camera_post,
+    build_screen_effects, apply_camera_post, level_transition_state,
 )
 
 # Checkpoint 3 tick-rate migration (60 -> 240 TPS, physics bible Part 0/
@@ -322,6 +324,12 @@ class PlaySession:
         self.player.practice_mode = practice_mode
         self.player.noclip = noclip
         self.is_sim_run = bot_controller is not None or playback_inputs is not None
+        # Checkpoint 7: the level's legacy-transition setting, read once
+        # here (a level's meta cannot change mid-session) and consumed by
+        # level_transition_state during the render pass. Validated on
+        # load by levels._migrate, so anything unknown is already "none".
+        self.transition = str((meta or {}).get("transition",
+                                               LEVEL_TRANSITION_DEFAULT))
         self.can_persist = (not editor_test and not self.is_sim_run
                             and level_path is not None)
         self.music_offset_sec = self._music_offset_seconds()
@@ -336,12 +344,15 @@ class PlaySession:
         if out_mirror_hitboxes is not None:
             self.player.mirror_hitbox_trace = self.current_mirror_hitboxes
 
-        # Render layers (decorations behind everything else).
+        # Render layers: GD's Z-Layer system (b4..b1..t1..t3), each
+        # independently x-sorted for the render loop's bisect culling.
+        # Objects with no explicit z_layer fall back to the engine's
+        # original 2-layer split (decorations on b1, everything else t1).
         pool = [o for o in self.objects if o["t"] not in TRIGGER_TYPES]
-        self.deco_layer, self.deco_xs = _sorted_by_x(
-            [o for o in pool if o["t"] in DECORATION_TYPES])
-        self.main_layer, self.main_xs = _sorted_by_x(
-            [o for o in pool if o["t"] not in DECORATION_TYPES])
+        by_z = {name: [] for name in Z_LAYERS}
+        for o in pool:
+            by_z[get_z_layer(o)].append(o)
+        self.z_layers = [_sorted_by_x(by_z[name]) for name in Z_LAYERS]
         self.stars = make_stars()
         self.mountains = make_mountains()
         self.particles = Particles()
@@ -395,8 +406,8 @@ class PlaySession:
         self.prev_input_held = False
         self.pending_presses = 0
         self.cam_x = 0.0
-        self.cam_y = 0.0
-        self.prev_cam_y = 0.0
+        self.cam_y = CAMERA_BASE_Y_PX
+        self.prev_cam_y = CAMERA_BASE_Y_PX
         self._cam_pan_target = 0.0
         self._cam_pan_start = 0.0
         self._cam_pan_timer = 0
@@ -429,6 +440,12 @@ class PlaySession:
         self.takeover_idle_frames = 0
         self.desync_max_px = 0.0
         self.desync_alert_timer = 0
+        # Checkpoint 4: Motion Blur's ring buffer of recent rendered
+        # frames. Render-side state, deliberately not on Player -- it
+        # holds raw frame buffers, which nothing in the physics sim (or
+        # any bot snapshotting a Player) should ever carry. Emptied per
+        # attempt so a retry never blends in the previous run's frames.
+        self.motion_blur_frames = []
 
     def _music_offset_seconds(self):
         """Seek offset so the music matches a mid-level spawn.  t=0 is
@@ -485,8 +502,8 @@ class PlaySession:
         if self.bot_controller:
             self.bot_controller.reset()
         self.cam_x = self.player.x_px - CAMERA_LEAD_PX
-        self.cam_y = 0.0
-        self.prev_cam_y = 0.0
+        self.cam_y = CAMERA_BASE_Y_PX
+        self.prev_cam_y = CAMERA_BASE_Y_PX
         self._cam_pan_target = 0.0
         self._cam_pan_start = 0.0
         self._cam_pan_timer = 0
@@ -1034,10 +1051,17 @@ class PlaySession:
         shake_x, shake_y = shake_offset
         s = self.screen
         os_ = self.overlay_scratch
+        # Checkpoint 7: the level-start transition and the BG/MG parallax
+        # rates. Both ride into render stages that already exist -- the
+        # transition's fade into render_blackout below, its zoom into
+        # apply_camera_post, the parallax scales into draw_bg.
+        tr_fade, tr_zoom = level_transition_state(self.transition,
+                                                  self.attempt_frames)
         render_world(s, cam_x, cam_y, shake_x, shake_y, self.stars,
                      self.mountains, self.bg_top, self.bg_bot, self.pulse,
-                     self.deco_layer, self.deco_xs, self.main_layer,
-                     self.main_xs, p.coins_collected)
+                     self.z_layers, p.coins_collected,
+                     bg_scale=p.bg_scroll_scale(), mg_scale=p.mg_scroll_scale(),
+                     bg_index=p.bg_preset)
         render_hint_overlay(s, os_, self.CLEAR, self.hint_visible,
                             self.hint_path, self.hint_mirror_path, cam_x, cam_y,
                             shake_x, shake_y)
@@ -1057,7 +1081,7 @@ class PlaySession:
                                     shake_x, shake_y, alpha)
         render_checkpoint_markers(s, self.practice_mode, p, self.pulse,
                                   cam_x, cam_y, shake_x, shake_y)
-        render_blackout(s, os_, p.blackout_value)
+        render_blackout(s, os_, max(p.blackout_value, tr_fade))
         render_death_reason(s, self.death_timer, p)
         render_toast(s, self.toast_text, self.toast_timer)
         render_slowmo_vignette(s, os_, self.CLEAR, self.death_slowmo_timer)
@@ -1065,8 +1089,9 @@ class PlaySession:
         # Checkpoint 6: zoom/rotate/screen-effects post-process the fully
         # drawn world frame, before the HUD is drawn on top of it (so the
         # HUD itself never zooms/rotates/tints, matching real GD).
-        apply_camera_post(s, p.zoom, p.cam_rotation,
-                          build_screen_effects(p.active_effect_anims))
+        apply_camera_post(s, p.zoom * tr_zoom, p.cam_rotation,
+                          build_screen_effects(p.active_effect_anims),
+                          self.motion_blur_frames)
         if self.death_flash_timer > 0:
             self.death_flash_timer -= 1
         render_hud(s, p, self.max_x, self.attempts, self.attempt_frames,

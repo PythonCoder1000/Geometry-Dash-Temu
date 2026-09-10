@@ -34,8 +34,7 @@ import time
 _os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "hide")
 
 from ..constants import (
-    UNITS_PER_BLOCK, HEIGHT_UNITS, PLAYER_SIZE_UNITS, PX_PER_UNIT,
-    px_to_units,
+    UNITS_PER_BLOCK, PLAYFIELD_HEIGHT_UNITS, PLAYER_SIZE_UNITS, PX_PER_UNIT,
     MODE_CUBE, MODE_BALL, MODE_SPIDER,
     HAZARD_TYPES, ORB_TYPES,
     T_END, T_SPEED_NORMAL, SPEED_VALUES_UT as SPEED_VALUES,
@@ -46,10 +45,17 @@ from .. import sfx
 from .action_space import (
     HUMAN, FRAME_PERFECT, DWELL_CAP, replay_state,
 )
-from .brute_force import BruteForceSearch
+from .brute_force import BruteForceSearch, POS_BUCKET_UNITS, VEL_BUCKET_UNITS
 from .progress import SolveProgress, win_x_for_objects
 from .sim import SimPlayer, snapshot, restore, player_dedup_key, dedup_key
 from .toggle_search import ToggleSearch
+
+# How much "virtual x" a collected coin is worth when ranking otherwise
+# equal probe branches — 1.6 blocks, enough to outweigh the small x lead
+# a branch that skipped the coin would hold. A search-ranking weight,
+# not a physics length, but it is added to a unit-space x so it has to
+# be stated in units.
+COIN_SCORE_BONUS_UNITS = 48.0
 
 
 class BestSolution:
@@ -181,7 +187,12 @@ class HumanBot:
     # the frame-perfect escape hatch may start.
     HUMAN_BUDGET_FRACTION = 0.7
 
-    ALLOW_FRAME_PERFECT = True
+    # Off by default: this used to be an automatic fallback that solve()
+    # reached for on its own whenever no human-timing solution turned up.
+    # It's now an explicit opt-in toggle (set by the bot menu) — a
+    # frame-perfect result isn't something a person could replay, so the
+    # caller has to ask for it rather than get it silently.
+    ALLOW_FRAME_PERFECT = False
 
     # When True, Phase 3/4 (A* + checkpoint backtracking + toggle
     # search) is replaced by a single BruteForceSearch run — see
@@ -190,8 +201,8 @@ class HumanBot:
     USE_BRUTE_FORCE = False
     # Dedup granularity passed straight through to BruteForceSearch —
     # see that module's docstring for the completeness/speed tradeoff.
-    BRUTE_FORCE_POS_BUCKET = px_to_units(1.0)
-    BRUTE_FORCE_VEL_BUCKET = px_to_units(0.5)
+    BRUTE_FORCE_POS_BUCKET = POS_BUCKET_UNITS
+    BRUTE_FORCE_VEL_BUCKET = VEL_BUCKET_UNITS
     # Opt-in multi-process macro-scan for BruteForceSearch — see that
     # module's "Parallel search" block for the design and the earlier
     # CPU-peg / unresponsive-ESC bug it's built to avoid. Off by
@@ -240,7 +251,7 @@ class HumanBot:
         # A real drop can run several screen heights before it's done;
         # too tight a margin kills a still-recoverable fall before it
         # ever reaches what it was falling toward.
-        self._void_y = max_y * UNITS_PER_BLOCK + HEIGHT_UNITS * 4
+        self._void_y = max_y * UNITS_PER_BLOCK + PLAYFIELD_HEIGHT_UNITS * 4
 
         self._orb_cells = set()
         for o in objects:
@@ -502,8 +513,10 @@ class HumanBot:
 
         ``time_budget`` (seconds) caps the whole pipeline.  The humanlike
         pass gets ``HUMAN_BUDGET_FRACTION`` of it; only if that fails
-        does the frame-perfect escape hatch run with the remainder, and
-        ``used_frame_perfect`` records that it did.
+        AND ``ALLOW_FRAME_PERFECT`` is set does the frame-perfect escape
+        hatch run with the remainder (it's an opt-in toggle, not an
+        automatic fallback — off by default), and ``used_frame_perfect``
+        records that it did.
         """
         was_enabled = sfx.is_enabled()
         if was_enabled:
@@ -910,14 +923,14 @@ class HumanBot:
                     live.update(held, pressed)
                     inputs.append((held, pressed))
                     return inputs, True
-                score_x = probe.x + len(probe.coins_collected) * px_to_units(80.0)
+                score_x = probe.x + len(probe.coins_collected) * COIN_SCORE_BONUS_UNITS
                 if self.route_bias is not None:
                     score_x += self.route_bias(probe) * UNITS_PER_BLOCK
                 if ckpt_xs:
                     next_ckpt = next((cx for cx in ckpt_xs
                                       if cx >= probe.x - UNITS_PER_BLOCK), None)
                     if next_ckpt is not None:
-                        score_x += (self.CHECKPOINT_BONUS * px_to_units(50.0)
+                        score_x += (self.CHECKPOINT_BONUS * UNITS_PER_BLOCK
                                     / max(1.0, abs(next_ckpt - probe.x)))
                 score = (1 if probe.alive else 0, score_x)
                 if score > best_score:

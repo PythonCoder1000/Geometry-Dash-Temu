@@ -8,11 +8,13 @@ share the player's ``x``; everything else is read from the body.
 import math
 
 from ..constants import (
-    UNITS_PER_BLOCK, PLAYER_SIZE_UNITS, SOLID_HITBOX_FRACTION,
-    HITBOX_SOLID_FRACTION,
+    UNITS_PER_BLOCK, SOLID_HITBOX_FRACTION,
+    HITBOX_SOLID_FRACTION, is_mini_size,
     T_BLOCK, T_SLAB, T_SLOPE, T_START, T_SPIKE, T_HALF_SPIKE, T_SAW,
     SOLID_TYPES, MODE_WAVE, MODE_CUBE, MODE_ROBOT,
-    T_WAVE_BLOCK, T_BONK_BLOCK, px_to_units,
+    T_WAVE_BLOCK, T_BONK_BLOCK,
+    MIN_INNER_HITBOX_UNITS, GROUND_CONTACT_MARGIN_UNITS,
+    SLOPE_SNAP_MARGIN_UNITS, TOUCH_PAD_UNITS,
 )
 from ..geometry import (
     cell_rect_units as cell_rect, slab_rect_units as slab_rect,
@@ -30,11 +32,12 @@ _POSE_CACHE_KEYS = ("_srect", "_caabb", "_saw_aabb", "_sphb_aabbs")
 def solid_hitbox_fraction(mode, size):
     """Inner ("blue" solid) hitbox as a fraction of the outer box, per the
     physics bible's §3.2 per-(mode, mini) table. ``size`` decides normal vs
-    mini (mirrors the ``mini = b.size < PLAYER_SIZE_UNITS`` convention used
-    elsewhere in the player module)."""
+    mini, through the same ``is_mini_size`` test the rest of the player
+    module uses (a normal-size Wave is 10 units, so a bare comparison
+    against PLAYER_SIZE_UNITS would read it as mini)."""
     normal, mini = HITBOX_SOLID_FRACTION.get(
         mode, (SOLID_HITBOX_FRACTION, SOLID_HITBOX_FRACTION))
-    return mini if size < PLAYER_SIZE_UNITS else normal
+    return mini if is_mini_size(mode, size) else normal
 
 
 def is_non_trigger(o):
@@ -240,7 +243,7 @@ class CollisionMixin:
     @staticmethod
     def _inner_bounds(x, y, size, mode=None):
         frac = solid_hitbox_fraction(mode, size)
-        inner = max(px_to_units(2), size * frac)
+        inner = max(MIN_INNER_HITBOX_UNITS, size * frac)
         cx = x + size / 2.0
         cy = y + size / 2.0
         left = cx - inner / 2.0
@@ -385,7 +388,7 @@ class CollisionMixin:
         gap = 1e-6
         px = self.x
         edge = b.y + size if b.grav == 1 else b.y
-        margin = px_to_units(1)
+        margin = GROUND_CONTACT_MARGIN_UNITS
         p_top = edge - margin
         p_bottom = edge + margin
         il, _, ir, _ = self._inner_bounds(self.x, b.y, size, b.mode)
@@ -469,7 +472,7 @@ class CollisionMixin:
                 best_ceiling = surface_y
         if best_floor is not None:
             bottom = b.y + size
-            if best_floor < bottom <= best_floor + UNITS_PER_BLOCK + px_to_units(4):
+            if best_floor < bottom <= best_floor + UNITS_PER_BLOCK + SLOPE_SNAP_MARGIN_UNITS:
                 if b.mode == MODE_WAVE and not self._letter_block_nearby(px, py, size, T_WAVE_BLOCK):
                     self._kill(b, "Hit a slope")
                     if not self.noclip:
@@ -480,7 +483,7 @@ class CollisionMixin:
                 if b.grav == 1:
                     b.on_ground = True
         if best_ceiling is not None:
-            if best_ceiling - UNITS_PER_BLOCK - px_to_units(4) <= b.y < best_ceiling:
+            if best_ceiling - UNITS_PER_BLOCK - SLOPE_SNAP_MARGIN_UNITS <= b.y < best_ceiling:
                 if b.mode == MODE_WAVE and not self._letter_block_nearby(px, py, size, T_WAVE_BLOCK):
                     self._kill(b, "Hit a slope")
                     if not self.noclip:
@@ -535,12 +538,13 @@ class CollisionMixin:
         """Kill ``b`` if the swept box between two poses crosses a hazard
         (used by instantaneous teleports)."""
         size = b.size
-        shrink = max(px_to_units(2), px_to_units(6) * size / PLAYER_SIZE_UNITS)
-        pad = px_to_units(3)
-        l = min(x0, x1) + shrink
-        t = min(y0, y1) + shrink
-        r = max(x0, x1) + size - shrink
-        bt = max(y0, y1) + size - shrink
+        pad = TOUCH_PAD_UNITS
+        # Full §3.2 body box, matching the per-substep hazard test in
+        # player.core — see the note there on why the old inset is gone.
+        l = min(x0, x1)
+        t = min(y0, y1)
+        r = max(x0, x1) + size
+        bt = max(y0, y1) + size
         for o in self._nearby_for_aabb(l - pad, t - pad, r + pad, bt + pad, 2):
             if self._hazard_hit(o, (l, t, r, bt), None):
                 reason = ("Teleported into a saw" if o["t"] == T_SAW

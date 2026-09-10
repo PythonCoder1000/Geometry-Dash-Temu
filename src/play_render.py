@@ -22,24 +22,44 @@ from .constants import (
     WIDTH, HEIGHT, CELL, PLAYER_SIZE, PHYSICS_TPS, PX_PER_UNIT,
     C_DARK, C_PLAYER, C_GRAY, C_WHITE, C_BTN, C_COIN, C_SUCCESS, C_DANGER,
     BG_PRESETS, T_COIN, T_END, T_TELEPORT_ORB, T_TELEPORT_PORTAL, T_SPIDER_ORB,
-    T_ITEM_COUNTER,
+    T_ITEM_COUNTER, RADIAL_BLUR_MAX_ZOOM,
+    LEVEL_TRANSITION_FRAMES, LEVEL_TRANSITION_SCALE_START,
 )
 from .graphics import (
     draw_bg, draw_obj, txt, btn, lighter, darker,
-    speaker_icon, icon_button, draw_end_wall, obj_scale, obj_alpha,
+    speaker_icon, icon_button, draw_end_wall, obj_scale, obj_alpha, obj_tint,
 )
+from . import gd_atlas
 from . import music
 from . import sfx
+from .objects import get_z_order
+
+# The practice checkpoint GD itself plants (its `checkpoint_01` frame,
+# glow layer deliberately skipped).
+GD_CHECKPOINT_SHEET = "GJ_GameSheet02"
+GD_CHECKPOINT_FRAME = "checkpoint_01_001.png"
+CHECKPOINT_MARKER_PX = 40
 
 
 def render_world(screen, cam_x, cam_y, shake_x, shake_y, stars, mountains,
-                  bg_top, bg_bot, pulse, deco_layer, deco_xs, main_layer,
-                  main_xs, coins_collected):
-    """Background + every in-bounds level object, decorations first."""
+                  bg_top, bg_bot, pulse, z_layers, coins_collected,
+                  bg_scale=None, mg_scale=None, bg_index=0):
+    """Background + every in-bounds level object, in Z-Layer order.
+
+    ``z_layers`` is a sequence of ``(objs, xs)`` pairs, one per
+    :data:`constants.Z_LAYERS` entry back-to-front (b4..b1..t1..t3), each
+    already x-sorted for bisect culling. Within a layer, objects draw in
+    Z-Order (``get_z_order``, higher = front) so authors can stack detail
+    without needing a new layer for every sliver of depth.
+
+    ``bg_scale``/``mg_scale`` come from the player's Background/
+    Middleground Speed triggers (Checkpoint 7) and pass straight through
+    to draw_bg, where ``None`` means the stock parallax rates."""
     cur_top = tuple(int(c) for c in bg_top)
     cur_bot = tuple(int(c) for c in bg_bot)
     draw_bg(screen, cam_x + shake_x, stars, mountains,
-            cam_y=cam_y + shake_y, bg_top=cur_top, bg_bot=cur_bot)
+            cam_y=cam_y + shake_y, bg_top=cur_top, bg_bot=cur_bot,
+            bg_scale=bg_scale, mg_scale=mg_scale, bg_index=bg_index)
     left_gx = int(cam_x // CELL) - 1
     right_gx = left_gx + WIDTH // CELL + 3
     # The bisect slice keys on each object's ORIGINAL x (stable across
@@ -49,11 +69,11 @@ def render_world(screen, cam_x, cam_y, shake_x, shake_y, stars, mountains,
     slice_margin = 200
     lo = left_gx - slice_margin
     hi = right_gx + slice_margin
-    for layer, xs in ((deco_layer, deco_xs), (main_layer, main_xs)):
+    for layer, xs in z_layers:
         i = bisect.bisect_left(xs, lo)
         j = bisect.bisect_right(xs, hi)
-        for k in range(i, j):
-            o = layer[k]
+        visible = sorted(layer[i:j], key=get_z_order)
+        for o in visible:
             ox = o.get("_fx", o["x"])
             oy = o.get("_fy", o["y"])
             if not (left_gx - 1 <= ox <= right_gx + 1):
@@ -77,7 +97,7 @@ def render_world(screen, cam_x, cam_y, shake_x, shake_y, stars, mountains,
                      oy * CELL - cam_y + shake_y, CELL, pulse, o.get("r", 0),
                      o if o["t"] in (T_TELEPORT_ORB, T_TELEPORT_PORTAL,
                                      T_SPIDER_ORB) else None,
-                     scale=obj_scale(o), alpha=obj_alpha(o))
+                     scale=obj_scale(o), alpha=obj_alpha(o), tint=obj_tint(o))
             # Bot-only object marker: a translucent purple X overlay so
             # the level author can see at a glance that this hazard is
             # phantom (won't kill the live player) but is part of the Y
@@ -372,28 +392,36 @@ def render_player_and_particles(screen, player, particles, death_timer,
 
 def render_checkpoint_markers(screen, practice_mode, player, pulse,
                                cam_x, cam_y, shake_x, shake_y):
-    """Practice-mode checkpoint flags planted with the C key."""
+    """Practice-mode checkpoint markers planted with the C key.
+
+    These never go through ``draw_obj`` (they are player state, not level
+    objects), so the real-GD ``checkpoint_01`` texture is pulled straight
+    from the atlas here; without it the hand-drawn flag still renders.
+    """
     if not (practice_mode and player.checkpoints and not player.won):
         return
     pulse_t = (pulse % PHYSICS_TPS) / PHYSICS_TPS  # `pulse` ticks once/tick
     glow = int(90 + 40 * math.sin(pulse_t * math.tau))
+    marker = gd_atlas.compose(GD_CHECKPOINT_SHEET, GD_CHECKPOINT_FRAME,
+                              CHECKPOINT_MARKER_PX, fit="contain")
     for i, cp in enumerate(player.checkpoints):
         fx = int(cp["x"] * PX_PER_UNIT - cam_x - shake_x)
         fy = int(cp["y"] * PX_PER_UNIT - cam_y - shake_y)
         # Cull off-screen markers cheaply.
         if fx < -40 or fx > WIDTH + 40:
             continue
-        # Flag pole.
         pole_top = fy - 28
-        pole_bot = fy + 44
-        pygame.draw.line(screen, (230, 230, 240),
-                         (fx + 8, pole_top), (fx + 8, pole_bot), 2)
-        # Triangular flag.
-        flag_pts = [(fx + 8, pole_top),
-                    (fx + 30, pole_top + 8),
-                    (fx + 8, pole_top + 16)]
-        pygame.draw.polygon(screen, (90, 220, 140), flag_pts)
-        pygame.draw.polygon(screen, (20, 100, 50), flag_pts, 2)
+        if marker is not None:
+            screen.blit(marker, (fx + 8 - CHECKPOINT_MARKER_PX // 2, pole_top))
+        else:
+            pole_bot = fy + 44
+            pygame.draw.line(screen, (230, 230, 240),
+                             (fx + 8, pole_top), (fx + 8, pole_bot), 2)
+            flag_pts = [(fx + 8, pole_top),
+                        (fx + 30, pole_top + 8),
+                        (fx + 8, pole_top + 16)]
+            pygame.draw.polygon(screen, (90, 220, 140), flag_pts)
+            pygame.draw.polygon(screen, (20, 100, 50), flag_pts, 2)
         # Soft pulsing halo around the flag so it reads as "interactive"
         # rather than part of the level art.
         halo = pygame.Surface((44, 44), pygame.SRCALPHA)
@@ -456,6 +484,32 @@ def render_pulse_flash(screen, overlay_scratch, pulse_amp, color=(255, 240, 255)
     screen.blit(overlay_scratch, (0, 0))
 
 
+def level_transition_state(kind, attempt_frames):
+    """``(blackout_amount, zoom_multiplier)`` for the level-start
+    transition (Checkpoint 7, ``meta["transition"]``).
+
+    Deliberately a pure function of the attempt's tick counter rather
+    than a piece of session state: play.py already resets
+    ``attempt_frames`` to 0 on every attempt (``_init_attempt_state``),
+    so the transition restarts on every retry for free and there is
+    nothing extra to keep in sync.
+
+    Both outputs feed EXISTING render stages instead of adding one:
+    ``blackout_amount`` goes into render_blackout (the Blackout Trigger's
+    fade-to-black, max'd with it) and ``zoom_multiplier`` into
+    apply_camera_post's zoom (the Zoom Trigger's). "none" and any
+    finished/unknown transition return the identity pair.
+    """
+    if kind not in ("fade", "scale") or attempt_frames >= LEVEL_TRANSITION_FRAMES:
+        return (0.0, 1.0)
+    t = max(0.0, attempt_frames / LEVEL_TRANSITION_FRAMES)
+    eased = 1.0 - (1.0 - t) * (1.0 - t)  # ease-out
+    if kind == "fade":
+        return (1.0 - eased, 1.0)
+    return (0.0, LEVEL_TRANSITION_SCALE_START
+            + (1.0 - LEVEL_TRANSITION_SCALE_START) * eased)
+
+
 def render_blackout(screen, overlay_scratch, amount):
     """Full-screen solid-black fade from a Blackout Trigger — drawn over
     the world, hint/path overlays, player, trail and particles so an
@@ -506,35 +560,217 @@ def _hsv_to_rgb_np(hsv):
     return np.stack([r, g, b], axis=-1)
 
 
+# The bookkeeping half of an active_effect_anims entry — everything that
+# drives the tween itself rather than the pixel operation.
+_EFFECT_TWEEN_KEYS = frozenset({"start", "cur", "target", "frame",
+                                "duration", "easing"})
+# The effects that share one pass over one float32 copy of the frame.
+_COLOR_EFFECTS = frozenset({"grayscale", "sepia", "invert", "hue"})
+
+
 def build_screen_effects(active_effect_anims):
     """Player.active_effect_anims -> the sparse ``effects`` dict
     :func:`apply_screen_effects` consumes (near-zero intensities
-    dropped so an idle level pays no per-frame numpy cost)."""
+    dropped so an idle level pays no per-frame numpy cost).
+
+    One uniform shape per effect: ``{name: {"amount": cur, **knobs}}``,
+    where the knobs are whatever ``triggers.SCREEN_EFFECT_PARAMS`` put
+    on the animation entry, passed through untouched. This function
+    therefore stays generic -- adding a screen effect means adding a
+    param row and a render branch, never a case here.
+    """
     out = {}
     for name, anim in active_effect_anims.items():
         cur = anim.get("cur", 0.0)
         if cur <= 0.001:
             continue
-        if name == "hue":
-            out["hue"] = (cur, anim.get("degrees", 60.0))
-        elif name == "pixelate":
-            out["pixelate"] = (cur, anim.get("pixel_size", 8))
-        else:
-            out[name] = cur
+        params = {k: v for k, v in anim.items() if k not in _EFFECT_TWEEN_KEYS}
+        params["amount"] = cur
+        out[name] = params
     return out
 
 
-def apply_screen_effects(surf, effects):
-    """Checkpoint 6 (editor reference Sec 4, "Screen effects / shaders"):
-    best-effort subset feasible in pygame's surface pipeline (per-pixel
-    color remap + block resampling), applied in place on ``surf``.
-    Chromatic/glitch/blur/bulge/pinch/lens/split-screen/shock-wave need
-    real per-pixel displacement and are deliberately not implemented."""
+# Bulge/Pinch geometry cache: the per-pixel distance field only depends
+# on the frame size and the effect's center/radius, none of which change
+# while the effect merely fades in, so recomputing four full-screen
+# float arrays every frame would be pure waste. Bounded because the key
+# includes the (author-controlled) center and radius.
+_RADIAL_FIELD_CACHE = {}
+_RADIAL_FIELD_CACHE_MAX = 8
+
+
+def _radial_falloff_field(w, h, cx, cy, radius):
+    """``(dx, dy, falloff)`` for a ``w x h`` frame about ``(cx, cy)``.
+
+    ``falloff`` is 1 at the center and 0 at/outside ``radius``, squared
+    so the displacement eases off instead of ending on a visible ring.
+    Arrays are (w, h) to match pygame's surfarray x-major layout.
+    """
+    key = (w, h, round(cx, 1), round(cy, 1), round(radius, 1))
+    hit = _RADIAL_FIELD_CACHE.get(key)
+    if hit is not None:
+        return hit
+    dx = np.arange(w, dtype=np.float32)[:, None] - cx
+    dy = np.arange(h, dtype=np.float32)[None, :] - cy
+    dist = np.sqrt(dx * dx + dy * dy)
+    falloff = np.clip(1.0 - dist / radius, 0.0, 1.0)
+    np.square(falloff, out=falloff)
+    if len(_RADIAL_FIELD_CACHE) >= _RADIAL_FIELD_CACHE_MAX:
+        _RADIAL_FIELD_CACHE.clear()
+    _RADIAL_FIELD_CACHE[key] = (dx, dy, falloff)
+    return dx, dy, falloff
+
+
+def _apply_radial_displace(surf, params, sign):
+    """Bulge (``sign`` -1) / Pinch (``sign`` +1): resample each pixel from
+    a point pushed toward or away from the effect center.
+
+    A nearest-neighbour numpy gather -- one fancy-index read of the frame,
+    the same cost class as Pixelate's existing scale-down/scale-up pair.
+    No interpolation: a bilinear gather would be four gathers plus the
+    blend, and at frame rate the aliasing is not worth 4x the cost.
+    """
+    amt = params["amount"] * params.get("strength", 0.5)
+    if amt <= 0.001:
+        return
+    w, h = surf.get_size()
+    cx = w * 0.5 + params.get("center_x", 0)
+    cy = h * 0.5 + params.get("center_y", 0)
+    dx, dy, falloff = _radial_falloff_field(w, h, cx, cy,
+                                            max(1.0, params.get("radius", 240.0)))
+    scale = 1.0 + sign * amt * falloff
+    src_x = np.clip(cx + dx * scale, 0, w - 1).astype(np.int32)
+    src_y = np.clip(cy + dy * scale, 0, h - 1).astype(np.int32)
+    arr = pygame.surfarray.array3d(surf)
+    pygame.surfarray.blit_array(surf, arr[src_x, src_y])
+
+
+def _apply_split_screen(surf, params):
+    """BEST-EFFORT. deep-research-report.md gives Split Screen an object
+    id (2924) but marks its exact fields "unspecified", so this
+    implements only the visually obvious reading of the name: split the
+    frame in half on one axis and mirror the first half onto the second.
+    Nothing here is claimed to match real GD's parameters."""
+    amt = params["amount"]
+    if amt <= 0.001:
+        return
+    arr = pygame.surfarray.array3d(surf)
+    w, h = arr.shape[0], arr.shape[1]
+    mirrored = arr.copy()
+    if params.get("axis", "vertical") == "horizontal":
+        half = h // 2
+        mirrored[:, half:] = arr[:, :h - half][:, ::-1]
+    else:
+        half = w // 2
+        mirrored[half:] = arr[:w - half][::-1]
+    if amt < 0.999:
+        mirrored = (arr.astype(np.float32) * (1 - amt)
+                    + mirrored.astype(np.float32) * amt).astype(np.uint8)
+    pygame.surfarray.blit_array(surf, mirrored)
+
+
+def _apply_chromatic(surf, params):
+    """Chromatic aberration: slide the red channel one way and the blue
+    channel the other, leaving green put. Two ``np.roll``s -- the
+    cheapest of the Checkpoint-4 effects."""
+    shift = int(round(params.get("offset_px", 6) * params["amount"]))
+    if shift == 0:
+        return
+    arr = pygame.surfarray.array3d(surf)
+    out = arr.copy()
+    out[..., 0] = np.roll(arr[..., 0], shift, axis=0)
+    out[..., 2] = np.roll(arr[..., 2], -shift, axis=0)
+    pygame.surfarray.blit_array(surf, out)
+
+
+def _apply_radial_blur(surf, params):
+    """Radial (zoom) blur: average N copies of the frame scaled out from
+    center by increasing amounts.
+
+    PERF: each sample costs a full smoothscale + blit + array read, so
+    this is by far the most expensive screen effect -- sample_count is
+    capped at RADIAL_BLUR_MAX_SAMPLES for exactly that reason. Four
+    samples reads as a blur while staying at roughly the cost of the
+    existing colour pipeline; eight is the ceiling, not a suggestion.
+    """
+    amt = params["amount"] * params.get("strength", 0.5)
+    if amt <= 0.001:
+        return
+    samples = max(2, int(params.get("sample_count", 4)))
+    w, h = surf.get_size()
+    acc = pygame.surfarray.array3d(surf).astype(np.float32)
+    scratch = pygame.Surface((w, h))
+    used = 1
+    for i in range(1, samples):
+        zoom = 1.0 + RADIAL_BLUR_MAX_ZOOM * amt * (i / (samples - 1))
+        nw, nh = int(w * zoom), int(h * zoom)
+        if nw <= w and nh <= h:
+            continue
+        scaled = pygame.transform.smoothscale(surf, (nw, nh))
+        scratch.blit(scaled, (-(nw - w) // 2, -(nh - h) // 2))
+        acc += pygame.surfarray.array3d(scratch)
+        used += 1
+    if used > 1:
+        pygame.surfarray.blit_array(surf, (acc / used).astype(np.uint8))
+
+
+def _apply_motion_blur(surf, params, frame_history):
+    """Blend the last N rendered frames into this one.
+
+    ``frame_history`` is a plain list owned by the render session (see
+    ``PlaySession._init_attempt_state``) rather than by ``Player``: it
+    holds raw frame buffers, which are render-side state the physics
+    ``Player`` (and every bot that snapshots one) must not carry.
+
+    The frames stored are the *pre-blend* ones, so this is a bounded box
+    average over the last N frames rather than a feedback loop that
+    would smear a bright frame forever.
+    """
+    cur = pygame.surfarray.array3d(surf)
+    weight = params["amount"] * params.get("strength", 0.5)
+    history = [f for f in frame_history if f.shape == cur.shape]
+    if history and weight > 0.001:
+        avg = np.mean(np.stack(history, axis=0), axis=0, dtype=np.float32)
+        blended = cur.astype(np.float32) * (1 - weight) + avg * weight
+        pygame.surfarray.blit_array(surf, blended.astype(np.uint8))
+    frame_history.append(cur)
+    depth = max(1, int(params.get("frame_count", 3)) - 1)
+    del frame_history[:-depth]
+
+
+def apply_screen_effects(surf, effects, frame_history=None):
+    """Apply every active screen effect in place on ``surf``.
+
+    Checkpoint 6 (editor reference Sec 4) brought the colour remaps and
+    block resampling; Checkpoint 4 (deep-research-report.md, "Shader and
+    visual effects") added the displacement/accumulation shaders that a
+    numpy pipeline can still do honestly. Gradient (2903), Shock Wave
+    (2905), Shock Line (2907), Glitch (2909), Chromatic Glitch (2911)
+    and Lens Circle (2913) remain unimplemented: they need true
+    per-pixel GPU-shader displacement/noise, which pygame cannot do at
+    frame rate.
+
+    Order is an engine convention (the report specifies none): geometry
+    first (bulge/pinch, then the split/mirror), then the per-channel and
+    resampling passes, then colour, and motion blur last so what gets
+    remembered is the frame the player actually saw.
+    """
     if not effects:
         return surf
+    if "bulge" in effects:
+        _apply_radial_displace(surf, effects["bulge"], -1.0)
+    if "pinch" in effects:
+        _apply_radial_displace(surf, effects["pinch"], 1.0)
+    if "split_screen" in effects:
+        _apply_split_screen(surf, effects["split_screen"])
+    if "chromatic" in effects:
+        _apply_chromatic(surf, effects["chromatic"])
+    if "radial_blur" in effects:
+        _apply_radial_blur(surf, effects["radial_blur"])
     if "pixelate" in effects:
-        amt, psize = effects["pixelate"]
-        psize = max(2, int(psize))
+        params = effects["pixelate"]
+        amt = params["amount"]
+        psize = max(2, int(params.get("pixel_size", 8)))
         if amt > 0:
             w, h = surf.get_size()
             small = pygame.transform.scale(surf, (max(1, w // psize),
@@ -547,19 +783,19 @@ def apply_screen_effects(surf, effects):
                 b = pygame.surfarray.array3d(pixelated).astype(np.float32)
                 blended = (a * (1 - amt) + b * amt).astype(np.uint8)
                 pygame.surfarray.blit_array(surf, blended)
-    color_effects = {k: v for k, v in effects.items() if k != "pixelate"}
+    color_effects = {k: v for k, v in effects.items() if k in _COLOR_EFFECTS}
     if color_effects:
         arr = pygame.surfarray.array3d(surf).astype(np.float32)
         base = arr
         result = arr.copy()
         if "grayscale" in color_effects:
-            amt = color_effects["grayscale"]
+            amt = color_effects["grayscale"]["amount"]
             gray = (base[..., 0] * 0.299 + base[..., 1] * 0.587
                     + base[..., 2] * 0.114)
             gray3 = np.repeat(gray[..., None], 3, axis=2)
             result = result * (1 - amt) + gray3 * amt
         if "sepia" in color_effects:
-            amt = color_effects["sepia"]
+            amt = color_effects["sepia"]["amount"]
             r, g, b = base[..., 0], base[..., 1], base[..., 2]
             sr = r * 0.393 + g * 0.769 + b * 0.189
             sg = r * 0.349 + g * 0.686 + b * 0.168
@@ -567,11 +803,12 @@ def apply_screen_effects(surf, effects):
             sepia = np.clip(np.stack([sr, sg, sb], axis=-1), 0, 255)
             result = result * (1 - amt) + sepia * amt
         if "invert" in color_effects:
-            amt = color_effects["invert"]
+            amt = color_effects["invert"]["amount"]
             inv = 255.0 - base
             result = result * (1 - amt) + inv * amt
         if "hue" in color_effects:
-            amt, degrees = color_effects["hue"]
+            amt = color_effects["hue"]["amount"]
+            degrees = color_effects["hue"].get("hue_shift", 60.0)
             if amt > 0 and degrees:
                 norm = np.clip(result, 0, 255) / 255.0
                 hsv = _rgb_to_hsv_np(norm)
@@ -580,20 +817,28 @@ def apply_screen_effects(surf, effects):
                 result = rgb * 255.0
         result = np.clip(result, 0, 255).astype(np.uint8)
         pygame.surfarray.blit_array(surf, result)
+    if "motion_blur" in effects and frame_history is not None:
+        _apply_motion_blur(surf, effects["motion_blur"], frame_history)
     return surf
 
 
-def apply_camera_post(screen, zoom, rotation, effects):
+def apply_camera_post(screen, zoom, rotation, effects, frame_history=None):
     """Checkpoint 6: post-process the fully-drawn world frame (zoom/
     rotate the whole view, then any active screen effects) — called once
     per frame after every world-affecting draw but before the HUD, so
-    the HUD itself is never zoomed/rotated/tinted, matching real GD."""
+    the HUD itself is never zoomed/rotated/tinted, matching real GD.
+
+    ``frame_history`` is the Motion Blur ring buffer (Checkpoint 4),
+    owned by the caller. Dropped as soon as Motion Blur stops, so
+    re-enabling it never blends in a frame from minutes ago."""
+    if frame_history is not None and "motion_blur" not in effects:
+        frame_history.clear()
     if zoom == 1.0 and rotation == 0.0 and not effects:
         return
     w, h = screen.get_size()
     surf = screen.copy()
     if effects:
-        surf = apply_screen_effects(surf, effects)
+        surf = apply_screen_effects(surf, effects, frame_history)
     if rotation != 0.0:
         surf = pygame.transform.rotate(surf, rotation)
     if zoom != 1.0:
@@ -717,6 +962,17 @@ def render_hud(screen, player, max_x, attempts, attempt_frames, meta,
             label = f"Item {cid}: {val:g}"
         txt(screen, label, WIDTH - 170, counter_y, 13, C_WHITE, shadow=True)
         counter_y += 18
+
+    # UI Trigger labels (Checkpoint 7): the same HUD pass, the same txt()
+    # helper, and the same read-by-id shape as the Item Counter rows just
+    # above -- an Item Counter row reads player.items by item id, a UI
+    # label reads player.ui_labels by ui id. The only difference is that
+    # these are camera-anchored: offset from the screen centre rather than
+    # stacked in a corner, which is what "camera-relative custom UI" means
+    # once the scope is one text label (see objects.py's T_UI_TRIGGER).
+    for entry in player.active_ui_labels():
+        txt(screen, entry["text"], WIDTH // 2 + entry["x_offset"],
+            HEIGHT // 2 + entry["y_offset"], 22, C_WHITE, True, shadow=True)
 
     if practice_mode:
         # Stack the CP chip ABOVE the PRACTICE label so the two never

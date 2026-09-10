@@ -22,8 +22,10 @@ import math
 import pygame
 
 from ..constants import (
-    UNITS_PER_BLOCK, HEIGHT_UNITS, PLAYER_SIZE_UNITS, MINI_PLAYER_SIZE_UNITS,
-    PLAYER_START_GX,
+    UNITS_PER_BLOCK, CAMERA_HEIGHT_UNITS, PLAYFIELD_HEIGHT_UNITS,
+    FALL_OFF_BELOW_CAM_UNITS, FALL_OFF_ABOVE_CAM_UNITS, CAMERA_BASE_Y_UNITS,
+    TOUCH_PAD_UNITS, TELEPORT_BEAM_STEP_UNITS, PLAYER_SIZE_UNITS,
+    PLAYER_START_GX, body_size_units, is_mini_size,
     TRAIL_MAX_DISTANCE_UNITS, PHYSICS_TPS, INPUT_BUFFER_TICKS,
     WAVE_ANGLE_SMOOTHING,
     TELEPORT_COOLDOWN_TICKS,
@@ -40,12 +42,16 @@ from ..constants import (
     TRIGGER_TYPES, CONTROL_TRIGGER_TYPES,
     PAD_TYPES, ORB_TYPES, DASH_ORB_TYPES, T_DASH_STOP,
     T_JUMP_BLOCK, T_WAVE_BLOCK, T_BONK_BLOCK,
+    T_FORCE_BLOCK, FORCE_BLOCK_DEFAULT_RANGE,
     T_ITEM_PICKUP, T_COUNT_TRIGGER, T_TIME_EVENT_TRIGGER, T_KEYFRAME,
     COLLISION_SUBSTEP_UNITS, DASH_TIMER_INFINITE,
     ORB_PINK_SCALE, ORB_RED_SCALE, PAD_PINK_SCALE, PAD_RED_SCALE,
     MAX_FALL_BOX_UT as MAX_FALL_BOX, MAX_FALL_UFO_UT as MAX_FALL_UFO,
     MAX_RISE_UFO_UT as MAX_RISE_UFO, MAX_FALL_SWING_UT as MAX_FALL_SWING,
-    SWING_VY_MULTIPLIER, px_to_units, PX_PER_UNIT,
+    SWING_VY_MULTIPLIER, PX_PER_UNIT,
+    BG_SPEED_DEFAULT_X, BG_SPEED_DEFAULT_Y, MG_SPEED_DEFAULT_X,
+    MG_SPEED_DEFAULT_Y, EVENT_LEVEL_START, EVENT_DEATH, EVENT_WIN,
+    EVENT_CHECKPOINT, EVENT_RESPAWN,
 )
 from ..geometry import (
     cell_rect_units as cell_rect, pad_trigger_rect_units as pad_trigger_rect,
@@ -59,6 +65,7 @@ from .. import settings
 from .body import MirrorBody
 from .collision import CollisionMixin, obb_corners, invalidate_pose_caches
 from .triggers import TriggerMixin
+from .trigger_registry import TRIGGER_FAMILY_TOUCH
 from .draw import DrawMixin
 
 # Orbs the mirror body reacts to (dash / teleport orbs are main-only).
@@ -129,6 +136,16 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         "target_cam_y", "free_cam_mode", "camera_locked",
         "color_index", "player_color", "icon_index", "bg_preset",
         "move_speed", "dash_timer", "dash_vx", "dash_vy",
+        # Checkpoint 6 (deep-research-report.md, "Gameplay, camera, UI, and
+        # environment"): which way gameplay runs, +1 rightwards (always,
+        # before this checkpoint) or -1 leftwards after a Reverse /
+        # Gameplay Rotation trigger. A separate sign rather than a signed
+        # ``move_speed`` because move_speed is a positive magnitude
+        # everywhere else (speed portals, wave velocity, the HUD's "x"
+        # readout, every bot heuristic); update() multiplies the two at
+        # the single place the auto-scroll step is computed. Public-ish:
+        # bots/sim.py snapshots and restores it like move_speed.
+        "move_dir",
         "_dash_flip_on_end",
         "input_buffer", "mirror_input_buffer", "teleport_cooldown",
         "_mirror", "mirror_passed", "passed", "held_orbs",
@@ -141,7 +158,23 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # Scale/Alpha animations, Spawn/Sequence's delayed-fire queue, and
         # the set of group ids a Toggle Trigger has disabled.
         "active_scales", "active_alphas", "pending_spawns", "pending_repeats",
+        "pending_swaps",
         "_trigger_disabled",
+        # Trigger activations queued during the current tick, drained (and
+        # left empty again) at the end of every update() -- see
+        # triggers.py's _enqueue_trigger_event/_drain_trigger_event_queue.
+        # Never holds state across ticks, so bots/sim.py's snapshot/restore
+        # has nothing to capture here.
+        "_trigger_event_queue",
+        # Checkpoint 3 (deep-research-report.md, "Force and state
+        # precedence"): the ForceIDs already applied to the player during
+        # the current tick, cleared at the top of every update(). This is
+        # what makes the report's stacking law ("different ForceID ->
+        # forces stack; same ForceID -> forces do not stack") literal --
+        # see _apply_force_block. Like _trigger_event_queue above it never
+        # holds state across ticks, so bots/sim.py's snapshot/restore has
+        # nothing to capture here.
+        "_force_ids_this_frame",
         "blackout_value", "blackout_target", "blackout_start",
         "blackout_start_frame", "blackout_frames",
         "cam_pan_duration",
@@ -162,6 +195,28 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # segment list + progress -- see triggers.py's _start_keyframe_
         # trigger/_step_keyframe_animations.
         "active_keyframe_anims",
+        # Checkpoint 2 (deep-research-report.md, "Area and keyframe
+        # system"): live area effects keyed by their Effect id -- an Area
+        # Move/Rotate/Scale/Fade/Tint registers one, an Edit Area patches
+        # it in place, an Area Stop pops it. Like active_rotations/
+        # active_scales (and unlike move_animations), this is continuous
+        # per-tick state the bots' snapshot/restore deliberately does not
+        # capture: what the search actually rewinds is the *result* --
+        # object positions, via _set_object_pos/_displaced_oids.
+        "active_areas",
+        # Checkpoint 5 (deep-research-report.md, "Audio, timers, and
+        # arithmetic"): live audio started by the Song/SFX trigger
+        # family. ``active_songs`` is keyed by song channel (GD key 432)
+        # and ``active_sfx`` by unique id (key 416) -- the ids Edit Song /
+        # Edit SFX address, exactly as active_areas is keyed by effect
+        # id -- and ``active_song_channel`` names which of those channels
+        # is the one actually sounding, since this engine has a single
+        # music stream. Like active_areas, this is state the bots'
+        # snapshot/restore deliberately does not capture: nothing here
+        # feeds physics or collision (SimPlayer does not even emit audio,
+        # see TriggerMixin.audio_output_enabled), so a search rewinding
+        # to an earlier tick has nothing to undo.
+        "active_songs", "active_sfx", "active_song_channel",
         # Checkpoint 7 (editor reference Sec 4, "Item/counter/timer
         # system"): ``items`` resets every attempt in reset(); ``items_pers``
         # is seeded once in __init__ and only ever written by an Item Pers
@@ -171,6 +226,25 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # item id starts each attempt at its last snapshot. ``timers``/
         # ``timers_running`` are plain per-attempt state (no persistence).
         "items", "items_pers", "timers", "timers_running",
+        # Checkpoint 7 (deep-research-report.md, "Gameplay, camera, UI,
+        # and environment"): the environment/UI/event family's state.
+        #
+        # bg_/mg_speed_* are the parallax rates a Background/Middleground
+        # Speed trigger sets (seeded from the report's documented
+        # defaults, which are the renderer's identity point); ui_labels
+        # holds one HUD text entry per ui_id posted by a UI Trigger;
+        # _event_triggers is the level's Event Triggers indexed by
+        # event_type, built once per attempt by _arm_event_triggers.
+        #
+        # Like active_areas / active_songs above, none of this is in
+        # bots/sim.py's snapshot/restore, and for the same reason: it is
+        # purely presentational (two parallax multipliers and a HUD
+        # string) and feeds nothing in physics or collision, so a search
+        # rewinding to an earlier tick has nothing to undo. _event_
+        # triggers is rebuilt from self.objects on every reset(), so it
+        # is derived data, not state.
+        "bg_speed_x", "bg_speed_y", "mg_speed_x", "mg_speed_y",
+        "ui_labels", "_event_triggers",
         # render interpolation
         "prev_x", "prev_y", "prev_angle",
         "_trail_cache",
@@ -223,12 +297,26 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self._count_watchers = [o for o in self.objects
                                 if o["t"] in (T_COUNT_TRIGGER,
                                               T_TIME_EVENT_TRIGGER)]
+        # Checkpoint 7: Event Triggers indexed by event_type, so the
+        # engine's event hook points (_kill, save_checkpoint, the win
+        # flag) cost one dict lookup instead of a scan. Built here rather
+        # than in reset() -- an object's event_type never changes during a
+        # session, so this is derived data like _count_watchers above, and
+        # a bot search that calls reset() thousands of times should not
+        # pay for rebuilding it every time.
+        self._arm_event_triggers()
         self.practice_mode = False
         self.noclip = False
         self.checkpoints = []
         self.attempt_count = 0
         # Survives every reset() (see the __slots__ comment above).
         self.items_pers = {}
+        # Seeded before the first reset() so _stop_trigger_audio has
+        # something to walk: reset() SILENCES whatever the previous
+        # attempt left playing rather than just dropping the references.
+        self.active_songs = {}
+        self.active_sfx = {}
+        self.active_song_channel = None
         self._has_slopes = any(o["t"] == T_SLOPE for o in self.objects)
         # Optional per-frame hitbox recorders (editor "Hitbox" view).
         # Left untouched by reset() so the caller's list survives.
@@ -292,8 +380,15 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.active_scales = []
         self.active_alphas = []
         self.active_keyframe_anims = []
+        self.active_areas = {}
+        # Stops (not merely forgets) any sound the previous attempt's
+        # audio triggers left playing -- see _stop_trigger_audio.
+        self._stop_trigger_audio()
         self.pending_spawns = []
         self.pending_repeats = []
+        self.pending_swaps = []
+        self._trigger_event_queue = []
+        self._force_ids_this_frame = set()
         self._trigger_disabled = set()
         # Checkpoint 7: non-persistent items start at 0; a persisted item
         # id (Item Pers Trigger) re-seeds from its last snapshot instead.
@@ -323,6 +418,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.frame = 0
         self.mode = MODE_CUBE
         self.move_speed = self.params.base_move_speed
+        self.move_dir = 1
         self.dash_timer = 0
         self.dash_vx = 0.0
         self.dash_vy = 0.0
@@ -331,7 +427,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # The mirror keeps its own buffer so one click serves both orbs.
         self.mirror_input_buffer = 0
         self.teleport_cooldown = 0
-        self.target_cam_y = 0.0
+        self.target_cam_y = CAMERA_BASE_Y_UNITS
         self.free_cam_mode = False
         self.camera_locked = False
         self.cam_pan_duration = 1.0
@@ -347,6 +443,14 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.static_cam_group = None
         self.active_effect_anims = {}
         self.bg_preset = 0
+        # Checkpoint 7: seeded from the report's own documented defaults,
+        # which are also the renderer's identity point -- an attempt that
+        # fires no BG/MG Speed trigger scrolls at the stock parallax rate.
+        self.bg_speed_x = BG_SPEED_DEFAULT_X
+        self.bg_speed_y = BG_SPEED_DEFAULT_Y
+        self.mg_speed_x = MG_SPEED_DEFAULT_X
+        self.mg_speed_y = MG_SPEED_DEFAULT_Y
+        self.ui_labels = {}
         self.blackout_value = 0.0
         self.blackout_target = 0.0
         self.blackout_start = 0.0
@@ -365,7 +469,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         # J Block (bible Sec 4.1): armed by touching one, consumed at the
         # next landing auto-jump to suppress it.
         self._jump_block_armed = False
-        self.size = PLAYER_SIZE_UNITS
+        self.size = body_size_units(self.mode, False)
         self.coins_collected = set()
         self._mirror = None
         # Portals the mirror consumed independently (mode / size / grav).
@@ -378,6 +482,12 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.prev_y = self.y
         self.prev_angle = 0.0
         self._arm_always_on_follows()
+        # Checkpoint 7: the level-start event, fired for every attempt
+        # (retries included) exactly where the always-on Follow links are
+        # armed above. It comes AFTER the queue was cleared earlier in
+        # reset(), so these activations survive to the first update()'s
+        # drain instead of being wiped by the clear.
+        self._fire_event(EVENT_LEVEL_START)
         self.attempt_count += 1
 
     # ---- spawn -----------------------------------------------------------
@@ -487,6 +597,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.checkpoints.append({
             "x": self.x, "y": self.y, "vy": self.vy, "grav": self.grav,
             "mode": self.mode, "move_speed": self.move_speed,
+            "move_dir": self.move_dir,
             "angle": self.angle, "bg_preset": self.bg_preset,
             "target_cam_y": self.target_cam_y,
             "free_cam_mode": self.free_cam_mode,
@@ -501,6 +612,10 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             "timers": dict(self.timers),
             "timers_running": set(self.timers_running),
         })
+        # Checkpoint 7: the checkpoint event point, fired for both the
+        # manual practice hotkey and the Checkpoint Trigger, since both
+        # land here.
+        self._fire_event(EVENT_CHECKPOINT)
 
     def load_checkpoint(self):
         if not self.checkpoints:
@@ -512,6 +627,10 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.grav = cp["grav"]
         self.mode = cp["mode"]
         self.move_speed = cp["move_speed"]
+        # .get: a checkpoint taken before this key existed (an in-memory
+        # list from an older attempt in the same session) means "the only
+        # direction there used to be".
+        self.move_dir = cp.get("move_dir", 1)
         self.angle = cp["angle"]
         self.bg_preset = cp["bg_preset"]
         self.target_cam_y = cp["target_cam_y"]
@@ -538,6 +657,10 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self._mirror = None
         self.dash_timer = 0
         self._sync_prev_pose()
+        # Checkpoint 7: the respawn event point. Fired last, on the fully
+        # restored state, so an Event Trigger that moves the player or
+        # retunes the scenery is not overwritten by the restore itself.
+        self._fire_event(EVENT_RESPAWN)
         return True
 
     # ---- jump / orb actions ---------------------------------------------
@@ -615,10 +738,13 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         The gravity variant flips gravity whenever the dash ends, whatever
         ended it. The rotation is capped to ±70° off horizontal so an
         orb authored pointing straight up/down still dashes on a slight
-        diagonal instead of moving purely vertically."""
+        diagonal instead of moving purely vertically. A dash runs along
+        the current gameplay direction (``move_dir``), so a dash orb in a
+        reversed section carries the player backwards instead of
+        cancelling the reversal for the dash's duration."""
         speed = self.move_speed
         angle = _clamp_dash_angle_rad(orb.get("r", 0))
-        self.dash_vx = speed * math.cos(angle)
+        self.dash_vx = speed * math.cos(angle) * self.move_dir
         self.dash_vy = speed * math.sin(angle)
         self.dash_timer = DASH_TIMER_INFINITE
         self._dash_flip_on_end = orb["t"] == T_DASH_ORB_GRAV
@@ -636,6 +762,35 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         self.input_buffer = 0
         self._hold_consumed = True
 
+    def teleport_to_cell(self, dest, move_x=True, move_y=True):
+        """Snap the player onto object ``dest``'s cell, centred in it.
+
+        The one player-teleport primitive: the touch-based Teleport Orb /
+        Portal pair (``activate_teleport`` below) and Checkpoint 6's
+        group-fired Teleport Trigger (triggers.py's
+        _apply_teleport_trigger) both land here, so a triggered teleport
+        produces exactly the orb's end state -- same centring, the same
+        quarter-damped vy, the same cooldown, and the same cleared trail
+        so the renderer doesn't smear a line across the jump.
+
+        ``move_x``/``move_y`` let a caller restrict the snap to one axis
+        (the trigger's x_only/y_only fields); everything else about the
+        teleport still happens, so a one-axis teleport is still a
+        teleport.
+        """
+        if move_x:
+            self.x = (dest["x"] * UNITS_PER_BLOCK
+                      + (UNITS_PER_BLOCK - self.size) / 2)
+        if move_y:
+            self.y = (dest["y"] * UNITS_PER_BLOCK
+                      + (UNITS_PER_BLOCK - self.size) / 2)
+        self.vy *= 0.25
+        self.teleport_cooldown = TELEPORT_COOLDOWN_TICKS
+        self.trail = []
+        if self._mirror is not None:
+            self._mirror.trail = []
+        self._sync_prev_pose()
+
     def activate_teleport(self, orb):
         gid = get_group_id(orb)
         if not gid:
@@ -645,18 +800,39 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             return
         dests = [o for o in group if o.get("dest")]
         dest = dests[0] if dests else group[0]
-        self.x = dest["x"] * UNITS_PER_BLOCK + (UNITS_PER_BLOCK - self.size) / 2
-        self.y = dest["y"] * UNITS_PER_BLOCK + (UNITS_PER_BLOCK - self.size) / 2
-        self.vy *= 0.25
-        self.teleport_cooldown = TELEPORT_COOLDOWN_TICKS
-        self.trail = []
-        if self._mirror is not None:
-            self._mirror.trail = []
-        self._sync_prev_pose()
+        self.teleport_to_cell(dest)
 
     def flip_gravity(self):
         self.grav *= -1
         self.on_ground = False
+
+    def set_body_gravity(self, b, target):
+        """Point body ``b``'s gravity at ``target`` (``1`` down, ``-1`` up).
+
+        The one gravity-direction primitive: the T_GRAV_UP/T_GRAV_DOWN
+        portals in _handle_interactions and Checkpoint 6's Gameplay
+        Rotation trigger (triggers.py's _apply_gameplay_rotation_trigger)
+        both go through here, so a triggered gravity change lands on the
+        identical end state to touching the matching portal -- including
+        the "already pointing that way = no-op" case, which is what keeps
+        it from unsticking a body that is legitimately grounded.
+        """
+        if b.grav != target:
+            b.grav = target
+            b.on_ground = False
+
+    def set_gameplay_direction(self, sign):
+        """Point gameplay along ``sign`` (``1`` rightwards, ``-1``
+        leftwards) -- the direction primitive behind Checkpoint 6's
+        Reverse and Gameplay Rotation triggers.
+
+        ``move_dir`` multiplies the auto-scroll step (and a dash's
+        horizontal component) in update(); it is NOT folded into
+        ``move_speed``, which stays a positive magnitude every speed
+        portal, HUD readout, wave-velocity computation and bot heuristic
+        already treats as one.
+        """
+        self.move_dir = 1 if sign >= 0 else -1
 
     def _spider_teleport(self, b, direction=None):
         """Teleport body ``b`` to the nearest block surface in
@@ -673,7 +849,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         if self._swept_hazard_death(b, prev_x, prev_y, new_x, new_y) and not self.noclip:
             return
         # Beam samples so the trail reads as a continuous warp line.
-        beam_step = max(px_to_units(8), b.size / 2)
+        beam_step = max(TELEPORT_BEAM_STEP_UNITS, b.size / 2)
         dx_b = new_x - prev_x
         dy_b = new_y - prev_y
         beam_n = max(1, int(((dx_b * dx_b + dy_b * dy_b) ** 0.5) // beam_step))
@@ -690,7 +866,11 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
 
     # ---- mode / size / dual ---------------------------------------------
     def _set_body_mode(self, b, mode):
+        # The §3.2 hitbox is per-(mode, mini), so a mode portal resizes the
+        # body: read mini from the OLD mode's table before overwriting it.
+        mini = is_mini_size(b.mode, b.size)
         b.mode = mode
+        self._set_body_size(b, body_size_units(mode, mini))
         if mode in (MODE_CUBE, MODE_BALL):
             b.angle = round(b.angle / 90) * 90
         elif mode in (MODE_WAVE, MODE_SWING):
@@ -728,7 +908,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         if spawn_row is not None:
             mirror_y = float(spawn_row) * UNITS_PER_BLOCK
         else:
-            mirror_y = HEIGHT_UNITS - self.y - self.size
+            mirror_y = PLAYFIELD_HEIGHT_UNITS - self.y - self.size
         self._mirror = MirrorBody(
             y=float(mirror_y), vy=-float(self.vy), grav=-self.grav,
             on_ground=bool(self._was_on_ground), angle=-float(self.angle),
@@ -762,11 +942,19 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             if b is self and self.dash_timer > 0:
                 self._end_dash()
             return
+        was_alive = b.alive
         b.alive = False
         if b is self:
             self.death_reason = reason
         elif not self.death_reason:
             self.death_reason = reason + " (mirror)"
+        # Checkpoint 7: the death event point for Event Triggers. Gated on
+        # the alive->dead transition so a second lethal contact in the
+        # same tick cannot fire it twice; the mirror's own death is not an
+        # event here, it is one at the point where it collapses the main
+        # body (see update()).
+        if b is self and was_alive:
+            self._fire_event(EVENT_DEATH)
 
     def _consume_hold(self, main):
         """Spend the current press: one press does at most one thing (a
@@ -784,7 +972,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         p = self.params
         mode = b.mode
         main = b is self
-        mini = b.size < PLAYER_SIZE_UNITS
+        mini = is_mini_size(mode, b.size)
         gmul = p.mini_gravity_scale if mini else 1.0
         jmul = p.mini_jump_scale if mini else 1.0
         buffered_ground_press = mode_pressed or (
@@ -968,6 +1156,104 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             b.vy = p.pad_force * scale * b.grav
         b.on_ground = False
 
+    def _apply_force_block(self, b, o):
+        """Force Block (real GD id 2069) contact response.
+
+        Returns True when the block's impulse was applied this frame.
+
+        The one rule the report states outright, quoted verbatim from
+        its "Force and state precedence" section:
+
+            different ForceID  -> forces stack
+            same ForceID       -> forces do not stack
+            square vs circle   -> same force semantics, different
+                                  collision geometry
+
+        Lines 1-2 are implemented literally by ``_force_ids_this_frame``
+        (cleared at the top of every update()): a block whose Force id is
+        already in that set is skipped, and blocks with distinct Force
+        ids each add their own impulse in the same frame. Line 3 has
+        nothing to vary here -- this engine has no circle collision
+        geometry, so the square/radius contact test below is the only
+        geometry there is, and per the quote that does not change the
+        force semantics anyway.
+
+        EVERYTHING BELOW THAT RULE IS BEST-EFFORT. FlowVix (via the
+        report) gives the field *names* and numeric keys -- relative 528,
+        force 149, min_force 526, max_force 527, range 529, force_id 530
+        -- but no source the report located documents their ranges,
+        defaults or exact application semantics. This engine's reading,
+        chosen as the simplest one consistent with those names and with
+        the report's own operation type for this object ("ADD only
+        across distinct ForceIDs"):
+
+        * ``force`` is a signed vertical velocity delta, ADDED to ``vy``
+          (never assigned, unlike an orb or pad) once per contact frame.
+          Units match ``vy``: jump_force is about -2.8 units/tick, so
+          +/-3 is roughly one cube jump of impulse.
+        * ``relative`` ON multiplies it by the body's gravity sign, so a
+          block authored to push away from the floor keeps doing that
+          after a gravity flip. OFF applies it in absolute screen space,
+          where +y is down.
+        * ``min_force`` / ``max_force`` bound the MAGNITUDE of the
+          resulting ``vy``; 0 on either side means "unbounded that way",
+          so the default 0/0 block is a pure additive impulse.
+        * ``range`` (stored ``force_range``) is a contact radius in grid
+          squares, measured centre to centre, and is capped by
+          FORCE_BLOCK_MAX_RANGE at the 2-cell margin
+          _nearby_triggers_for_aabb searches.
+        """
+        try:
+            fid = int(o.get("force_id", 0) or 0)
+        except (TypeError, ValueError):
+            fid = 0
+        if fid in self._force_ids_this_frame:
+            return False
+        # Same pose cache the trigger loop's overlap test uses, so a
+        # block sitting next to the player for a whole section costs one
+        # cell_rect() rather than one per collision substep.
+        caabb = o.get("_caabb")
+        if caabb is None:
+            cr = cell_rect(o["x"], o["y"], obj_scale(o))
+            caabb = (cr.left, cr.top, cr.right, cr.bottom)
+            o["_caabb"] = caabb
+        cl, ct, cr_right, cb = caabb
+        try:
+            reach = float(o.get("force_range", FORCE_BLOCK_DEFAULT_RANGE))
+        except (TypeError, ValueError):
+            reach = FORCE_BLOCK_DEFAULT_RANGE
+        reach *= UNITS_PER_BLOCK
+        dx = (self.x + b.size * 0.5) - (cl + cr_right) * 0.5
+        dy = (b.y + b.size * 0.5) - (ct + cb) * 0.5
+        if dx * dx + dy * dy > reach * reach:
+            return False
+        try:
+            force = float(o.get("force", 0.0))
+        except (TypeError, ValueError):
+            force = 0.0
+        if o.get("relative"):
+            force *= b.grav
+        vy = b.vy + force
+        try:
+            lo = abs(float(o.get("min_force", 0.0) or 0.0))
+            hi = abs(float(o.get("max_force", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            lo = hi = 0.0
+        magnitude = abs(vy)
+        if hi > 0.0 and magnitude > hi:
+            vy = math.copysign(hi, vy)
+        elif lo > 0.0 and magnitude < lo:
+            # A dead-stop body has no direction of its own to preserve,
+            # so the floor is applied along the push instead.
+            vy = math.copysign(lo, vy if vy else (force or 1.0))
+        b.vy = vy
+        # Only a push away from the surface ungrounds: a downward force
+        # on a grounded body should not make it airborne.
+        if vy * b.grav < 0.0:
+            b.on_ground = False
+        self._force_ids_this_frame.add(fid)
+        return True
+
     def _apply_orb(self, b, o):
         """Fire orb ``o`` on body ``b``. Returns False when the orb was
         skipped (teleport on cooldown)."""
@@ -1023,7 +1309,14 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
             for wall_x in self._end_walls_x:
                 if (tr_right > wall_x and tr_left < wall_x + UNITS_PER_BLOCK
                         and prev_right <= wall_x):
+                    # Checkpoint 7 added the event fire only; the win flag
+                    # and the early return are untouched, and the End
+                    # Trigger's handler is a second path into this exact
+                    # flag (see triggers.py's _apply_end_trigger).
+                    was_won = self.won
                     self.won = True
+                    if not was_won:
+                        self._fire_event(EVENT_WIN)
                     return True
         activated_orb_cell = None
         for o in self._nearby_triggers_for_aabb(
@@ -1047,6 +1340,19 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                     self.passed.add(key)
                     if not b.alive:
                         return True
+                continue
+            if t == T_FORCE_BLOCK:
+                # Checkpoint 3: a placed contact object, handled here
+                # beside the letter blocks rather than as a trigger --
+                # it targets no group and has no TRIGGER_HANDLERS entry.
+                # Tested before the cell-AABB gate below (like the pads
+                # above) because its reach is its own ``force_range``
+                # radius, not the object's cell. Main body only, matching
+                # how S/J/D/H blocks are main-body-only in this engine;
+                # never recorded in ``passed`` -- the per-frame ForceID
+                # set is what limits repeat application.
+                if main:
+                    self._apply_force_block(b, o)
                 continue
             caabb = o.get("_caabb")
             if caabb is None:
@@ -1133,10 +1439,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 continue
             if t in (T_GRAV_UP, T_GRAV_DOWN):
                 if key not in body_passed:
-                    target = -1 if t == T_GRAV_UP else 1
-                    if b.grav != target:
-                        b.grav = target
-                        b.on_ground = False
+                    self.set_body_gravity(b, -1 if t == T_GRAV_UP else 1)
                     body_passed.add(key)
             elif t in MODE_FROM_TYPE:
                 if key not in body_passed:
@@ -1146,12 +1449,12 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                     body_passed.add(key)
             elif t == T_MODE_MINI:
                 if key not in body_passed:
-                    self._set_body_size(b, MINI_PLAYER_SIZE_UNITS)
+                    self._set_body_size(b, body_size_units(b.mode, True))
                     self._sync_prev_pose()
                     body_passed.add(key)
             elif t == T_MODE_BIG:
                 if key not in body_passed:
-                    self._set_body_size(b, PLAYER_SIZE_UNITS)
+                    self._set_body_size(b, body_size_units(b.mode, False))
                     self._sync_prev_pose()
                     body_passed.add(key)
             elif t == T_MODE_DUAL:
@@ -1173,19 +1476,30 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                     self.passed.add(key)
             elif t in TRIGGER_TYPES:
                 # Checkpoint 5 (editor reference Sec 4, "Key trigger
-                # concepts"): Spawn-Triggered triggers never fire from a
-                # touch, only when a Spawn/Sequence trigger names their
-                # group; a Toggle-disabled group's triggers are inert
-                # (except Toggle/Stop/Spawn/Sequence themselves, which
-                # must stay reachable to re-enable a chain); Multi
-                # Activate re-arms every touch instead of firing once.
-                if o.get("spawn_triggered"):
+                # concepts"): a trigger only fires from a touch when
+                # Touch Activated is on; by default it's line-activated
+                # only, fired when a Spawn/Sequence/Toggle trigger names
+                # its group. ``touch_activated`` defaults True (touch
+                # allowed) here so control triggers (Spawn/Toggle/Stop/
+                # Sequence/Repeat/item-logic), which don't carry the
+                # field at all, stay reachable by touch as always; a
+                # Toggle-disabled group's other triggers are inert
+                # (except those control triggers themselves, which must
+                # stay reachable to re-enable a chain); Multi Activate
+                # re-arms every touch instead of firing once.
+                if not o.get("touch_activated", True):
                     continue
                 if t not in CONTROL_TRIGGER_TYPES and not self._trigger_active(o):
                     continue
                 if key in self.passed and not o.get("multi_activate"):
                     continue
-                self._execute_trigger_effect(o)
+                # Deferred, not executed here: the effect runs from
+                # update()'s single _drain_trigger_event_queue() call, in
+                # the report's same-frame precedence order. The gating
+                # above (touch_activated / _trigger_active / passed /
+                # multi_activate) is unchanged -- only the moment of
+                # execution moved.
+                self._enqueue_trigger_event(o, TRIGGER_FAMILY_TOUCH)
                 self.passed.add(key)
             elif key in self.passed:
                 continue
@@ -1216,9 +1530,7 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
         final_x = self.x
         steps = max(1, int(math.ceil(max(abs(dx_step), abs(m.vy)) / COLLISION_SUBSTEP_UNITS)))
         input_active = input_pressed or self.mirror_input_buffer > 0
-        pad = px_to_units(3)
-        min_shrink = px_to_units(2)
-        shrink_px = px_to_units(6)
+        pad = TOUCH_PAD_UNITS
         try:
             self.x = final_x - dx_step
             for _ in range(steps):
@@ -1236,22 +1548,20 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
                 if self._inner_in_block_dies(m) and not self.noclip:
                     return
                 size = m.size
-                shrink = max(min_shrink, shrink_px * size / PLAYER_SIZE_UNITS)
                 x, y = self.x, m.y
                 trigger_rect = pygame.FRect(
                     min(old_x, x) - pad, min(old_y, y) - pad,
                     abs(x - old_x) + size + pad * 2,
                     abs(y - old_y) + size + pad * 2)
-                hazard_rect = pygame.FRect(x + shrink, y + shrink,
-                                           size - shrink * 2, size - shrink * 2)
+                hazard_rect = pygame.FRect(x, y, size, size)
                 if self._handle_interactions(m, trigger_rect, hazard_rect, input_active):
                     return
                 input_active = self.mirror_input_buffer > 0
         finally:
             self.x = final_x
         cam_y = self.target_cam_y
-        if (m.y > cam_y + HEIGHT_UNITS + px_to_units(300)
-                or m.y < cam_y - px_to_units(500)):
+        if (m.y > cam_y + FALL_OFF_BELOW_CAM_UNITS
+                or m.y < cam_y - FALL_OFF_ABOVE_CAM_UNITS):
             self._kill(m, "Fell off the screen")
             return
         self._check_ground_adjacency(m)
@@ -1264,167 +1574,199 @@ class Player(CollisionMixin, TriggerMixin, DrawMixin):
     def update(self, input_held, input_pressed):
         if not self.alive or self.won:
             return
-        # A complete tap can arrive between render frames. Its press must
-        # still last one simulation tick for cube, robot, ship and wave.
-        input_held = input_held or input_pressed
-        self.frame += 1
-        self.prev_x = self.x
-        self.prev_y = self.y
-        self.prev_angle = self.angle
-        m = self._mirror
-        if m is not None:
-            m.prev_y = m.y
-            m.prev_angle = m.angle
-        # Frame-start snapshots: end-wall gate + dual-portal grounding.
-        self._x_at_frame_start = self.x
-        self._was_on_ground = self.on_ground
-        if self._was_on_ground:
-            self.grounded_frames += 1
-        else:
-            self.grounded_frames = 0
-        self._step_move_animations()
-        self._step_rotate_triggers()
-        self._step_scale_animations()
-        self._step_alpha_animations()
-        self._step_keyframe_animations()
-        self._step_zoom_animations()
-        self._step_cam_offset_animations()
-        self._step_cam_rotation_animations()
-        self._step_screen_effects()
-        self._step_pending_spawns()
-        self._step_pending_repeats()
-        self._step_timers()
-        self._step_count_watchers()
-        self._step_follow_triggers()
-        self._step_blackout()
-        if self.active_pulses:
-            self.active_pulses = [p for p in self.active_pulses
-                                  if p["end_frame"] > self.frame]
-        if self.teleport_cooldown > 0:
-            self.teleport_cooldown -= 1
-        self._sample_trails()
-        if input_pressed:
-            self.input_buffer = INPUT_BUFFER_TICKS
-            self.mirror_input_buffer = INPUT_BUFFER_TICKS
-        elif not input_held:
-            # Only decay while released — a still-held press stays "fresh"
-            # for orb purposes until it either fires something (consumed,
-            # see the zeroing at each jump/orb site) or the button is let
-            # go, instead of going stale after a fixed 6 frames even
-            # though nothing has used it yet.
-            if self.input_buffer > 0:
-                self.input_buffer -= 1
-            if self.mirror_input_buffer > 0:
-                self.mirror_input_buffer -= 1
-        if not input_held:
-            self._hold_consumed = False
-            self.held_orbs.clear()
-            # Releasing the button cancels an active dash immediately.
-            if self.dash_timer > 0:
-                self._end_dash()
-        dashing = self.dash_timer > 0
-        mode_held = input_held and not self._hold_consumed
-        mode_pressed = input_pressed and not self._hold_consumed
-        if not dashing:
-            self._apply_mode_physics(self, mode_held, mode_pressed,
-                                     input_held, input_pressed)
-            if not self.alive:
-                self._record_hitbox()
-                return
-            dx = self.move_speed
-        else:
-            self.vy = self.dash_vy
-            dx = self.dash_vx
-            self.dash_timer -= 1
-            if self.dash_timer == 0:
-                self._end_dash()
-        self.on_ground = False
-        steps = max(1, int(math.ceil(
-            max(abs(dx), abs(self.vy)) / COLLISION_SUBSTEP_UNITS)))
-        dx_step = dx / steps
-        # Click-edge, not sustained hold: an orb fires on the click frame
-        # (or within the short buffer window after it), never merely
-        # because the button is still held down from an earlier click —
-        # otherwise holding through a chain of orbs would fire all of
-        # them instead of only the first, unlike real GD.
-        input_active = input_pressed or self.input_buffer > 0
-        size = self.size
-        pad = px_to_units(3)
-        min_shrink = px_to_units(2)
-        shrink_px = px_to_units(6)
-        haz_shrink = max(min_shrink, shrink_px * size / PLAYER_SIZE_UNITS)
-        for _ in range(steps):
-            prev_x, prev_y = self.x, self.y
-            self.x += dx_step
-            # Slope x-pass lifts the cube up a ramp before the wall test.
-            self._resolve_slopes(self)
-            if self._resolve_x_collision(self, dx_step):
-                self._record_hitbox()
-                return
-            dy_step = self.vy / steps
-            self.y += dy_step
-            self._resolve_y_collision(self, dy_step)
-            if not self.alive:
-                self._record_hitbox()
-                return
-            self._resolve_slopes(self)
-            if self._inner_in_block_dies(self) and not self.noclip:
-                self._record_hitbox()
-                return
-            cur_x, cur_y = self.x, self.y
-            tr_left = min(prev_x, cur_x) - pad
-            tr_top = min(prev_y, cur_y) - pad
-            tr_right = max(prev_x, cur_x) + size + pad
-            tr_bottom = max(prev_y, cur_y) + size + pad
-            trigger_rect = pygame.FRect(tr_left, tr_top, tr_right - tr_left,
-                                        tr_bottom - tr_top)
-            hazard_rect = pygame.FRect(cur_x + haz_shrink,
-                                       cur_y + haz_shrink,
-                                       size - haz_shrink * 2,
-                                       size - haz_shrink * 2)
-            if self._handle_interactions(self, trigger_rect, hazard_rect,
-                                         input_active):
-                self._check_ground_adjacency(self)
-                self._record_hitbox()
-                return
-            input_active = self.input_buffer > 0
-            size = self.size  # portals may have resized us mid-frame
-            haz_shrink = max(min_shrink, shrink_px * size / PLAYER_SIZE_UNITS)
-        self._check_ground_adjacency(self)
-        if self.mode == MODE_ROBOT and self.on_ground:
-            self.flight_budget = int(self.params.robot_flight_seconds * PHYSICS_TPS)
-            self.thrust_disabled = False
-        if self.free_cam_mode:
-            # Continuous camera tracking (e.g. a "follow" camera trigger):
-            # the fall-off band rides with the player, so free-cam sections
-            # never have a screen edge. play.py's _tick_camera derives the
-            # same target for the *visual* eased camera; this keeps the
-            # physics check (bots, jump predictor, headless sims — none of
-            # which run _tick_camera) in sync without needing that call.
-            self.target_cam_y = self.y + self.size / 2 - HEIGHT_UNITS / 2
-        cam_y = self.target_cam_y
-        if (self.y > cam_y + HEIGHT_UNITS + px_to_units(300)
-                or self.y < cam_y - px_to_units(500)):
-            self._kill(self, "Fell off the screen")
-            return
-        if self._mirror is not None:
-            dx_step = self.x - self.prev_x
-            # A dash consumes input for its whole window; don't let the
-            # mirror re-react to the mechanical hold.
-            if dashing:
-                self._step_mirror(False, False, dx_step)
+        # try/finally, not a plain trailing call: every trigger this
+        # tick queued must still run on the ticks update() leaves early
+        # (teleport orb/portal, death, win), exactly as the old inline
+        # _execute_trigger_effect did -- the drain is the last step of
+        # the tick on every exit path, and runs exactly once per tick.
+        try:
+            # A complete tap can arrive between render frames. Its press must
+            # still last one simulation tick for cube, robot, ship and wave.
+            input_held = input_held or input_pressed
+            self.frame += 1
+            # New tick, new set of Force Blocks that may push: the
+            # report's stacking law is per-frame, and _handle_interactions
+            # runs once per collision substep (plus once more for the
+            # dual mirror), so without this a single block straddling
+            # several substeps would apply its impulse several times.
+            self._force_ids_this_frame.clear()
+            self.prev_x = self.x
+            self.prev_y = self.y
+            self.prev_angle = self.angle
+            m = self._mirror
+            if m is not None:
+                m.prev_y = m.y
+                m.prev_angle = m.angle
+            # Frame-start snapshots: end-wall gate + dual-portal grounding.
+            self._x_at_frame_start = self.x
+            self._was_on_ground = self.on_ground
+            if self._was_on_ground:
+                self.grounded_frames += 1
             else:
-                self._step_mirror(input_held, input_pressed, dx_step)
-            if self._mirror is not None and not self._mirror.alive:
-                self.alive = False
-                if not self.death_reason:
-                    self.death_reason = "Mirror died"
+                self.grounded_frames = 0
+            self._step_move_animations()
+            self._step_rotate_triggers()
+            self._step_scale_animations()
+            self._step_alpha_animations()
+            self._step_keyframe_animations()
+            # Last of the object-transform steppers: an area effect layers
+            # its falloff-scaled transform on top of whatever the tweens
+            # above just wrote this tick, rather than being overwritten by
+            # them. Area effects are *continuous* (they advance every tick
+            # until stopped), so like every other _step_*, they run here
+            # and not through the trigger event queue -- only an Area/Edit
+            # Area/Area Stop *activation* goes through the queue.
+            self._step_area_effects()
+            self._step_zoom_animations()
+            self._step_cam_offset_animations()
+            self._step_cam_rotation_animations()
+            self._step_screen_effects()
+            self._step_pending_spawns()
+            self._step_pending_repeats()
+            self._step_pending_swaps()
+            self._step_timers()
+            self._step_count_watchers()
+            self._step_follow_triggers()
+            self._step_blackout()
+            if self.active_pulses:
+                self.active_pulses = [p for p in self.active_pulses
+                                      if p["end_frame"] > self.frame]
+            if self.teleport_cooldown > 0:
+                self.teleport_cooldown -= 1
+            self._sample_trails()
+            if input_pressed:
+                self.input_buffer = INPUT_BUFFER_TICKS
+                self.mirror_input_buffer = INPUT_BUFFER_TICKS
+            elif not input_held:
+                # Only decay while released — a still-held press stays "fresh"
+                # for orb purposes until it either fires something (consumed,
+                # see the zeroing at each jump/orb site) or the button is let
+                # go, instead of going stale after a fixed 6 frames even
+                # though nothing has used it yet.
+                if self.input_buffer > 0:
+                    self.input_buffer -= 1
+                if self.mirror_input_buffer > 0:
+                    self.mirror_input_buffer -= 1
+            if not input_held:
+                self._hold_consumed = False
+                self.held_orbs.clear()
+                # Releasing the button cancels an active dash immediately.
+                if self.dash_timer > 0:
+                    self._end_dash()
+            dashing = self.dash_timer > 0
+            mode_held = input_held and not self._hold_consumed
+            mode_pressed = input_pressed and not self._hold_consumed
+            if not dashing:
+                self._apply_mode_physics(self, mode_held, mode_pressed,
+                                         input_held, input_pressed)
+                if not self.alive:
+                    self._record_hitbox()
+                    return
+                # move_dir is +1 (rightwards) unless a Reverse / Gameplay
+                # Rotation trigger flipped it -- see set_gameplay_direction.
+                dx = self.move_speed * self.move_dir
+            else:
+                self.vy = self.dash_vy
+                dx = self.dash_vx
+                self.dash_timer -= 1
+                if self.dash_timer == 0:
+                    self._end_dash()
+            self.on_ground = False
+            steps = max(1, int(math.ceil(
+                max(abs(dx), abs(self.vy)) / COLLISION_SUBSTEP_UNITS)))
+            dx_step = dx / steps
+            # Click-edge, not sustained hold: an orb fires on the click frame
+            # (or within the short buffer window after it), never merely
+            # because the button is still held down from an earlier click —
+            # otherwise holding through a chain of orbs would fire all of
+            # them instead of only the first, unlike real GD.
+            input_active = input_pressed or self.input_buffer > 0
+            size = self.size
+            pad = TOUCH_PAD_UNITS
+            for _ in range(steps):
+                prev_x, prev_y = self.x, self.y
+                self.x += dx_step
+                # Slope x-pass lifts the cube up a ramp before the wall test.
+                self._resolve_slopes(self)
+                if self._resolve_x_collision(self, dx_step):
+                    self._record_hitbox()
+                    return
+                dy_step = self.vy / steps
+                self.y += dy_step
+                self._resolve_y_collision(self, dy_step)
+                if not self.alive:
+                    self._record_hitbox()
+                    return
+                self._resolve_slopes(self)
+                if self._inner_in_block_dies(self) and not self.noclip:
+                    self._record_hitbox()
+                    return
+                cur_x, cur_y = self.x, self.y
+                tr_left = min(prev_x, cur_x) - pad
+                tr_top = min(prev_y, cur_y) - pad
+                tr_right = max(prev_x, cur_x) + size + pad
+                tr_bottom = max(prev_y, cur_y) + size + pad
+                trigger_rect = pygame.FRect(tr_left, tr_top, tr_right - tr_left,
+                                            tr_bottom - tr_top)
+                # Bible §3.4: real GD's hazard forgiveness lives in the
+                # HAZARD shapes (a spike's danger box is 9 x 19.2 units
+                # inside its 30-unit cell — see geometry.spike_hitboxes),
+                # not in a shrunken player box; §3.2's red box is the whole
+                # body.  The rotated-hazard path a few lines into
+                # _handle_interactions already used the full box, so the
+                # old inset also made an axis-aligned spike more forgiving
+                # than the same spike rotated 1 degree.
+                hazard_rect = pygame.FRect(cur_x, cur_y, size, size)
+                if self._handle_interactions(self, trigger_rect, hazard_rect,
+                                             input_active):
+                    self._check_ground_adjacency(self)
+                    self._record_hitbox()
+                    return
+                input_active = self.input_buffer > 0
+                size = self.size  # portals may have resized us mid-frame
+            self._check_ground_adjacency(self)
+            if self.mode == MODE_ROBOT and self.on_ground:
+                self.flight_budget = int(self.params.robot_flight_seconds * PHYSICS_TPS)
+                self.thrust_disabled = False
+            if self.free_cam_mode:
+                # Continuous camera tracking (e.g. a "follow" camera trigger):
+                # the fall-off band rides with the player, so free-cam sections
+                # never have a screen edge. play.py's _tick_camera derives the
+                # same target for the *visual* eased camera; this keeps the
+                # physics check (bots, jump predictor, headless sims — none of
+                # which run _tick_camera) in sync without needing that call.
+                self.target_cam_y = (self.y + self.size / 2
+                                     - CAMERA_HEIGHT_UNITS / 2)
+            cam_y = self.target_cam_y
+            if (self.y > cam_y + FALL_OFF_BELOW_CAM_UNITS
+                    or self.y < cam_y - FALL_OFF_ABOVE_CAM_UNITS):
+                self._kill(self, "Fell off the screen")
                 return
-        self._apply_rotation(self)
-        # Player-following links need the post-physics pose.
-        self._step_follow_triggers()
-        self._record_hitbox()
-        self._record_mirror_hitbox()
+            if self._mirror is not None:
+                dx_step = self.x - self.prev_x
+                # A dash consumes input for its whole window; don't let the
+                # mirror re-react to the mechanical hold.
+                if dashing:
+                    self._step_mirror(False, False, dx_step)
+                else:
+                    self._step_mirror(input_held, input_pressed, dx_step)
+                if self._mirror is not None and not self._mirror.alive:
+                    was_alive = self.alive
+                    self.alive = False
+                    if not self.death_reason:
+                        self.death_reason = "Mirror died"
+                    # The one death path that does not go through _kill:
+                    # the mirror died and collapses the main body with it.
+                    if was_alive:
+                        self._fire_event(EVENT_DEATH)
+                    return
+            self._apply_rotation(self)
+            # Player-following links need the post-physics pose.
+            self._step_follow_triggers()
+            self._record_hitbox()
+            self._record_mirror_hitbox()
+        finally:
+            self._drain_trigger_event_queue()
 
     def _sample_trails(self):
         # GD's trail is a solid streak, not a fading dotted line — keep

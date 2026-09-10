@@ -242,3 +242,384 @@ One saved run exists: `bot_runs/f_nine_circles__run_nine_circles.json` (predates
 ## 17. State of the working tree
 
 All ten checkpoints are implemented and uncommitted. No git commits have been made anywhere in this overhaul — committing (and how to split it, if at all) is left as the user's decision after reviewing the diff and doing the GUI playtest from §15.
+
+---
+
+# Addendum — GD Trigger Parity Overhaul (September 2026)
+
+Third pass, built against `deep-research-report.md` (repo root), which documents real
+Geometry Dash's editor trigger system — ~133–143 trigger/object types, real numeric
+Object IDs and property keys, activation semantics, and same-frame precedence rules —
+and is explicit that large parts of the spec are the literal string `"unspecified"`
+(defaults, ranges, several IDs, and universal composition/collision rules). That
+honesty is preserved here rather than silently upgraded to invented precision: nothing
+in this pass converts an `"unspecified"` report value into a plausible-looking number.
+
+This pass extends, not replaces, the registry-driven object/trigger system from the
+prior overhaul (§8–17 above): `src/objects.py`'s `SPECS`/`ObjectSpec`/`Field` schema
+still drives serialization and editor UI generically. Nine checkpoints, each left
+uncommitted for review, physics untouched throughout (confirmed: no `.py` file other
+than the trigger/object/render/bot plumbing listed in `git diff --stat` was touched by
+this documentation pass itself, and this pass did not modify any of those files either
+— see §25).
+
+**Verification baseline:** `.venv/bin/python test_game.py` — baseline before
+Checkpoint 0 was **504 passed** (the final count from the prior addendum, §15).
+**Final count after Checkpoint 8: 844 passed, 0 failed**, confirmed by running the
+suite directly for this addendum.
+
+## 18. Data model: `gd_object_id` / `gd_key` / `verification` (Checkpoint 0)
+
+`src/objects.py` gained three pieces of metadata, populated only where the report
+gives a verified value and left `None` everywhere the report itself says
+`"unspecified"` (e.g. all four pre-existing letter blocks — S/J/D/H — carry no
+`gd_object_id`, matching the report's own "every letter block ID is unspecified where
+not independently verified" line):
+
+- `ObjectSpec.gd_object_id: int | None` — the real GD Object ID.
+- `Field.gd_key: int | None` — the real GD numeric property key.
+- `verification: str` on both — `"verified"` / `"partial"` / `"unverified"`, mirroring
+  the report's own confidence tiers (its Unverified tier is literally "anything not
+  corroborated sufficiently; literal `\"unspecified\"`").
+- `GD_ID_TO_TYPE` (a `{gd_object_id: type}` dict) and `gd_field_map(t)` (module bottom,
+  `src/objects.py:1779-1783`) — lazy lookup plumbing for future capability (e.g. a real
+  `.gmd` import/export path), not called anywhere yet.
+
+Grepping the current tree: **64 fields/specs are `verification="partial"`**, **18 are
+`"unverified"`** (mostly Trigger Order and a handful of best-effort fields), **26 are
+`"verified"`** (the pre-existing families from the prior overhaul that the report also
+corroborates). No format change was made to level JSON — `src/levels.py` keeps its
+descriptive string keys; this was a deliberate scope decision (see the plan's
+"Numeric IDs: hybrid/metadata-only" note) since GD's numeric keys are reused per
+object type with different meanings, and this project never imports/exports real
+`.gmd` files.
+
+## 19. Dispatcher refactor: registry + ordered event queue (Checkpoint 1)
+
+The old `_execute_trigger_effect` if/elif chain (`src/player/triggers.py`, previously
+~110 lines) is now a single dict lookup against `TRIGGER_HANDLERS`
+(`src/player/trigger_registry.py`), populated at import time by a registration block
+at the bottom of `triggers.py`. Existing `_start_*`/`_apply_*` method bodies were
+**not rewritten** — only registered — keeping behavior risk near zero for every
+pre-existing trigger.
+
+The real change is the ordered event queue. Both prior direct-call sites
+(`core.py`'s touch handling, `triggers.py`'s `_fire_group`) now call
+`_enqueue_trigger_event(o, family)` instead of executing inline; `Player.update()`
+calls `_drain_trigger_event_queue()` once, as its last step, after all of that tick's
+touch/spawn/watcher enqueuing. The sort key is:
+
+```
+(activation_family_rank, trigger_order, x, placement_priority, stable_object_index)
+```
+
+**⚠ Engine convention, not a GD-verified fact.** The report specifies ordering
+*within* the spawn family (left-to-right by x) and an ascending Trigger Order for
+regular/touch triggers, but explicitly does **not** say how families rank against
+each other. `trigger_registry.py`'s own docstring calls this out directly:
+
+| Rank component | Value / source | Status |
+|---|---|---|
+| `activation_family_rank` | `TRIGGER_FAMILY_SPAWN=0`, `TRIGGER_FAMILY_TOUCH=1`, `TRIGGER_FAMILY_REGULAR=2` (unused currently) | **engine-invented** — report leaves cross-family order unspecified |
+| `trigger_order` | new `_F_TRIGGER_ORDER` field (`objects.py:339`) on `_TRIGGER_COMMON_FIELDS` | report names the concept ("ascending Trigger Order value") but cites **no GD property key** — `gd_key=None`, `verification="unverified"` |
+| `x` (spawn horizontal order) | triggering object's x position | report-sourced (spawn processes left-to-right) |
+| `placement_priority` | **always `0`** | report's "most recently created wins" tiebreak has no timestamp available in this engine's data model; the slot exists only so the key shape matches the report — **documented gap, never actually discriminates** |
+| stable object index | `self._oid_index[id(obj)]` | final deterministic tiebreak, engine-internal |
+
+A handler may enqueue further events mid-drain (Spawn firing a group, Item Comp
+firing on comparison); the drain loop re-sorts and re-runs newly appended entries,
+bounded by `TRIGGER_DRAIN_MAX_PASSES = 64` — the same defensive posture as the
+previously-fixed self-refire bug (§12 above).
+
+## 20. New trigger families (grep-generated from `gd_object_id`/`verification` metadata)
+
+| Family (Checkpoint) | Types | Real GD Object ID(s) | Report section | `verification` |
+|---|---|---|---|---|
+| Area (2) | Move/Rotate/Scale/Fade/Tint/Stop + 5 Edit-Area (11 types) | `3006`–`3015` range family, `3024` (Edit) — see spec comments | "Area and keyframe system" | `partial` |
+| Random (3) | Random Trigger | `1912` | "Core object..." | `partial` |
+| Advanced Random (3) | Advanced Random Trigger | `2068` | "Core object..." | `partial` |
+| Force Block (3) | Force Block | `2069` | "Force and state precedence" | `partial` |
+| Shader/screen (4) | Shader Trigger (base), Chromatic Aberration, Radial Blur, Motion Blur, Bulge, Pinch, Split Screen | `2904`, `2910`, `2914`, `2915`, `2916`, `2917`, `2924` | "Shader and visual effects" | `partial` |
+| Audio (5) | Song, SFX, Edit Song, Edit SFX | `1934`, `3602`, `3605`, `3603` | "Audio, timers, and arithmetic" | `partial` |
+| Gameplay/player-state (6) | Gameplay Rotation, Reverse, Teleport Trigger, Checkpoint Trigger | `2900`, `1917`, `3022`, `2063` | "Gameplay, camera, UI, and environment" | `partial` |
+| Environment/UI/event/end (7) | Change Ground, Change MG, BG Speed, MG Speed, UI Trigger, Event Trigger, End Trigger | `3030`, `3031`, `3606`, `3612`, `3613`, `3604` (`unverified`), `3600` | "Gameplay, camera, UI, and environment" | mostly `partial`, Event Trigger `unverified` |
+
+Every row above is pulled from each spec's own `gd_object_id=`/`verification=`
+metadata (`src/objects.py`), not hand-transcribed — confirmed via
+`grep -n 'gd_object_id=' src/objects.py`, which currently lists all 53 populated
+values in file order. None of this family carries `verification="verified"`: the
+report's own numeric IDs for these types are corroborated but the field-level
+semantics (defaults, ranges, composition rules) are engine interpretation on top of
+report-cited keys, hence `partial` rather than `verified`.
+
+### Checkpoint 2 — Area system details
+- Runtime store: `self.active_areas: dict[effect_id, dict]`, mirroring the pre-existing
+  `active_effect_anims` pattern. `priority` (gd_key `341`) is **stored but never
+  consumed** — `_step_area_effects` walks `active_areas` in insertion order rather
+  than reading `priority`, an explicit trim documented at `triggers.py:705`
+  ("Deliberately unlike..."). Two overlapping areas on one object resolve
+  last-write-wins, marked best-effort since the report gives no composition rule.
+- Tint render pipeline: `src/sprites.py`'s `draw_obj` gained a `tint` parameter
+  (`(r, g, b)` multiply-blend via `pygame.BLEND_RGBA_MULT`), wired through
+  `play_render.py`'s `obj_tint(o)` call. No specific pre-existing rendering bug was
+  found attributed to this addition during verification — the plan's suggested "P1
+  bug in `sprites.draw_obj`" did not surface as a discrete fixed defect in the current
+  code/history; if one was found and fixed by the Checkpoint 2 agent, it is not
+  independently documented in code comments, so it is **not** claimed here as a
+  verified finding (see §24 for the audit's general caution about unverifiable prior
+  claims).
+
+### Checkpoint 3 — Random / Advanced Random / Force Block
+- Force Block's one exact, quotable precedence rule is implemented literally:
+  **different `force_id` stacks, same `force_id` does not**, via a per-frame
+  `self._force_ids_this_frame: set()` cleared each tick (`core.py:1151-1246`).
+- **Bot-determinism flag (new, prominent):** `_apply_random_trigger` and
+  `_apply_advanced_random_trigger` both call `random.random()` directly
+  (`triggers.py:1188`, `1211`) with no seed control exposed to the bot layer. Grepping
+  `src/bots/*.py` and `src/bot_menu.py` for `RANDOM_TRIGGER_TYPES`/`T_RANDOM_TRIGGER`/
+  `T_ADVANCED_RANDOM_TRIGGER` returns **nothing** — no bot special-cases or seeds
+  these triggers. **This means bot solves (brute-force, human-heuristic, loophole) for
+  any level that places a Random or Advanced Random Trigger are not reproducible run
+  to run**, since the RNG draw that picks the fired group is not part of any bot's
+  action space or replay determinism model. This is a genuine open item from this
+  checkpoint, not inherited from the report.
+
+### Checkpoint 4 — Shader/screen effects
+- Implemented (6, feasible in the existing numpy `apply_screen_effects` pipeline):
+  Chromatic Aberration, Radial Blur, Motion Blur, Bulge, Pinch, Split Screen, plus the
+  base Shader Trigger (`disable_all`/`lowest_layer`/`highest_layer`).
+- **Explicitly not implemented** (6): Gradient (`2903`), Shock Wave (`2905`), Shock
+  Line (`2907`), Glitch (`2909`), Chromatic Glitch (`2911`), Lens Circle (`2913`) —
+  `constants.py:465-466` and `play_render.py:725-727` both record the reason: these
+  need true per-pixel GPU-shader-style displacement that plain pygame/numpy cannot do
+  at frame rate, the same reasoning the prior overhaul already used for this effect
+  class (§11 above).
+- `SCREEN_EFFECT_PARAMS` (`triggers.py:142`) consolidates every effect's field list
+  into one table consumed by `_start_effect_trigger`/`apply_screen_effects`.
+- Motion Blur's ring buffer of recent rendered frames lives on `PlaySession`
+  (`self.motion_blur_frames`, `play.py:439-444`), **not** on `Player`. Reason: it is
+  render history (composited frames), not player/physics state — `Player`/`SimPlayer`
+  is replayed and copied for bot search without a display surface at all, so a frame
+  buffer has no meaning there and would bloat every simulation copy for no benefit.
+- Base Shader Trigger's `lowest_layer`/`highest_layer` are stored but read by nothing:
+  this engine has no render-layer concept, so `disable_all` (clears every entry in
+  `active_effect_anims`) is the only field implemented literally.
+
+### Checkpoint 5 — Audio triggers
+Real vs. stored-only fields, per `_SONG_PARAMS`/`_SFX_PARAMS` (`triggers.py:252-270`):
+
+| Trigger | Real fields | Stored-only no-ops | Why |
+|---|---|---|---|
+| Song | `song`, `volume`, `start`, `fade_in`, `fade_out`, `loop`, `channel` | `speed`, `end` | no playback-rate control exists on `pygame.mixer.music`; no scheduled-stop primitive exists (Edit Song's `stop` + the song's own `fade_out` is the only way to end one) |
+| SFX | `sfx`, `volume`, `loop`, `unique_id` | `pitch`, `reverb` | `sfx.py` has no pitch-shift primitive on `Sound`; no DSP stage exists for reverb — best-effort no-op rather than building either from scratch |
+| Edit Song / Edit SFX | patch by `channel`/`unique_id`, `stop`, absolute (not delta) value updates | same inherited no-ops as above | mirrors the Area family's "patch live state by id, absolute values" pattern |
+
+- **`SimPlayer.audio_output_enabled = False`** (`src/bots/sim.py:98`, vs.
+  `TriggerMixin.audio_output_enabled = True` default) — every audio trigger still
+  updates `active_songs`/`active_sfx` state (so a bot's simulated world state stays
+  identical to real play, e.g. for anything that later reads "is a song playing"),
+  but no actual `pygame.mixer` calls happen during bot search. This matters for **bot
+  search correctness**: without this flag, thousands of simulated ticks per search
+  iteration would each try to start/stop real audio playback, which is both wrong
+  (search shouldn't have side effects on the real mixer) and prohibitively slow.
+- **P1 bug avoided, not found-and-fixed:** `music.py` maintains two separate volume
+  scalars — `_volume` (user's saved preference, written to disk via `prefs.set`) and
+  `_level_volume` (a per-level multiplier set by `set_level_volume`, `music.py:240`).
+  A Song/Edit Song Trigger's `volume` field calls `set_level_volume` exclusively
+  (`triggers.py:810`, `868`) and never touches `_volume`/`prefs`. This was evidently a
+  deliberate design choice made *during* this checkpoint (the multiplier abstraction
+  exists specifically so a level's authored song volume can never overwrite the
+  player's saved system volume preference) rather than a bug discovered after the
+  fact — the comment at `music.py:31` documents the distinction directly.
+
+### Checkpoint 6 — Gameplay Rotation, Reverse, Teleport Trigger, Checkpoint Trigger
+- **New public-ish attribute:** `Player.move_dir` (`core.py:146,417`, `+1`/`-1`) is a
+  genuine new addition to `Player`'s public-ish surface, not an internal-only field —
+  it is included in both bots' dedup/state-hash keys
+  (`src/bots/sim.py:396,739,830` and `src/bots/brute_force.py:589`), so any bot code
+  that hashes player state to detect duplicate search nodes now depends on it. This is
+  additive (a new field), not a rename/removal, so it does not violate the project's
+  stability contract, but it is a real, load-bearing new public surface worth
+  recording as such.
+- **Scope limit:** Reverse (`1917`) and Gameplay Rotation's `direction="reverse"`
+  only flip the auto-scroll step's sign and the dash-vector's `move_dir` multiplier
+  (`core.py:825-831`, `1660-1662`). Camera lead, progress-percentage calculation, the
+  finish-wall check, and the bots' left-to-right search heuristics were **not**
+  retargeted for backwards play — documented directly in `_apply_reverse_trigger`'s
+  docstring (`triggers.py:1477-1489`) as "minimal viable scope." **Real
+  reverse-gameplay levels are not fully playable end-to-end** with this checkpoint
+  alone; only the player's own motion direction is mechanically correct.
+- `channel` field on Gameplay Rotation (default `0`, the report's one hard default) is
+  read by nothing — this engine has no gameplay-channel gating concept, documented at
+  `triggers.py:1451`.
+- Gameplay Rotation's documented Wiki quirk (a non-touch/spawn-triggered Gameplay
+  Rotation interfering with camera triggers active from level start) was **found in
+  the report and intentionally not reproduced** — recorded directly in a code comment
+  (`objects.py:1410-1415`) as "the report describes it as a bug, not a behaviour to
+  match."
+- `T_CHECKPOINT_TRIGGER` is a genuinely new placeable spec wired into the pre-existing
+  `Player.save_checkpoint()`/`load_checkpoint()` plumbing; the older internal
+  `T_CHECKPOINT` transient marker is untouched.
+- **`bot_runs/f_nine_circles__run_nine_circles.json`** (the one saved bot run in the
+  repo) predates the *prior* physics-bible overhaul (April 2026, 60 TPS / pre-retune
+  constants) and was already flagged stale in that overhaul's own §16. It remains
+  stale here too — **not caused by this Checkpoint-0-8 pass**, but still an open item
+  worth carrying forward: the game's existing re-verify-on-load behavior will
+  correctly detect the mismatch rather than trust a stale "solved" status, but no
+  attempt was made to re-record the run.
+
+### Checkpoint 7 — Environment/UI/Event/End triggers, legacy transitions
+- **Change Ground (`3030`) / Change MG (`3031`): stored-only, deliberate no-ops.**
+  Both handlers exist (registered in `TRIGGER_HANDLERS` so the table stays pinned to
+  cover `TRIGGER_TYPES` exactly rather than silently omitting them) but read nothing —
+  `_apply_ground_trigger`/`_apply_mg_trigger` docstrings (`triggers.py:1543-1566`)
+  state directly that no ground-palette or middleground-preset table exists anywhere
+  in `graphics.py`/`play_render.py`; the ground is drawn from fixed
+  `C_GROUND`/`C_GROUND_L`/`C_GROUND_DARK` constants and the middleground from a fixed
+  `graphics._MOUNTAIN_SHADES` tuple.
+- **BG Speed (`3606`) / MG Speed (`3612`): real**, wired into the parallax rate via
+  `Player.bg_scroll_scale()`/`mg_scroll_scale()` (`triggers.py:1589-1597`), consumed
+  by `graphics.draw_bg`'s parallax draw. Exact report-cited defaults implemented
+  verbatim: BG `0.1`/`0.1`, MG `0.3`/`0.5` (`BG_SPEED_DEFAULT_X/Y`,
+  `MG_SPEED_DEFAULT_X/Y`) — a trigger left at defaults changes nothing, matching the
+  report's stated identity point.
+- **UI Trigger** scoped to a fixed choice list of preset text labels
+  (`UI_TEXT_CHOICES`), not free text — the same precedent as Advanced Random's
+  fixed-slot weighted-list editor. Reuses the existing Item-Counter HUD render pass
+  rather than a new UI layer; camera-anchored, untargeted (no `target_group`) like the
+  camera trigger family.
+- **Event Trigger** fires from exactly **5 real hook points**, confirmed via
+  `_arm_event_triggers`/`_fire_event` (`triggers.py:1648-1668`) and their call sites in
+  `core.py`: `EVENT_LEVEL_START` (`core.py:486`), `EVENT_DEATH` (`core.py:949, 1754`),
+  `EVENT_WIN` (`core.py:1311`, plus End Trigger's own `_fire_event(EVENT_WIN)` at
+  `triggers.py:1707`), `EVENT_CHECKPOINT` (`core.py:614`), `EVENT_RESPAWN`
+  (`core.py:659`). Marked `verification="unverified"` — the report gives no further
+  field detail for this trigger.
+- **End Trigger (`3600`)** is a second, group-targeted activation path into the
+  existing `self.won` win flag (`_apply_end_trigger`, `triggers.py:1692-1707`), guarded
+  so the win event fires exactly once per attempt regardless of how many End Triggers
+  a group holds. The pre-existing `T_END` touch-based finish zone is untouched.
+- **Legacy transitions** scoped to level-meta `meta["transition"]`
+  (`LEVEL_TRANSITIONS`/`LEVEL_TRANSITION_DEFAULT` in `levels.py`/`play.py`), consumed
+  only at level **start** (`play.py:330-331`) — no level-**end** transition was
+  implemented, matching the plan's "their whole semantic is how does the level begin"
+  scope note. An unknown/legacy value falls back to the default on load
+  (`levels.py:318-319`).
+
+### Checkpoint 8 — Explicitly deferred, zero code
+`grep -rn "T_OBJECT_CONTROL\|T_LINK_VISIBLE\|T_PERSISTENT_ITEM_SETUP\|object_control\|link_visible\|persistent_item_setup" src/ test_game.py`
+returns **no matches** — independently re-confirmed for this addendum. Object Control,
+Link Visible, and Persistent Item Setup remain entirely unimplemented, per the
+report's own `"unspecified"` table: Object Control ("Wiki says template does nothing
+as of 2.2"), Link Visible ("exact field map... unspecified"), Persistent Item Setup
+(`3641`, distinct from the already-implemented Item Pers Trigger — unverified object
+ID).
+
+## 21. Deferred / best-effort items (report's own `"unspecified"` table + this plan's scope trims)
+
+Carried forward verbatim from the report's own caveats (`deep-research-report.md:585-594`):
+- Exact engine-frame latency of every trigger — `"unspecified"`.
+- Every field's editor slider min/max — `"unspecified"` unless cited.
+- Every field's implicit serialization default — `"unspecified"` unless cited.
+- Universal collision/stacking semantics for overlapping transforms — `"unspecified"`.
+- Universal rule for two simultaneous duration-based transforms on one object —
+  `"unspecified"` beyond known ordering.
+- Exact Split Screen serialization fields — `"unspecified"` in the report's own artifact.
+- Link Visible / Object Control field maps — `"unspecified"` (Checkpoint 8, zero code).
+- Item Persistent's stable public Object ID — `"unspecified"`.
+- Every letter block's exact ID mapping — `"unspecified"` where not independently verified.
+
+This plan's own accumulated scope trims:
+- Advanced Random's editor UI capped to a fixed 4–8 weighted slots rather than
+  generic free-text entry (the engine still parses/stores the report's full
+  dot-separated `group.weight...` format up to 20 pairs).
+- UI Trigger's fixed-choice-list text scope (no free text).
+- Event Trigger's minimal 5-hook-point field set (`event_type`, `target_group`).
+- Legacy-transition's level-start-only simplification (no level-end transition).
+- The 6 unimplemented shader effects (Gradient, Shock Wave, Shock Line, Glitch,
+  Chromatic Glitch, Lens Circle) — need true per-pixel GPU-shader displacement.
+- Song Trigger's `speed`/`end` no-ops (no playback-rate control, no scheduled-stop
+  primitive).
+- SFX Trigger's `pitch`/`reverb` no-ops (no pitch-shift primitive, no DSP stage).
+- Change Ground / Change MG stored-only status (no preset tables exist to select
+  from).
+- Object Control, Link Visible, Persistent Item Setup — zero code (Checkpoint 8).
+
+## 22. Known-unfixable / open items
+
+Inherited from the report's own caveats:
+- Trigger Order has no numeric GD key — it is an engine-invented field
+  (`_F_TRIGGER_ORDER`, `verification="unverified"`) implementing a report-named
+  concept the report never assigns a property key to.
+- Force Block's `range`/`min_force`/`max_force` application semantics are a
+  best-effort interpretation — the report gives FlowVix's field names/keys
+  (`force=149`, `min_force=526`, `max_force=527`, `range=529`, `force_id=530`,
+  `relative=528`) but not the exact numeric application rules.
+- Gameplay Rotation's documented camera-interaction bug was intentionally **not**
+  reproduced.
+- F-Block remains deferred — predates this refactor (prior overhaul's §9/§13), still
+  true, still unresolved even in the community sources the physics bible cites.
+
+New findings from this pass, not inherited from either prior document:
+- **Random/Advanced Random Triggers make bot-search non-deterministic** for any level
+  that uses them (Checkpoint 3) — `random.random()` calls with no seed/replay control
+  exposed to `src/bots/*`.
+- **`Player.move_dir` is a new public-ish attribute** bots now depend on for state
+  dedup (Checkpoint 6) — additive, not a removal/rename, so it does not violate the
+  stability contract, but it is new load-bearing surface worth recording.
+- **Reverse-gameplay levels are only mechanically correct, not fully playable
+  end-to-end** (Checkpoint 6) — camera lead, progress percentage, the finish wall, and
+  the bots' left-to-right heuristics don't know about reverse direction.
+- `bot_runs/f_nine_circles__run_nine_circles.json` is stale from an **earlier**
+  physics retune (the prior overhaul's own already-documented staleness, §16 above) —
+  unrelated to this pass, but still an open item since it was not re-recorded here
+  either.
+- Ground/middleground preset tables don't exist in `graphics.py`/`play_render.py`, so
+  Change Ground's `ground` field and Change MG's `mg` field are permanently inert
+  until someone builds that feature — they round-trip through save/load but nothing
+  reads them.
+
+## 23. "MORE RECOMMENDATIONS" — not found
+
+This addendum searched for explicit "not done" / "awaiting approval" / "MORE
+RECOMMENDATIONS" / TODO-style markers left in code comments or docstrings by prior
+checkpoint agents (`grep -rn "MORE RECOMMENDATIONS\|awaiting approval\|not done\b"` and
+a `TODO` grep across `src/player/triggers.py`, `src/player/core.py`, `src/objects.py`,
+`src/constants.py`, `src/play_render.py`). **No matches were found.** Per this task's
+own instruction, no recommendations are fabricated here — this sub-item is skipped
+rather than invented.
+
+## 24. A note on verifying this addendum
+
+Every specific code-location claim above (line numbers, field names, docstring
+wording) was re-derived directly from the current working tree via `grep`/`Read` for
+this addendum, rather than transcribed from the task's own summary of what landed —
+per this project's established practice (§9's "Process note" above, about a prior
+fork's false report), a couple of items in the original task description were
+softened or corrected on that basis:
+- The "P1 bug fix in `sprites.draw_obj`" claim (Checkpoint 2) could not be
+  independently verified as a *discovered-and-fixed* defect from current code/history
+  — the tint parameter itself is real and wired, but no comment or history evidence
+  ties it to a specific pre-existing rendering bug, so §20's Checkpoint 2 entry
+  reports this honestly rather than asserting a bug that wasn't confirmed.
+- The "MORE RECOMMENDATIONS" sub-item (§23) turned up no markers at all, so it is
+  reported as empty rather than reconstructed from guesswork.
+Everything else in §18–22 — object IDs, field names, defaults, docstring quotes, file
+paths, and line numbers — was confirmed against the current tree at the time of
+writing.
+
+## 25. Verification performed for this addendum
+
+- Full `.venv/bin/python test_game.py`: **844 passed, 0 failed** (baseline before
+  Checkpoint 0 was 504, per §15 above).
+- `git status`/`git diff --stat` confirm this addendum touched only
+  `docs/development/AUDIT.md`; the `.py` files shown as modified in the working tree
+  (`src/bot_menu.py`, `src/bots/*.py`, `src/constants.py`, `src/editor/render.py`,
+  `src/geometry.py`, `src/graphics.py`, `src/levels.py`, `src/music.py`,
+  `src/objects.py`, `src/play.py`, `src/play_render.py`, `src/player/core.py`,
+  `src/player/triggers.py`, `src/sfx.py`, `src/sprites.py`, `test_game.py`) are
+  Checkpoints 0–8's own pre-existing uncommitted work from before this documentation
+  pass started, not changes made while writing this addendum.
+- `grep`-reconfirmed Checkpoint 8's zero-code claim directly (§20).
+- `grep`-reconfirmed the `gd_object_id`/`verification` counts cited in §18/§20 directly
+  against the current `src/objects.py`.

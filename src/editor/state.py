@@ -1,6 +1,6 @@
 """Editor session state: level data, camera, mode, selection, history."""
 
-from ..constants import CELL, WIDTH, HEIGHT
+from ..constants import CELL, WIDTH, HEIGHT, CAMERA_BASE_Y_PX
 from ..objects import PALETTE_CATEGORIES
 from . import ops
 
@@ -46,7 +46,10 @@ class EditorState:
         self.last_autosave_secs = None
         # ---- camera --------------------------------------------------
         self.cam_x = 0.0
-        self.cam_y = 0.0
+        # Open on the same world band the play camera frames by default,
+        # so what the editor shows is what the level looks like in play.
+        # (This is 0 at the legacy render scale — see CAMERA_BASE_Y_PX.)
+        self.cam_y = CAMERA_BASE_Y_PX
         self.zoom = 1.0
         self.show_grid = True
         self.show_hitboxes = False

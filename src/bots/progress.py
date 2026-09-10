@@ -27,7 +27,7 @@ import time
 import pygame
 
 from ..constants import (
-    UNITS_PER_BLOCK, PLAYER_SIZE_UNITS, WIDTH, HEIGHT, T_END, px_to_units,
+    UNITS_PER_BLOCK, PLAYER_SIZE_UNITS, WIDTH, HEIGHT, T_END, TOUCH_PAD_UNITS,
 )
 
 # Wall-clock cadence for repaints and for draining the event queue.
@@ -48,9 +48,10 @@ COLOR_SOLVED = (90, 255, 120)
 
 # ``Player`` tests the end wall against a trigger rect inflated by this
 # many GD units on each side, so the win fires slightly before the
-# player's true right edge reaches the wall. Mirrored here so the bar's
-# 100% mark is the x a winning run actually stops at.
-TRIGGER_INFLATE = px_to_units(3)
+# player's true right edge reaches the wall. Read from the engine's own
+# constant so the bar's 100% mark is the x a winning run actually stops
+# at, even if that tolerance is ever retuned.
+TRIGGER_INFLATE = TOUCH_PAD_UNITS
 
 
 def win_x_for_objects(objects, player_size=PLAYER_SIZE_UNITS):

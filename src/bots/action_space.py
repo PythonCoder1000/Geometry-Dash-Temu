@@ -36,17 +36,17 @@ human-reachable solution.
 
 from typing import NamedTuple
 
-# 2 frames at 60 fps is ~15 full press-release cycles per second — the
-# top of what a real straight-fly / rapid-tap looks like, and the rate
-# the game's flight sections are actually built around.  A solution that
-# needs the button to change state on consecutive frames is asking for
-# 60 Hz precision, which is not something a person reproduces.
+# A dwell of N ticks means each state (held or released) lasts at least
+# N/240 s, so a full press-release cycle takes 2N/240 s and tops out at
+# 240/(2N) toggles/sec.  Competitive human clicking (jitter/butterfly
+# clicking, not a straight tap) can sustain up to ~30 clicks/sec, so the
+# floor is set there: 240/(2*5) = 24 cycles/sec, close to that ceiling
+# without claiming 60 Hz single-finger precision no one can reproduce.
 #
-# Checkpoint-3 tick-rate migration (60 -> 240 TPS): this is a real-world
-# human-reaction-time constraint expressed in ticks, so it scales with
-# the tick rate like INPUT_BUFFER_TICKS elsewhere (2 * 240/60 = 8) to
-# keep meaning "~15 cycles/sec", not "~60 cycles/sec".
-HUMAN_MIN_DWELL_FRAMES = 8
+# Checkpoint-3 tick-rate migration (60 -> 240 TPS) note: this used to be
+# expressed as "old_60fps_value * 4" like INPUT_BUFFER_TICKS elsewhere,
+# but is now set directly in ticks against the 240 TPS engine rate.
+HUMAN_MIN_DWELL_FRAMES = 5
 
 # The escape hatch keeps the one-button rule (that one is physical, not
 # a matter of skill) and only relaxes timing precision. Deliberately left
@@ -57,9 +57,11 @@ FRAME_PERFECT_MIN_DWELL_FRAMES = 1
 
 # Dwell counters saturate here — anything at or above ``min_dwell`` is
 # behaviourally identical, so clamping keeps search state buckets small.
-# Scaled with HUMAN_MIN_DWELL_FRAMES (8 * 4 = 32) to preserve the same
-# margin above it the old 8/2 ratio had.
-DWELL_CAP = 32
+# Scaled with HUMAN_MIN_DWELL_FRAMES (5 * 4 = 20) to preserve the same
+# margin above it had at the old 8/32 ratio — smaller than before, which
+# also shrinks the dedup state space a little (fewer distinct dwell
+# buckets to branch search nodes on).
+DWELL_CAP = 20
 
 
 class InputModel(NamedTuple):

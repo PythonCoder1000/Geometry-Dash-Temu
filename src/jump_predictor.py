@@ -22,7 +22,7 @@ from typing import Optional
 
 from .constants import (
     UNITS_PER_BLOCK, PLAYER_SIZE_UNITS, MINI_PLAYER_SIZE_UNITS,
-    PLAYER_SIZE, MINI_PLAYER_SIZE,
+    PLAYER_SIZE, MINI_PLAYER_SIZE, body_size_units,
     T_JUMP_PREDICTOR,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING, MODE_ROBOT,
@@ -30,7 +30,7 @@ from .constants import (
     T_SPEED_SLOW, T_SPEED_NORMAL, T_SPEED_FAST, T_SPEED_FASTER,
     T_MODE_CUBE, T_MODE_SHIP, T_MODE_BALL, T_MODE_WAVE, T_MODE_UFO,
     T_MODE_SPIDER, T_MODE_MINI, T_MODE_BIG,
-    SPEED_VALUES, MODE_FROM_TYPE, PX_PER_UNIT, px_to_units,
+    SPEED_VALUES_UT, MODE_FROM_TYPE, PX_PER_UNIT, px_to_units,
 )
 
 # Internal simulation (SimPlayer.x/y/size) works in real GD units — see
@@ -91,19 +91,27 @@ def modes():
 
 
 def detect_speed(objects, probe_x_cell: int, params=None) -> float:
-    """Return the move_speed in px/frame at ``probe_x_cell`` after
+    """Return the move_speed in GD units/tick at ``probe_x_cell`` after
     applying every speed portal to the left of it. Matches the real
-    engine, which latches the most recent portal crossed."""
+    engine, which latches the most recent portal crossed.
+
+    Both branches are unit-space: ``params.base_move_speed`` has been in
+    units/tick since the units cutover, so the portal table must be the
+    unit-space one too. (It used to read the px table here, which made
+    the two branches disagree by PX_PER_UNIT: a probe with no speed
+    portal before it previewed its arc at 0.6x the real run speed, while
+    the same probe with a redundant 1x portal in front of it previewed
+    correctly.)"""
     from .physics import DEFAULT_PARAMS
     speed = (params or DEFAULT_PARAMS).base_move_speed
     # Iterate in x-order so the latest-latched speed wins.
     ports = sorted(
         (o for o in objects
-         if o.get("t") in SPEED_VALUES and int(o["x"]) <= probe_x_cell),
+         if o.get("t") in SPEED_VALUES_UT and int(o["x"]) <= probe_x_cell),
         key=lambda o: int(o["x"]),
     )
     for p in ports:
-        speed = SPEED_VALUES[p["t"]]
+        speed = SPEED_VALUES_UT[p["t"]]
     return speed
 
 
@@ -237,7 +245,9 @@ def predict(objects, probe, params=None):
         mode = MODE_CUBE
     grav = 1 if int(probe.get("grav", 1)) >= 0 else -1
     mini = bool(probe.get("mini", False))
-    size = MINI_PLAYER_SIZE_UNITS if mini else PLAYER_SIZE_UNITS
+    # Per-(mode, mini) body, bible §3.2 — a wave probe is 10 units, not 30,
+    # so the previewed arc has to be sized the same way real play sizes it.
+    size = body_size_units(mode, mini)
     # The editor's dx/dy nudge fields are authored in px (nudge_fine_px /
     # nudge_coarse_px are pixel-exact) — convert to units for the sim.
     dx_units = px_to_units(int(probe.get("dx", 0)))
@@ -269,9 +279,8 @@ def predict(objects, probe, params=None):
     sim.mode = mode
     sim.grav = grav
     sim.size = size
-    # detect_speed() returns px/frame (its own documented contract,
-    # matching SPEED_VALUES); the sim itself works in units/tick.
-    sim.move_speed = px_to_units(detected_speed)
+    # detect_speed() and the sim are both units/tick — no conversion.
+    sim.move_speed = detected_speed
     sim.x = float(spawn_x)
     sim.y = float(spawn_y)
     sim.vy = 0.0
@@ -332,6 +341,7 @@ def predict(objects, probe, params=None):
         "mode": mode,
         "spawn": (spawn_x * PX_PER_UNIT, spawn_y * PX_PER_UNIT),
         "size": size * PX_PER_UNIT,
+        "mini": mini,
         "frames": len(samples) - 1,
         "speed": detected_speed,
         "grounded": grounded_at_spawn,
@@ -417,11 +427,15 @@ def draw_overlay(screen, result, cam_x, cam_y, zoom_level=1.0,
                              (sbx + ssz, sby + dy),
                              (sbx + ssz, sby + min(dy + dash, ssz)), 1)
         # Per-substep hitbox samples — drawn UNDER the arc line so the
-        # cyan polyline still reads on top. Outer rect is the full
-        # collision footprint; inner rect is the shrunk hazard hitbox
-        # (matches the player's spike/saw check). Colours match the
-        # editor's H-overlay scheme: green outer, red inner.
+        # cyan polyline still reads on top. This is GD's own Show Hitboxes
+        # scheme (bible §3.1): the green outer rect is the §3.2 "red"
+        # hazard box, which IS the whole body, and the blue inner rect is
+        # the §3.2 "blue" solid box that decides block death. The inner
+        # rect used to re-derive the player's old hazard inset off a stale
+        # 44 px literal, so it drew neither of GD's two boxes.
         if show_hitbox:
+            from .player.collision import solid_hitbox_fraction
+            hb_mode = result.get("mode", MODE_CUBE)
             hb = result.get("hitboxes") or []
             # Trace samples are 4-tuples (x, y, size, angle) with the
             # angle field added when the inner/outer split landed; older
@@ -438,9 +452,9 @@ def draw_overlay(screen, result, cam_x, cam_y, zoom_level=1.0,
                 pygame.draw.rect(
                     screen, (120, 255, 140),
                     (sxh, syh, ssz, ssz), 1)
-                shrink = max(2, int(6 * hsz / 44.0))
-                ssh = max(1, int(shrink * zoom_level))
-                inner_sz = max(1, ssz - 2 * ssh)
+                frac = solid_hitbox_fraction(hb_mode, px_to_units(hsz))
+                inner_sz = max(1, int(ssz * frac))
+                ssh = (ssz - inner_sz) // 2
                 pygame.draw.rect(
                     screen, (90, 160, 255),  # blue inner — matches editor overlay
                     (sxh + ssh, syh + ssh, inner_sz, inner_sz), 1)
@@ -484,7 +498,9 @@ def summary_text(result: Optional[dict]) -> list[str]:
     """Human-readable breakdown of a `predict()` result for the HUD."""
     if result is None:
         return ["(no probe / empty level)"]
-    sz_lbl = "mini" if result["size"] == MINI_PLAYER_SIZE else "normal"
+    # Read the flag, not the px size: a normal-size wave body is 10 units,
+    # which is already smaller than a mini cube.
+    sz_lbl = "mini" if result.get("mini") else "normal"
     out = [f"mode: {result['mode']}  size: {sz_lbl}  "
            f"speed: {result['speed']:.2f}px/f"]
     sp = result["spawn"]

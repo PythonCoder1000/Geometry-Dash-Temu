@@ -50,11 +50,20 @@ class PhysicsContracts(unittest.TestCase):
         before = deepcopy(objects)
         params = PhysicsParams(base_move_speed=0.5)
         result = predict(objects, probe, params)
-        self.assertAlmostEqual(result["samples"][1][0] - result["samples"][0][0], 0.5)
+        # samples are px; base_move_speed is units/tick.
+        self.assertAlmostEqual(result["samples"][1][0] - result["samples"][0][0],
+                               0.5 * C.PX_PER_UNIT)
         self.assertEqual(objects, before)
+        # Both detect_speed branches must answer in the SAME unit system
+        # (units/tick) — they used to disagree by PX_PER_UNIT, so a probe
+        # with no speed portal ahead of it previewed at 0.6x run speed.
         self.assertEqual(detect_speed(objects, 3, params), 0.5)
         objects.append({"t": C.T_SPEED_FAST, "x": 2, "y": 9})
-        self.assertEqual(detect_speed(objects, 3, params), C.SPEED_VALUES[C.T_SPEED_FAST])
+        self.assertEqual(detect_speed(objects, 3, params),
+                         C.SPEED_VALUES_UT[C.T_SPEED_FAST])
+        no_portal = [o for o in objects if o.get("t") != C.T_SPEED_FAST]
+        self.assertAlmostEqual(detect_speed(no_portal, 3),
+                               C.SPEED_VALUES_UT[C.T_SPEED_NORMAL])
 
     def test_predictor_nudge_does_not_invent_ground_contact(self):
         from src.jump_predictor import predict
@@ -86,7 +95,10 @@ class PhysicsContracts(unittest.TestCase):
         from src.player.body import MirrorBody
         p = flat()
         p.params = PhysicsParams(wave_angle=30)
-        p.mirror = MirrorBody(mode=C.MODE_WAVE, size=C.MINI_PLAYER_SIZE_UNITS, grav=-1, y=200)
+        # Mini wave is 6 units, not 18 — §3.2 sizes the body per (mode, mini).
+        p.mirror = MirrorBody(mode=C.MODE_WAVE,
+                              size=C.body_size_units(C.MODE_WAVE, True),
+                              grav=-1, y=200)
         controller = PathFollowController([(0, 200), (1000, 200)])
         controller._hazard_cells = {(99, 99)}
         state = p.mirror.to_dict()
@@ -100,11 +112,13 @@ class PhysicsContracts(unittest.TestCase):
     def test_mirror_sweeps_horizontal_hazards(self):
         from src.player.body import MirrorBody
         p = Player([{"t": C.T_SPIKE, "x": 4, "y": 4}])
-        p.x = C.px_to_units(300)
-        p.mirror = MirrorBody(y=C.px_to_units(200), grav=1, mode=C.MODE_SHIP)
-        p._step_mirror(False, False, C.px_to_units(200))
+        # Sweep the mirror 4 blocks left, from 6 blocks in, across the
+        # spike sitting in cell (4, 4).
+        p.x = 6 * C.UNITS_PER_BLOCK
+        p.mirror = MirrorBody(y=4 * C.UNITS_PER_BLOCK, grav=1, mode=C.MODE_SHIP)
+        p._step_mirror(False, False, 4 * C.UNITS_PER_BLOCK)
         self.assertFalse(p.mirror.alive)
-        self.assertEqual(p.x, C.px_to_units(300))
+        self.assertEqual(p.x, 6 * C.UNITS_PER_BLOCK)
 
     def test_cached_win_invalidated_by_physics_or_geometry(self):
         from src import bot_menu
@@ -184,7 +198,10 @@ class PhysicsContracts(unittest.TestCase):
         self.assertTrue(0.60 < heights[1] / heights[0] < 0.67)
 
     def test_wave_reversal_and_mini_slope(self):
-        for size, slope in ((C.PLAYER_SIZE_UNITS, 1), (C.MINI_PLAYER_SIZE_UNITS, 2)):
+        # §3.2 sizes the wave body at 10 units normal / 6 mini, so "mini"
+        # is that row's mini value, not the box modes' 18.
+        for size, slope in ((C.body_size_units(C.MODE_WAVE, False), 1),
+                            (C.body_size_units(C.MODE_WAVE, True), 2)):
             for speed in C.SPEED_VALUES.values():
                 for grav in (1, -1):
                     p = flat()
@@ -322,6 +339,102 @@ class PhysicsContracts(unittest.TestCase):
             sim.update(held, pressed)
             self.assertEqual((p.x, p.y, p.vy, p.alive),
                              (sim.x, sim.y, sim.vy, sim.alive))
+
+    def test_player_body_is_one_block_and_yields_the_bible_solid_box(self):
+        """Physics bible §3.2: the box gamemodes' main ("red") hitbox is
+        30 units — one full block — and 18 in mini. HITBOX_SOLID_FRACTION's
+        entries are literally bible_blue/bible_red (9/30, 10/18, ...), so
+        they only produce the bible's blue box when the body size IS the
+        bible's red box. Both halves are asserted together because that is
+        the coupling that silently broke: a 44 px / 26.4 unit body made the
+        solid box 7.92 instead of 9, and made every jump read 12% high and
+        the world scroll 14% fast *relative to the player*."""
+        from src.player.collision import solid_hitbox_fraction
+        self.assertEqual(C.PLAYER_SIZE_UNITS, C.UNITS_PER_BLOCK)
+        self.assertEqual(C.MINI_PLAYER_SIZE_UNITS, C.UNITS_PER_BLOCK * 0.6)
+        # (mode, bible blue normal, bible blue mini)
+        for mode, blue, blue_mini in ((C.MODE_CUBE, 9, 10), (C.MODE_SHIP, 9, 10),
+                                      (C.MODE_BALL, 9, 10), (C.MODE_UFO, 9, 10),
+                                      (C.MODE_ROBOT, 9, 10), (C.MODE_SWING, 9, 10)):
+            size = C.PLAYER_SIZE_UNITS
+            self.assertAlmostEqual(size * solid_hitbox_fraction(mode, size), blue)
+            mini = C.MINI_PLAYER_SIZE_UNITS
+            self.assertAlmostEqual(mini * solid_hitbox_fraction(mode, mini), blue_mini)
+        p = flat()
+        self.assertAlmostEqual(p.solid_hitbox().width, 9.0)
+
+    def test_every_gamemode_reproduces_the_bible_3_2_hitbox_table(self):
+        """§3.2 in full: the red (body) box AND the blue (solid) box it
+        yields, for all eight modes, normal and mini. Wave's 10/3 and
+        Spider's 27.5/9 are the rows a single PLAYER_SIZE_UNITS got wrong
+        — HITBOX_SOLID_FRACTION's entries are bible_blue/bible_red, so
+        they only produce the bible's blue box when the body size is that
+        row's red box."""
+        from src.player.collision import solid_hitbox_fraction
+        # mode: (red, blue, mini_red, mini_blue)
+        table = {
+            C.MODE_CUBE:   (30, 9, 18, 10), C.MODE_SHIP:  (30, 9, 18, 10),
+            C.MODE_BALL:   (30, 9, 18, 10), C.MODE_UFO:   (30, 9, 18, 10),
+            C.MODE_ROBOT:  (30, 9, 18, 10), C.MODE_SWING: (30, 9, 18, 10),
+            C.MODE_WAVE:   (10, 3, 6, 3),
+            C.MODE_SPIDER: (27.5, 9, 16.5, 10),
+        }
+        self.assertEqual(set(table), set(C.ALL_MODES))
+        for mode, (red, blue, mini_red, mini_blue) in table.items():
+            for size, want_red, want_blue in ((False, red, blue),
+                                              (True, mini_red, mini_blue)):
+                got = C.body_size_units(mode, size)
+                self.assertAlmostEqual(got, want_red, msg=f"{mode} red")
+                self.assertAlmostEqual(got * solid_hitbox_fraction(mode, got),
+                                       want_blue, msg=f"{mode} blue")
+                self.assertIs(C.is_mini_size(mode, got), size, msg=f"{mode} mini")
+
+    def test_hazard_box_is_the_whole_body_with_no_extra_inset(self):
+        """§3.4 debunks player-side forgiveness: GD's forgiveness lives in
+        the hazard shapes (this engine's spike danger box is 9 x 19.2 in a
+        30-unit cell), not in a shrunken player box. The player box used
+        against hazards used to be inset 3.6 units per side, which also
+        made an axis-aligned spike more forgiving than the same spike
+        rotated one degree (the rotated path never had the inset)."""
+        from src.geometry import spike_hitboxes_units
+        (_sx, _sy, sw, _sh), = spike_hitboxes_units(10, 10, {"t": C.T_SPIKE,
+                                                             "x": 10, "y": 10})
+        cell = 10 * C.UNITS_PER_BLOCK
+        body = C.PLAYER_SIZE_UNITS
+        # Overlap of a full-width body with the spike's danger box.
+        expected = sw + body
+        lo = hi = None
+        objs = [{"t": C.T_BLOCK, "x": x, "y": 11} for x in range(40)]
+        objs.append({"t": C.T_SPIKE, "x": 10, "y": 10})
+        x = cell - body - 5.0
+        while x < cell + sw + body + 5.0:
+            p = Player([dict(o) for o in objs])
+            p.x, p.y, p.vy, p.move_speed = x, cell, 0.0, 0.0
+            p.update(False, False)
+            if not p.alive:
+                lo = x if lo is None else lo
+                hi = x
+            x += 0.05
+        self.assertAlmostEqual(hi - lo, expected, delta=0.15)
+
+    def test_cube_jump_matches_the_bible_velocity_table(self):
+        """§1.3/§1.4: 11.18G at 1x, and the tick-ordering quirk — a fresh
+        click eats one gravity tick (11.18 - 0.216) while a held/buffered
+        one gets the full force."""
+        vel = C.PHYSICS_TPS / 60.0          # units/tick -> bible "Vels"
+        for speed_type, expected in ((C.T_SPEED_SLOW, 10.62),
+                                     (C.T_SPEED_NORMAL, 11.18),
+                                     (C.T_SPEED_FAST, 11.42),
+                                     (C.T_SPEED_FASTER, 11.23),
+                                     (C.T_SPEED_FASTEST, 11.23)):
+            held = flat()
+            held.set_speed(speed_type)
+            held.update(True, False)
+            self.assertAlmostEqual(-held.vy * vel, expected, places=3)
+            fresh = flat()
+            fresh.set_speed(speed_type)
+            fresh.update(True, True)
+            self.assertAlmostEqual(-fresh.vy * vel, expected - 0.216, places=3)
 
 
 if __name__ == "__main__":

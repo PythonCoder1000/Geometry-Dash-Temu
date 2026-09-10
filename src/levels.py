@@ -13,6 +13,7 @@ Level JSON schema (``LEVEL_FORMAT_VERSION`` in ``constants.py``;
       "published": false, "verified": false, "rated": false,
       "music": null, "attempts": 0, "best_progress": 0,
       "coins_collected": 0, "best_time_frames": 0, "deaths": 0,
+      "transition": "none",
       "physics": {...optional PhysicsParams overrides...},
       "channels": {...optional color-channel table, see channels.py...},
       "objects": [{"t": "block", "x": 0, "y": 10, "r": 0,
@@ -22,6 +23,14 @@ Level JSON schema (``LEVEL_FORMAT_VERSION`` in ``constants.py``;
 Per-object fields are declared in :mod:`objects`; :func:`normalize_object`
 coerces and clamps them through that schema.  Older versions are migrated
 on load (:func:`_migrate` for meta, :func:`_migrate_objects` for objects).
+
+Deliberate non-change (deep-research-report.md refactor, Checkpoint 0):
+``objects.ObjectSpec``/``Field`` carry optional real-Geometry-Dash
+``gd_object_id``/``gd_key`` metadata for documentation/future-export
+purposes, but this file's JSON schema is NOT switching to numeric-keyed
+dicts. Objects stay descriptive-key dicts (``"t"``, ``"target_group"``,
+...) exactly as above -- do not "helpfully" start writing numeric GD keys
+into saved level JSON. See the rationale on ``objects.ObjectSpec``.
 """
 
 import json
@@ -33,7 +42,9 @@ from .constants import (
     LEVELS_DIR, LEVEL_FORMAT_VERSION, DIFFICULTIES, LEGACY_DEMON_TARGET,
     T_TELEPORT_ORB, T_TELEPORT_PORTAL, TELEPORT_LINK_TYPES,
     T_COIN, T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_CHECKPOINT,
-    T_ORB, T_BLUE_ORB, T_GREEN_ORB, T_COLOR_TRIGGER,
+    T_ADVANCED_RANDOM_TRIGGER,
+    T_ORB, T_BLUE_ORB, T_GREEN_ORB, T_COLOR_TRIGGER, TRIGGER_TYPES,
+    LEVEL_TRANSITIONS, LEVEL_TRANSITION_DEFAULT,
 )
 from . import objects as _registry
 
@@ -200,6 +211,18 @@ def normalize_object(o):
                 out["curve"] = [[float(p[0]), float(p[1])] for p in curve]
             except (TypeError, ValueError, IndexError):
                 pass
+    if t == T_ADVANCED_RANDOM_TRIGGER:
+        # Advanced Random's full weighted list, in the report's own
+        # dot-separated "group.weight..." form (up to 20 pairs). Carried
+        # through here, alongside target_oids/curve above, because
+        # Field has no string kind -- the property panel edits the first
+        # few pairs through plain int slot fields instead (see
+        # objects.advanced_random_weighted_list). Only written when a
+        # level actually sets it, so slot-authored triggers save exactly
+        # as they did before this key existed.
+        weighted = o.get("weighted_list")
+        if isinstance(weighted, str) and weighted.strip():
+            out["weighted_list"] = weighted.strip()
     if o.get("oid"):
         out["oid"] = int(o["oid"])
     groups = get_groups(o)
@@ -211,6 +234,12 @@ def normalize_object(o):
             out["layer"] = int(layer)
         except (TypeError, ValueError):
             pass
+    z_layer = _registry.get_z_layer(o)
+    if z_layer != _registry.default_z_layer(t):
+        out["z_layer"] = z_layer
+    z_order = _registry.get_z_order(o)
+    if z_order:
+        out["z_order"] = z_order
     if o.get("invisible"):
         out["invisible"] = True
     if o.get("_bot_only"):
@@ -240,6 +269,13 @@ def _default_meta(name="Untitled"):
         "coins_collected": 0,
         "best_time_frames": 0,
         "deaths": 0,
+        # Checkpoint 7 (deep-research-report.md, "Transition, letter, and
+        # legacy objects"): how the level begins. A level-META enum, not a
+        # placeable object -- see LEVEL_TRANSITIONS in constants.py for
+        # why the report's ~20 legacy transition records collapse to three
+        # representative shapes here. Default "none" keeps every existing
+        # level starting exactly as it does today.
+        "transition": LEVEL_TRANSITION_DEFAULT,
     }
 
 
@@ -282,6 +318,11 @@ def _migrate(data):
     _int_field(meta, "deaths")
     if meta.get("music") is not None and not isinstance(meta["music"], str):
         meta["music"] = None
+    # Validated the same way `difficulty` above is: an unknown or absent
+    # value falls back to the default rather than reaching play.py, so
+    # level_transition_state never has to guess what a stray string means.
+    if meta.get("transition") not in LEVEL_TRANSITIONS:
+        meta["transition"] = LEVEL_TRANSITION_DEFAULT
     meta["v"] = LEVEL_FORMAT_VERSION
     return meta
 
@@ -293,6 +334,17 @@ def _migrate(data):
 _OBJECT_RENAMES = {
     7: {T_BLUE_ORB: T_GREEN_ORB, T_GREEN_ORB: T_ORB},
 }
+# Version 9: triggers default to line-activated only (fired by a
+# Spawn/Sequence/Toggle chain targeting their group) instead of touch,
+# with a new "Touch Activated" toggle for the opt-in old behaviour. Every
+# trigger saved before v9 was placed when touch was the *only* option, so
+# on load it needs that toggle explicitly turned on -- otherwise it would
+# silently go quiet (default off) the moment its old level is opened.
+# Only triggers that actually carry the field (``objects.py``'s
+# ``_TRIGGER_COMMON_FIELDS``/``_UNTARGETED_COMMON_FIELDS``) are touched; the
+# Spawn/Toggle/Stop/Sequence/Repeat/item-logic "control" family never had
+# this concept and is left alone.
+_TOUCH_ACTIVATED_VERSION = 9
 
 
 def _migrate_objects(raw_objects, from_version):
@@ -312,6 +364,10 @@ def _migrate_objects(raw_objects, from_version):
                 new_t = table.get(o.get("t"))
                 if new_t is not None:
                     o["t"] = new_t
+    if from_version < _TOUCH_ACTIVATED_VERSION:
+        for o in objs:
+            if o.get("t") in TRIGGER_TYPES and "touch_activated" not in o:
+                o["touch_activated"] = True
     out = [normalize_object(o) for o in objs]
     # Deterministic coin ids so progress tracks them stably.
     next_cid = 1

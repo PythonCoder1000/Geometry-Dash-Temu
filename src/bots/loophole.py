@@ -36,9 +36,13 @@ from ..constants import (
 )
 
 # Waypoints (drawn in the editor via screen_to_world) and everything
-# derived from them (DrawnPath, PATH_CORRIDOR_PX, THRESHOLD_BY_MODE,
-# hazard-cell grid math) stay in PX — that's the editor's own coordinate
-# space and doesn't change with the physics units refactor. Player state
+# derived from them (DrawnPath, PATH_CORRIDOR_PX, hazard-cell grid math)
+# stay in PX — that's the editor's own coordinate space and doesn't
+# change with the physics units refactor. The controller's own dead-zone
+# TOLERANCES do not belong to that space, though: THRESHOLD_BY_MODE is
+# authored in GD units and converted at its single use site, because as
+# px literals they silently tightened whenever the render scale moved.
+# Player state
 # (x/y/size/move_speed/vy) is real GD units internally (see
 # docs/development/UNITS_REFACTOR.md); every read of it in this file
 # converts to px immediately (PX_PER_UNIT) for comparison against the
@@ -68,19 +72,29 @@ LOOKAHEAD_BY_MODE = {
     MODE_SWING:  4 * _TICK_SCALE,
 }
 
-# Dead-zone (pixels) per mode — how far off the line the controller
-# tolerates before acting. Scaled by speed in ``compute_input``.
+# Dead-zone per mode, in GD UNITS — how far off the line the controller
+# tolerates before acting. Scaled by speed in ``compute_input``, and
+# converted to px there because the drawn path it is compared against is
+# genuinely in world pixels. These were px literals against CELL=50,
+# which quietly tightened every dead zone whenever the render scale
+# moved; each is the same fraction of a block it always was.
 THRESHOLD_BY_MODE = {
-    MODE_CUBE:   10,
-    MODE_SHIP:   4,
-    MODE_UFO:    8,
-    MODE_BALL:   10,
-    MODE_WAVE:   0,
-    MODE_SPIDER: 14,
-    MODE_SWING:  4,
+    MODE_CUBE:   6.0,
+    MODE_SHIP:   2.4,
+    MODE_UFO:    4.8,
+    MODE_BALL:   6.0,
+    MODE_WAVE:   0.0,
+    MODE_SPIDER: 8.4,
+    MODE_SWING:  2.4,
 }
+THRESHOLD_DEFAULT_UNITS = 6.0
 
-# Half-width of the corridor the search treats as "on the drawn path".
+# Vertical speed above which the UFO controller stops asking for another
+# flap — it is already moving the way it wants (GD units/tick).
+UFO_SETTLED_VY_UNITS = 2.4
+
+# Half-width of the corridor the search treats as "on the drawn path",
+# in world px. Two blocks at any render scale.
 PATH_CORRIDOR_PX = CELL * 2
 
 # How hard the search is pulled toward the line, in the same units as
@@ -343,7 +357,8 @@ class PathFollowController:
             target_future = target_now
 
         # Dead zones scale with the canonical normal run speed.
-        threshold = THRESHOLD_BY_MODE.get(mode, 10) * (speed / BASE_MOVE_SPEED)
+        threshold = (THRESHOLD_BY_MODE.get(mode, THRESHOLD_DEFAULT_UNITS)
+                     * PX_PER_UNIT * (speed / BASE_MOVE_SPEED))
         error_now = pcy - target_now      # +ve → below the line
         error_future = pcy - target_future
 
@@ -392,11 +407,9 @@ class PathFollowController:
                                     pcx, pcy, speed))
 
         if mode == MODE_UFO:
-            vy_px = player.vy * PX_PER_UNIT
-            need_up = (grav == 1 and error_future > threshold
-                       and vy_px * grav > -4)
-            need_down = (grav == -1 and error_future < -threshold
-                         and vy_px * grav > -4)
+            settled = player.vy * grav > -UFO_SETTLED_VY_UNITS
+            need_up = grav == 1 and error_future > threshold and settled
+            need_down = grav == -1 and error_future < -threshold and settled
             return need_up or need_down
 
         if mode in (MODE_SWING, MODE_BALL, MODE_SPIDER):
@@ -506,7 +519,7 @@ class LoopholeBot:
 
     def __init__(self, objects, waypoints, params=None, *,
                  frontier_cap=None, backtrack_depth=None,
-                 use_brute_force=False):
+                 use_brute_force=False, allow_frame_perfect=False):
         self.objects = objects
         self.params = params
         self.frontier_cap = frontier_cap
@@ -515,6 +528,8 @@ class LoopholeBot:
         # in this mode the result is *a* win, not one that hugs the
         # drawn path — see HumanBot._brute_force_phase.
         self.use_brute_force = use_brute_force
+        # Opt-in, same as HumanBot.ALLOW_FRAME_PERFECT — off by default.
+        self.allow_frame_perfect = allow_frame_perfect
         self.path = DrawnPath(waypoints)
         self.max_deviation_px = 0.0
         self.off_path_fraction = 0.0
@@ -596,6 +611,7 @@ class LoopholeBot:
         if self.backtrack_depth is not None:
             solver.BACKTRACK_DEPTH = self.backtrack_depth
         solver.USE_BRUTE_FORCE = self.use_brute_force
+        solver.ALLOW_FRAME_PERFECT = self.allow_frame_perfect
         wp, mwp, inputs, won = solver.solve(
             screen, clock, max_frames=max_frames,
             seed_inputs=seed or None, time_budget=time_budget)

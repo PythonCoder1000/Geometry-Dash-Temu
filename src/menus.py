@@ -1266,10 +1266,13 @@ def snippet_picker(screen, clock):
                                  (thumb_x, thumb_y, thumb_w, thumb_h),
                                  border_radius=4)
                 for o in objs:
+                    # fit_cell: this thumbnail is an unclipped patch of the
+                    # list, so a portal drawn at its true 3-cell height
+                    # would spill over the rows around it.
                     draw_obj(screen, o["t"],
                              ox + (o["x"] - min_x) * cell_px,
                              oy + (o["y"] - min_y) * cell_px,
-                             cell_px, 0, o.get("r", 0))
+                             cell_px, 0, o.get("r", 0), fit_cell=True)
             tag = "[user]" if is_user else "[built-in]"
             txt(screen, name, thumb_x + thumb_w + 18, rrect.y + 14, 17, C_WHITE)
             txt(screen, f"{len(objs)} obj · {tag}",

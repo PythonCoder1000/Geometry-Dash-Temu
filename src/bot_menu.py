@@ -90,6 +90,13 @@ _bot_use_brute_force = False
 # opt-in rather than a new default.
 _bot_use_parallel = False
 
+# Frame-perfect escape hatch: HumanBot.solve() used to fall back to this
+# automatically whenever no human-timing solution turned up. It's now an
+# explicit opt-in toggle instead — a frame-perfect result isn't
+# something a person could replay, so the user has to ask for it rather
+# than have the bot menu hand it over silently. Off by default.
+_bot_allow_frame_perfect = False
+
 # Which bot runs. Exactly two exist; there is no third code path.
 BOT_HUMAN = "human"
 BOT_LOOPHOLE = "loophole"
@@ -251,7 +258,8 @@ def _run_solver(screen, clock, objects, params=None, kind=None,
                 clean, list(drawn_path), params=params,
                 frontier_cap=_bot_frontier_caps[_bot_frontier_idx],
                 backtrack_depth=_bot_backtrack_depths[_bot_backtrack_idx],
-                use_brute_force=_bot_use_brute_force)
+                use_brute_force=_bot_use_brute_force,
+                allow_frame_perfect=_bot_allow_frame_perfect)
             wp, mwp, inputs, won = bot.solve(
                 screen, clock, max_frames=max_frames, seed_inputs=seed,
                 time_budget=time_budget)
@@ -270,6 +278,7 @@ def _run_solver(screen, clock, objects, params=None, kind=None,
             bot.BACKTRACK_DEPTH = _bot_backtrack_depths[_bot_backtrack_idx]
             bot.USE_BRUTE_FORCE = _bot_use_brute_force
             bot.USE_PARALLEL_SEARCH = _bot_use_parallel
+            bot.ALLOW_FRAME_PERFECT = _bot_allow_frame_perfect
             wp, mwp, inputs, won = bot.solve(
                 screen, clock, max_frames=max_frames, seed_inputs=seed,
                 time_budget=time_budget)
@@ -439,7 +448,7 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
     """
     # The stepper closures below declare their own globals; only the
     # toggle and the result cache are written directly here.
-    global _bot_use_brute_force, _bot_use_parallel
+    global _bot_use_brute_force, _bot_use_parallel, _bot_allow_frame_perfect
     global _last_waypoints, _last_mirror_waypoints, _last_inputs
     global _last_status, _last_note, _last_start_key
 
@@ -470,8 +479,8 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
     guard = ClickGuard()
 
     panel_w = 560
-    # Five knob rows + summary + actions all fit in 600px.
-    panel_h = min(640, HEIGHT - 20)
+    # Seven knob rows (incl. frame-perfect toggle) + summary + actions.
+    panel_h = min(680, HEIGHT - 20)
     panel = pygame.Rect((WIDTH - panel_w) // 2,
                         (HEIGHT - panel_h) // 2,
                         panel_w, panel_h)
@@ -619,6 +628,16 @@ def run_bot_menu(screen, clock, objects, precomputed_path=None,
                  bt_col, mpos, click_pos,
                  lambda: _set_bt((_bot_backtrack_idx - 1) % len(_bot_backtrack_depths)),
                  lambda: _set_bt((_bot_backtrack_idx + 1) % len(_bot_backtrack_depths)))
+        row_y += _STEP
+
+        # ---- Frame-perfect escape hatch toggle -----------------------
+        fp_label = "ON" if _bot_allow_frame_perfect else "OFF"
+        fp_col = (130, 90, 60) if _bot_allow_frame_perfect else (70, 70, 80)
+        txt(screen, "Frame-perfect fallback", col_x, row_y, 16, C_WHITE)
+        b_fp = btn(screen, fp_label, val_x + 80, row_y + 12, 200, 30,
+                   fp_col, mpos, font_size=15)
+        if click_pos and b_fp.collidepoint(click_pos):
+            _bot_allow_frame_perfect = not _bot_allow_frame_perfect
         row_y += _STEP
 
         # ---- Brute force toggle ---------------------------------------

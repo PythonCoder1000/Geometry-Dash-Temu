@@ -17,8 +17,9 @@ from .constants import (
     C_BG_TOP, C_BG_BOT, C_GROUND, C_GROUND_L, C_GROUND_DARK, C_WHITE, C_GRAY,
     C_BTN, C_DANGER,
 )
+from . import gd_atlas
 from .geometry import (  # noqa: F401  (re-exported)
-    clamp, lerp, normalize_rotation, obj_scale, obj_alpha, cell_rect,
+    clamp, lerp, normalize_rotation, obj_scale, obj_alpha, obj_tint, cell_rect,
     slab_rect, rotate_local_rect, spike_hitboxes, pad_trigger_rect,
     slope_polygon, saw_hitbox,
 )
@@ -487,37 +488,163 @@ def _gradient_bg(top, bot):
     return _bg_gradient_cache["surf"]
 
 
+# ---------------------------------------------------------------------------
+# Real-GD environment art.
+#
+# GD's backgrounds and ground tiles are greyscale masters multiplied by
+# the level's colour channel, so the engine's animated bg_top/bg_bot and
+# its C_GROUND palette still drive every pixel — the textures only add
+# GD's pattern on top of colours this engine already chose.
+#
+# BG_PRESETS has 8 entries and GDRWeb ships 20 game_bg images, so the
+# mapping is preset N -> game_bg_(N+1): 1:1 for every preset this engine
+# actually has. BG_PRESETS is deliberately NOT extended to 20 — its
+# length is the authoring bound for the Change Background trigger's
+# stored preset index, so growing it would change the level schema for a
+# purely cosmetic gain.
+# ---------------------------------------------------------------------------
+GD_BG_COUNT = 8
+GD_GROUND_TILE_PX = 200      # one ground tile spans this many screen px
+GD_BG_GLOW = 0.55            # how strongly the bg pattern lifts the gradient
+_gd_bg_cache = {"key": None, "surf": None}
+_gd_ground_cache = {"key": None, "surf": None}
+
+
+def _gd_env_texture(directory, name, size, tint, cache):
+    """A GD environment PNG tinted and scaled to ``size``, or ``None``.
+
+    Cached on (name, size, tint) because the tint tracks the animated
+    background colour and would otherwise re-scale a 1024px master every
+    frame.
+    """
+    key = (name, size, tuple(tint))
+    if cache["key"] == key:
+        return cache["surf"]
+    raw = gd_atlas.loose_texture(directory, name)
+    if raw is None:
+        cache["key"] = key
+        cache["surf"] = None
+        return None
+    scaled = pygame.transform.smoothscale(raw.convert_alpha(), size)
+    scaled.fill((*tint, 255), special_flags=pygame.BLEND_RGBA_MULT)
+    cache["key"] = key
+    cache["surf"] = scaled
+    return scaled
+
+
+def _gd_background(bg_index, bot):
+    """GD's game_bg tile, tinted for an ADDITIVE pass over the gradient.
+
+    Additive is what keeps this a pure gain: the master's dark regions
+    add nothing (so the engine's gradient still shows through, and the
+    tile's vertical wrap has no visible seam) while its bright pattern
+    lifts the sky in the level's own background colour.
+    """
+    name = f"game_bg_{bg_index % GD_BG_COUNT + 1:02d}_001-hd.png"
+    tint = tuple(min(255, int(c * GD_BG_GLOW) + 12) for c in bot)
+    return _gd_env_texture(gd_atlas.GD_BACKGROUNDS_DIR, name, (HEIGHT, HEIGHT),
+                           tint, _gd_bg_cache)
+
+
+def _gd_ground(bg_index):
+    """GD's groundSquare tile in this engine's ground colour.
+
+    The master is a full-range greyscale, so multiplying by the BRIGHT
+    ground colour is what makes it span black..C_GROUND_L and average out
+    around C_GROUND — the flat bar this replaces.
+    """
+    name = f"groundSquare_{bg_index % GD_BG_COUNT + 1:02d}_001-hd.png"
+    return _gd_env_texture(gd_atlas.GD_GROUNDS_DIR, name,
+                           (GD_GROUND_TILE_PX, GD_GROUND_TILE_PX),
+                           C_GROUND_L, _gd_ground_cache)
+
+
+def _tile_region(surf, tile, offset, region, flags=0, repeat_y=True):
+    """Wrap ``tile`` over ``region`` starting from scroll ``offset``.
+
+    ``repeat_y=False`` lays down a SINGLE row of tiles anchored to
+    ``region``'s top edge instead of repeating downwards — what the
+    ground needs, since GD's ground is one band at the ground line and
+    solid colour below it, not a vertically tiled field.
+
+    The tile grid is anchored to ``region`` as the caller asked for it
+    and only then clipped.  Deriving the anchor from the CLIPPED rect
+    instead let the phase of the grid depend on whatever clip happened to
+    be installed — which slid the ground's tile seams sideways in the
+    editor, and offset the band from the ground line it is supposed to
+    sit on whenever that line ran off the top of the viewport.
+    """
+    tw, th = tile.get_size()
+    prev_clip = surf.get_clip()
+    top = region.top - int(offset[1]) % th
+    left = region.left - int(offset[0]) % tw
+    # Intersect rather than replace: the editor already clips draw_bg to
+    # its canvas rect, and a bare set_clip would tile over the toolbar.
+    visible = region.clip(prev_clip)
+    if visible.w <= 0 or visible.h <= 0:
+        return
+    surf.set_clip(visible)
+    y = top
+    while y < visible.bottom:
+        x = left
+        while x < visible.right:
+            surf.blit(tile, (x, y), special_flags=flags)
+            x += tw
+        if not repeat_y:
+            break
+        y += th
+    surf.set_clip(prev_clip)
+
+
 _MOUNTAIN_SPEEDS = (0.18, 0.32, 0.5)
 _MOUNTAIN_SHADES = ((22, 18, 54), (32, 26, 70), (46, 34, 92))
+# The star field's own parallax rate, previously an inline 0.12 in both
+# axes. Named because Checkpoint 7's Background Speed trigger scales it
+# (see the bg_scale/mg_scale parameters below) and a scaling factor with
+# an anonymous base is unreadable.
+STAR_PARALLAX_SPEED = 0.12
 
 
 def draw_bg(surf, cam_x=0, stars=None, mountains=None, cam_y=0, bg_top=None,
-            bg_bot=None, ground_y=GROUND_Y):
+            bg_bot=None, ground_y=GROUND_Y, bg_scale=None, mg_scale=None,
+            bg_index=0):
     """Parallax background.  Always paints the entire viewport (the old
     version left the strip below the ground line unpainted whenever the
     camera scrolled the ground off-screen, which smeared previous frames
-    across vertical sections)."""
+    across vertical sections).
+
+    ``bg_scale``/``mg_scale`` are (x, y) multipliers on the star-field and
+    mountain-layer scroll rates, set by the Background/Middleground Speed
+    triggers (Checkpoint 7). ``None`` -- and (1.0, 1.0), which is what a
+    trigger carrying the report's documented default speeds produces --
+    both mean "the stock rates", so every existing caller (the menus, the
+    editor preview) keeps the exact background it had.
+
+    ``bg_index`` selects which real-GD ``game_bg``/``groundSquare`` pair
+    is tiled over the gradient — the level's BG_PRESETS index, so the
+    pattern and the colours change together. Without the (optional) GD
+    art installed this is inert and the gradient renders alone."""
     top = bg_top if bg_top is not None else C_BG_TOP
     bot = bg_bot if bg_bot is not None else C_BG_BOT
     surf.blit(_gradient_bg(top, bot), (0, 0))
     ground_screen_y = int(ground_y - cam_y)
-    if stars:
-        for sx, sy, sr, sb in stars:
-            px = int((sx - cam_x * 0.12) % (WIDTH + 400) - 200)
-            py = int(sy - cam_y * 0.12)
-            if py < 0 or py >= HEIGHT:
-                continue
-            col = (sb, sb, min(255, sb + 30))
-            if sr >= 2:
-                pygame.draw.circle(surf, col, (px, py), sr)
-            else:
-                surf.set_at((px, py), col)
+    bg_sx, bg_sy = bg_scale if bg_scale is not None else (1.0, 1.0)
+    mg_sx, mg_sy = mg_scale if mg_scale is not None else (1.0, 1.0)
+    bg_tile = _gd_background(bg_index, bot)
+    # Layer order, far to near: gradient, mountains, GD's tiled pattern,
+    # stars.  The mountains go UNDER the pattern rather than over it —
+    # they are opaque silhouettes, and drawing them last painted them
+    # across a low-contrast texture that then read as "the background is
+    # covered by mountains".  Additive tiling over them instead lifts the
+    # pattern onto the range, which is what makes it read as one distant
+    # skyline.  They stay the middleground layer either way, so the
+    # Middleground Speed trigger keeps moving real pixels.
     if mountains:
         for i, layer in enumerate(mountains):
             speed = _MOUNTAIN_SPEEDS[i] if i < 3 else 0.6
             shade = _MOUNTAIN_SHADES[i] if i < 3 else (60, 44, 110)
-            offset_x = cam_x * speed
-            offset_y = cam_y * speed
+            offset_x = cam_x * speed * mg_sx
+            offset_y = cam_y * speed * mg_sy
             base_y = ground_screen_y
             poly = [(-50, base_y)]
             for x, y in layer:
@@ -527,18 +654,57 @@ def draw_bg(surf, cam_x=0, stars=None, mountains=None, cam_y=0, bg_top=None,
             poly.append((WIDTH + 50, base_y))
             if len(poly) > 2:
                 pygame.draw.polygon(surf, shade, poly)
+    if bg_tile is not None:
+        _tile_region(surf, bg_tile,
+                     (cam_x * STAR_PARALLAX_SPEED * bg_sx,
+                      cam_y * STAR_PARALLAX_SPEED * bg_sy),
+                     pygame.Rect(0, 0, WIDTH, HEIGHT),
+                     flags=pygame.BLEND_RGB_ADD)
+    # Real GD has no star field, and a few hundred opaque dots scattered
+    # over its pattern is the other half of what buried the background.
+    # Stars are this engine's stand-in FOR that pattern, so they run only
+    # when the (optional) GD art is absent — where they are still the
+    # entire sky, exactly as before.
+    if stars and bg_tile is None:
+        star_x = STAR_PARALLAX_SPEED * bg_sx
+        star_y = STAR_PARALLAX_SPEED * bg_sy
+        for sx, sy, sr, sb in stars:
+            px = int((sx - cam_x * star_x) % (WIDTH + 400) - 200)
+            py = int(sy - cam_y * star_y)
+            if py < 0 or py >= HEIGHT:
+                continue
+            col = (sb, sb, min(255, sb + 30))
+            if sr >= 2:
+                pygame.draw.circle(surf, col, (px, py), sr)
+            else:
+                surf.set_at((px, py), col)
+    ground_tile = _gd_ground(bg_index)
     if ground_screen_y < HEIGHT:
         gy = max(0, ground_screen_y)
         surf.fill(C_GROUND_DARK, (0, gy, WIDTH, HEIGHT - gy))
+        if ground_tile is not None:
+            # GD's ground is ONE band hanging off the ground line: it
+            # scrolls horizontally with the camera and never repeats
+            # downwards, with flat colour filling whatever is below it.
+            # Tiling it over the whole region below the line instead put
+            # a fresh copy of the band on screen for every tile-height
+            # the camera descended — the "floors are duplicating when you
+            # go lower" bug, which needs a fall of only 150 px to show a
+            # second band and 350 px to show a third.
+            _tile_region(surf, ground_tile, (cam_x, 0),
+                         pygame.Rect(0, ground_screen_y, WIDTH,
+                                     GD_GROUND_TILE_PX),
+                         repeat_y=False)
     if -14 <= ground_screen_y < HEIGHT:
-        pygame.draw.rect(surf, C_GROUND, (0, ground_screen_y, WIDTH, 14))
+        if ground_tile is None:
+            pygame.draw.rect(surf, C_GROUND, (0, ground_screen_y, WIDTH, 14))
+            stripe_off = int(-cam_x) % 60
+            for sx in range(-60 + stripe_off, WIDTH, 60):
+                pygame.draw.line(surf, lighter(C_GROUND, 15),
+                                 (sx, ground_screen_y + 14),
+                                 (sx + 40, ground_screen_y + 14), 2)
         pygame.draw.line(surf, C_GROUND_L, (0, ground_screen_y),
                          (WIDTH, ground_screen_y), 3)
-        stripe_off = int(-cam_x) % 60
-        for sx in range(-60 + stripe_off, WIDTH, 60):
-            pygame.draw.line(surf, lighter(C_GROUND, 15),
-                             (sx, ground_screen_y + 14),
-                             (sx + 40, ground_screen_y + 14), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -620,7 +786,8 @@ def icon_button(surf, icon, cx, cy, w=40, h=40, col=C_BTN, mpos=None, active=Fal
 # (PEP 562) because ``sprites`` itself imports ``txt`` / colour helpers
 # from this module.
 _SPRITE_EXPORTS = frozenset({
-    "draw_obj", "draw_end_wall", "clear_obj_cache", "regenerate_sprite_assets",
+    "draw_obj", "sprite_extent", "draw_end_wall", "clear_obj_cache",
+    "regenerate_sprite_assets",
     "SPRITE_FRAMES", "SPRITES_DIR", "BUNDLED_SPRITES_DIR",
     "SPRITE_CACHE_VERSION", "_OBJECT_CACHE", "_OBJECT_CACHE_MAX",
     "_load_or_render",

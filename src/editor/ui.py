@@ -84,8 +84,10 @@ def draw_button(screen, b, mpos, pulse=0):
                     line_col=ring)
     if b.sprite is not None:
         s = min(r.w, r.h) - 6
+        # fit_cell: portals/saws are drawn larger than a cell in the
+        # level, but a palette tile has to hold them.
         draw_obj(screen, b.sprite, r.x + (r.w - s) // 2, r.y + (r.h - s) // 2,
-                 s, pulse, 0)
+                 s, pulse, 0, fit_cell=True)
     if b.label:
         size = 11 if b.small else 13
         txt(screen, b.label, r.centerx, r.centery, size,

@@ -12,12 +12,14 @@ import pygame
 from ..constants import (
     WIDTH, C_WHITE, C_GRAY, C_BTN, C_DANGER, MOVE_CURVE_SPEED_MAX,
     T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, TELEPORT_LINK_TYPES,
-    T_COLOR_TRIGGER, T_PULSE_TRIGGER,
+    T_COLOR_TRIGGER, T_PULSE_TRIGGER, Z_LAYERS, Z_LAYER_INDEX, Z_LAYER_LABELS,
+    Z_ORDER_STEP,
 )
 from ..graphics import txt, draw_obj, lighter
 from ..geometry import obj_scale, normalize_rotation
 from ..objects import (
     spec_for, get_field_value, set_active_start, TYPE_NAMES,
+    get_z_layer, get_z_order,
 )
 from ..levels import get_groups
 from .state import TOP_H, BAR_Y
@@ -103,6 +105,10 @@ class PropPanel:
         y += ROW_H
         self.rows.append(_value_row(y, "groups", "Groups"))
         y += ROW_H
+        self.rows.append(_value_row(y, "z_layer", "Z Layer"))
+        y += ROW_H
+        self.rows.append(_value_row(y, "z_order", "Z Order"))
+        y += ROW_H
         if single is not None:
             stack = ops.objects_at_cell(st.objects, single["x"], single["y"])
             if len(stack) > 1:
@@ -173,6 +179,19 @@ class PropPanel:
         return f"{sx:.2f}x" if abs(sx - sy) < 1e-6 else f"{sx:.2f} x {sy:.2f}"
 
     @staticmethod
+    def _z_layer_text(objs):
+        vals = {get_z_layer(o) for o in objs}
+        if len(vals) > 1:
+            return "Mixed"
+        z = vals.pop()
+        return f"{z.upper()} ({Z_LAYER_LABELS[z]})"
+
+    @staticmethod
+    def _z_order_text(objs):
+        vals = {get_z_order(o) for o in objs}
+        return "Mixed" if len(vals) > 1 else str(vals.pop())
+
+    @staticmethod
     def _groups_text(objs):
         vals = {tuple(get_groups(o)) for o in objs}
         if len(vals) > 1:
@@ -207,7 +226,7 @@ class PropPanel:
             txt(screen, "MIXED", pv.centerx, pv.centery, 14, C_GRAY, True)
         else:
             draw_obj(screen, t, pv.x + 6, pv.y + 6, 48, st.pulse, obj.get("r", 0), obj,
-                     scale=obj_scale(obj))
+                     scale=obj_scale(obj), fit_cell=True)
         name = TYPE_NAMES.get(t, t) if t else "Mixed types"
         txt(screen, name, pv.right + 10, PANEL_Y + 36, 15, C_WHITE)
         sub = (f"{len(objs)} selected" if len(objs) > 1
@@ -235,6 +254,10 @@ class PropPanel:
                 text = self._scale_text(objs)
             elif row.key == "groups":
                 text = self._groups_text(objs)
+            elif row.key == "z_layer":
+                text = self._z_layer_text(objs)
+            elif row.key == "z_order":
+                text = self._z_order_text(objs)
             else:
                 text = self._field_text(objs, row.field)
             self._draw_box(screen, row.rect, text, mpos)
@@ -396,6 +419,28 @@ class PropPanel:
                 else:
                     o.pop("groups", None)
                 o.pop("group", None)
+        elif row.key == "z_layer":
+            typed = session.ask_text(
+                "Z Layer (b4/b3/b2/b1/t1/t2/t3):", get_z_layer(obj))
+            if typed is None:
+                return
+            name = typed.strip().lower()
+            if name not in Z_LAYER_INDEX:
+                return
+            st.push_undo()
+            for o in objs:
+                o["z_layer"] = name
+        elif row.key == "z_order":
+            typed = session.ask_text("Z Order (integer):", str(get_z_order(obj)))
+            if typed is None:
+                return
+            try:
+                v = int(float(typed))
+            except ValueError:
+                return
+            st.push_undo()
+            for o in objs:
+                o["z_order"] = v
         else:
             f = row.field
             typed = session.ask_text(f"{f.label}:", f.format(get_field_value(obj, f)))
@@ -430,6 +475,14 @@ class PropPanel:
                 else:
                     o.pop("groups", None)
                 o.pop("group", None)
+        elif row.key == "z_layer":
+            for o in objs:
+                idx = Z_LAYER_INDEX[get_z_layer(o)]
+                idx = max(0, min(len(Z_LAYERS) - 1, idx + direction))
+                o["z_layer"] = Z_LAYERS[idx]
+        elif row.key == "z_order":
+            for o in objs:
+                o["z_order"] = get_z_order(o) + direction * Z_ORDER_STEP
         else:
             f = row.field
             for o in objs:

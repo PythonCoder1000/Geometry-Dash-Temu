@@ -53,9 +53,10 @@ import multiprocessing as mp
 import time
 
 from ..constants import (
-    UNITS_PER_BLOCK, HEIGHT_UNITS, MODE_ROBOT, MODE_SHIP, MODE_UFO, MODE_WAVE,
+    UNITS_PER_BLOCK, PLAYFIELD_HEIGHT_UNITS, MODE_ROBOT, MODE_SHIP, MODE_UFO,
+    MODE_WAVE,
     ORB_TYPES, SPEED_VALUES_UT as SPEED_VALUES, T_END, T_SPEED_NORMAL,
-    T_TELEPORT_PORTAL, px_to_units,
+    T_TELEPORT_PORTAL,
 )
 from .action_space import DWELL_CAP, HUMAN, replay_state
 from .sim import SimPlayer, snapshot, restore
@@ -67,6 +68,13 @@ from .sim import SimPlayer, snapshot, restore
 # rediscover something already structurally true: these modes never
 # collapse, only tap modes (cube/ball/spider) do.
 _FLIGHT_MODES = (MODE_SHIP, MODE_WAVE, MODE_UFO, MODE_ROBOT)
+
+# Default dedup granularity, in GD units — see the completeness/speed
+# note in this module's docstring. Stated in units because the states
+# they bucket are in units; they used to be px literals, which silently
+# coarsened or refined the search whenever the render scale moved.
+POS_BUCKET_UNITS = 0.6
+VEL_BUCKET_UNITS = 0.3
 
 # ``passed`` entries for these types gate a real future action (a
 # not-yet-fired orb/portal can still be clicked; a fired one can't) —
@@ -108,6 +116,23 @@ _BUFFER_LIFE_FRAMES = 6
 # purely local comparison happens to flag.
 _MAX_COLLAPSE_RUN = 10
 
+# How many rounds' worth of frontier nodes a single parallel-search round
+# dispatches, as a multiple of ``workers``. A macro-scan is microseconds
+# to low-milliseconds (see the module docstring above), so at exactly
+# ``workers`` nodes per round the fixed per-round cost of a spawn-process
+# ``pool.map()`` (pickling snapshots, IPC round-trip) can plausibly
+# outweigh the scan work it dispatches — see the "multiprocessing IPC
+# likely dominates compute" finding this constant exists to address.
+# Widening the round amortizes that fixed cost over more work without
+# touching correctness: this only changes how many rounds it takes to
+# drain the same frontier, never which nodes get explored, discarded, or
+# in what priority order (the heap still pops in the same order; only
+# the round size changed). The deadline/cancel check still runs once per
+# round, just a larger one — still a small, bounded slice of the
+# frontier, not the CPU-peg failure mode the "Parallel search" block
+# above exists to avoid.
+_PARALLEL_BATCH_ROUNDS = 4
+
 
 # ---------------------------------------------------------------------------
 # Parallel search (opt-in, off by default — see BruteForceSearch's
@@ -123,8 +148,9 @@ _MAX_COLLAPSE_RUN = 10
 #    correctness — dedup and priority order) stays entirely in the
 #    main process. Only the expensive, side-effect-free part
 #    (``_macro_scan_impl``, a pure function of a snapshot) is sent to
-#    workers, in small batches (one per currently-frontier node this
-#    round), so a single ``pool.map`` call is bounded by how long a
+#    workers, in bounded batches (``_PARALLEL_BATCH_ROUNDS`` frontier
+#    nodes per worker per round — see that constant for why more than
+#    one), so a single ``pool.map`` call is bounded by how long a
 #    handful of macro-scans take (microseconds to low-milliseconds
 #    each — a macro-scan is capped at ``_MAX_COLLAPSE_RUN`` frames
 #    outside flight mode), not by the level or the whole time budget.
@@ -353,7 +379,7 @@ class BruteForceSearch:
 
     def __init__(self, objects, params=None, *, model=HUMAN,
                 seed_inputs=None, time_budget=None, max_frames=20000,
-                pos_bucket=px_to_units(1.0), vel_bucket=px_to_units(0.5),
+                pos_bucket=POS_BUCKET_UNITS, vel_bucket=VEL_BUCKET_UNITS,
                 max_nodes=3_000_000,
                 heuristic_weight=2.0, progress=None, verbose=False,
                 dash_release_stride=1, parallel=False, workers=None):
@@ -428,8 +454,8 @@ class BruteForceSearch:
         # (see the fix's history — an early, tighter margin did exactly
         # that, cutting a fall off 300px past the lowest platform,
         # before it had even reached a portal sitting well within that
-        # gap). HEIGHT_UNITS is the play area height in GD units.
-        self._void_y = max_y * UNITS_PER_BLOCK + HEIGHT_UNITS * 4
+        # gap). PLAYFIELD_HEIGHT_UNITS is the play area height in GD units.
+        self._void_y = max_y * UNITS_PER_BLOCK + PLAYFIELD_HEIGHT_UNITS * 4
 
         self._probe = SimPlayer([dict(o) for o in self.objects], params=params)
         self._probe_a = SimPlayer([dict(o) for o in self.objects], params=params)
@@ -568,7 +594,7 @@ class BruteForceSearch:
             1 if vals.input_buffer > 0 else 0,
             1 if vals.dash_timer > 0 else 0,
             1 if vals.teleport_cooldown > 0 else 0,
-            int(vals.size), round(vals.move_speed, 4),
+            int(vals.size), round(vals.move_speed, 4), vals.move_dir,
             anim_key, obj_pos_key, passed_orbs,
             held, dwell if dwell < min_dwell else min_dwell,
         )
@@ -755,7 +781,7 @@ class BruteForceSearch:
                     # cadence (once per unit of expansion) as the
                     # serial path had once per node.
                     batch = []
-                    batch_size = max(1, self.workers)
+                    batch_size = max(1, self.workers * _PARALLEL_BATCH_ROUNDS)
                     while heap and len(batch) < batch_size:
                         (_f, _c, depth, snap, node_id, prev_h,
                          dwell) = heapq.heappop(heap)

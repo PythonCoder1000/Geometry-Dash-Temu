@@ -102,6 +102,25 @@ def obj_alpha(o):
     return max(0, min(255, int(round(a * 255))))
 
 
+def obj_tint(o):
+    """Return an object's multiply tint as an ``(r, g, b)`` tuple, or
+    ``None`` when it is untinted.
+
+    ``_tint`` (Checkpoint 2's Area Tint) is written by the area stepper
+    already blended by the effect's falloff, i.e. it is the colour to
+    multiply the sprite by (255 = leave that channel alone). Objects no
+    area ever tinted simply have no key and render as before.
+    """
+    tint = o.get("_tint")
+    if not tint:
+        return None
+    try:
+        r, g, b = (max(0, min(255, int(c))) for c in tint[:3])
+    except (TypeError, ValueError):
+        return None
+    return (r, g, b)
+
+
 def _resolve_scale(scale, scale_y=None):
     """Normalize the various scale-arg shapes into ``(sx, sy)``.
 

@@ -9,7 +9,7 @@ per line trail) which was a large part of the frame budget.
 import pygame
 
 from ..constants import (
-    WIDTH, HEIGHT, PLAYER_SIZE, ALL_MODES, PX_PER_UNIT,
+    WIDTH, HEIGHT, PLAYER_SIZE, ALL_MODES, PX_PER_UNIT, icon_size_units,
     MODE_CUBE, MODE_SHIP, MODE_BALL, MODE_WAVE, MODE_UFO, MODE_SPIDER,
     MODE_SWING, MODE_ROBOT,
     C_DASH_ORB, C_PAD, C_MODE_WAVE, C_MODE_UFO, C_MODE_SPIDER,
@@ -19,6 +19,7 @@ from ..graphics import (
     lighter, darker, draw_cube_icon_glyph, draw_bevel_rect, draw_bevel_circle,
     draw_outlined_poly, draw_gloss, outline_col,
 )
+from .. import gd_atlas
 
 # Every mode draws the same thing: one solid, opaque ribbon of the
 # player's colour through the trail samples.  Only its thickness is
@@ -253,6 +254,86 @@ _MODE_BODIES = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Real-GD default icons.
+#
+# Each GD icon is two frames composited on one origin: a base shape that
+# GD tints with the player's primary colour channel, and a smaller detail
+# overlay tinted with the secondary channel. This engine carries a single
+# player colour, so the primary is that colour and the secondary is a
+# lighter shade of it — which keeps every colour trigger and palette slot
+# driving the icon exactly as it drove the procedural body.
+#
+# ROBOT and SWING are deliberately absent, for two different reasons —
+# both re-checked against the installed sheets, so neither is worth
+# searching for again:
+#
+#   ROBOT: the art IS here, but not as an icon. `GJ_GameSheet02` carries
+#     `robot_NN_01..04` as four SEPARATE rig pieces (head 28x20, thigh
+#     10x13, shin 5x13, foot 14x9) whose spriteOffset is 0 on every one,
+#     because GD poses them from the joint table in `Robot_AnimDesc.plist`
+#     — which these sheets do not ship. Standing the robot up would mean
+#     inventing a skeleton, which is exactly the faked texture this
+#     mapping refuses to draw. The same is true of the spider's legs;
+#     the spider entry below uses only its single-piece BODY frame.
+#
+#   SWING: genuinely absent. There is no `swing_*` frame on any of the
+#     four sheets — they predate the 2.2 update that added the mode.
+# ---------------------------------------------------------------------------
+GD_ICON_SHEET = "GJ_GameSheet02"
+GD_PLAYER_ICONS = {
+    MODE_CUBE:   ("player_01_001.png", "player_01_2_001.png"),
+    MODE_SHIP:   ("ship_01_001.png", "ship_01_2_001.png"),
+    MODE_BALL:   ("player_ball_01_001.png", "player_ball_01_2_001.png"),
+    # GD's internal names: the UFO is a "bird", the wave is a "dart".
+    MODE_UFO:    ("bird_01_001.png", "bird_01_2_001.png"),
+    MODE_WAVE:   ("dart_01_001.png", "dart_01_2_001.png"),
+    MODE_SPIDER: ("spider_01_01_001.png", "spider_01_01_2_001.png"),
+}
+GD_ICON_PAD = 0.04              # breathing room so rotation never clips
+GD_ICON_DETAIL_LIGHTEN = 90     # secondary channel, derived from primary
+GD_ICON_GLYPH_FRAC = 0.44       # face box the engine's icon glyph fills
+
+
+def _tint(img, col):
+    """GD ships its icons as white silhouettes over a black outline, so a
+    multiply colours the body and leaves the outline black."""
+    img.fill((*col, 255), special_flags=pygame.BLEND_RGBA_MULT)
+    return img
+
+
+def _draw_gd_icon(surf, s, mode, col, icon_index):
+    """Composite the real-GD icon for ``mode``, or ``False`` when it has
+    no mapping / the atlas is missing and the procedural body must run."""
+    frames = GD_PLAYER_ICONS.get(mode)
+    if frames is None:
+        return False
+    base_name, detail_name = frames
+    source = gd_atlas.frame_source_size(GD_ICON_SHEET, base_name)
+    if source is None:
+        return False
+    # Both layers scale off the BASE frame's longest side so the detail
+    # keeps its real proportion instead of being re-fitted on its own.
+    unit = max(source)
+    base = gd_atlas.compose(GD_ICON_SHEET, base_name, s, pad=GD_ICON_PAD,
+                            unit=unit)
+    if base is None:
+        return False
+    surf.blit(_tint(base, col), (0, 0))
+    if mode == MODE_CUBE and icon_index:
+        # GD's cube detail layer IS the classic inset square, so a player
+        # who picked another icon gets that glyph in its place.
+        face = int(s * GD_ICON_GLYPH_FRAC)
+        draw_cube_icon_glyph(surf, (s - face) // 2, (s - face) // 2, face,
+                             col, icon_index)
+        return True
+    detail = gd_atlas.compose(GD_ICON_SHEET, detail_name, s, pad=GD_ICON_PAD,
+                              unit=unit)
+    if detail is not None:
+        surf.blit(_tint(detail, lighter(col, GD_ICON_DETAIL_LIGHTEN)), (0, 0))
+    return True
+
+
 def render_player_sprite(mode, col, icon_index, dashing=False, burning=False):
     """Full-size (PLAYER_SIZE) sprite for ``mode`` in colour ``col``."""
     key = (mode, tuple(col), icon_index, dashing, burning)
@@ -261,11 +342,12 @@ def render_player_sprite(mode, col, icon_index, dashing=False, burning=False):
         return ps
     s = PLAYER_SIZE * PLAYER_SUPERSAMPLE
     big = pygame.Surface((s, s), pygame.SRCALPHA)
-    body = _MODE_BODIES.get(mode)
-    if body is not None:
-        body(big, s, col, icon_index, dashing, burning)
-    else:
-        _draw_cube_body(big, s, pygame.Rect(0, 0, s, s), col, icon_index)
+    if not _draw_gd_icon(big, s, mode, col, icon_index):
+        body = _MODE_BODIES.get(mode)
+        if body is not None:
+            body(big, s, col, icon_index, dashing, burning)
+        else:
+            _draw_cube_body(big, s, pygame.Rect(0, 0, s, s), col, icon_index)
     ps = pygame.transform.smoothscale(big, (PLAYER_SIZE, PLAYER_SIZE))
     if len(_SPRITE_CACHE) > 256:
         _SPRITE_CACHE.clear()
@@ -338,13 +420,18 @@ class DrawMixin:
         """
         col = self._player_color()
         size = round(self.size_px)
+        # The drawn icon is NOT the hitbox: GD authors every icon at its own
+        # art size (see constants.ICON_SIZE_UNITS) and centres it on the
+        # body.  Wave is the visible case — a 26-unit dart over a 10-unit
+        # box — so `size` still places the sprite while `icon` scales it.
+        icon = round(icon_size_units(self.mode, self.size) * PX_PER_UNIT)
         draw_trail(surf, self.trail, self.mode, size, col, cam_x, cam_y)
         x, y, angle = self.render_pose_px(alpha)
         sx = x - cam_x
         sy = y - cam_y
         ps = self._draw_player_surface()
-        if size != PLAYER_SIZE:
-            ps = pygame.transform.smoothscale(ps, (size, size))
+        if icon != PLAYER_SIZE:
+            ps = pygame.transform.smoothscale(ps, (icon, icon))
         if self.grav == -1:
             ps = pygame.transform.flip(ps, False, True)
         rot = pygame.transform.rotate(ps, angle) if angle else ps
@@ -353,6 +440,7 @@ class DrawMixin:
         if m is None:
             return
         msize = round(m.size_px)
+        micon = round(icon_size_units(m.mode, m.size) * PX_PER_UNIT)
         draw_trail(surf, m.trail, m.mode, msize, col, cam_x, cam_y, flip=True)
         if alpha is None or alpha >= 1.0:
             my, mangle = m.y_px, m.angle
@@ -363,8 +451,8 @@ class DrawMixin:
         msurf = render_player_sprite(
             m.mode, col, self.icon_index,
             burning=m.mode == MODE_ROBOT and m.flight_budget > 0 and m.vy < 0)
-        if msize != PLAYER_SIZE:
-            msurf = pygame.transform.smoothscale(msurf, (msize, msize))
+        if micon != PLAYER_SIZE:
+            msurf = pygame.transform.smoothscale(msurf, (micon, micon))
         if m.grav == -1:
             msurf = pygame.transform.flip(msurf, False, True)
         if not m.alive:

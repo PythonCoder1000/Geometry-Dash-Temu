@@ -25,6 +25,13 @@ _volume = 0.5
 _tracks = []
 _enabled = True
 _menu_track_index = 0  # Which track plays on the menu (index into _tracks)
+# A transient multiplier on top of the user's saved ``_volume``, owned by
+# whatever is currently playing (today: the Song Trigger family, see
+# player/triggers.py). Deliberately NOT persisted and NOT folded into
+# ``_volume``: set_volume() writes the user's preference to disk, so a
+# level lowering its own music must never go through it. stop() puts this
+# back to 1.0, so the next thing to play starts at the user's own level.
+_level_volume = 1.0
 
 
 def init():
@@ -208,19 +215,39 @@ def _pick_file_tk_subprocess(title):
     return path or None
 
 
-def set_volume(vol):
-    """Set music volume (0.0 to 1.0)."""
-    global _volume
-    _volume = max(0.0, min(1.0, vol))
-    prefs.set("music_vol", _volume)
+def _apply_mixer_volume():
+    """Push the effective volume (user preference * level multiplier) at
+    the mixer. Every playback path goes through here so the two factors
+    can never drift apart."""
     try:
-        pygame.mixer.music.set_volume(_volume)
+        pygame.mixer.music.set_volume(_volume * _level_volume)
     except Exception:
         pass
 
 
+def set_volume(vol):
+    """Set the user's music volume (0.0 to 1.0). Persisted."""
+    global _volume
+    _volume = max(0.0, min(1.0, vol))
+    prefs.set("music_vol", _volume)
+    _apply_mixer_volume()
+
+
 def get_volume():
     return _volume
+
+
+def set_level_volume(scale):
+    """Scale the sounding music by ``scale`` (0..1) without touching the
+    user's saved volume preference -- what a Song / Edit Song Trigger
+    adjusts. Reset to 1.0 by :func:`stop`."""
+    global _level_volume
+    _level_volume = max(0.0, min(1.0, float(scale)))
+    _apply_mixer_volume()
+
+
+def get_level_volume():
+    return _level_volume
 
 
 def set_enabled(val):
@@ -248,10 +275,27 @@ def is_muted():
     return not _enabled
 
 
-def play_track(index=0, loops=-1, start_sec=0.0):
+def _start_stream(loops, start_sec=0.0, fade_ms=0):
+    """Start the already-loaded stream, honouring an optional seek and
+    fade-in. Shared by both file playback paths so the seek fallback
+    below exists once rather than twice."""
+    if start_sec and start_sec > 0.0:
+        try:
+            pygame.mixer.music.play(loops, start=float(start_sec),
+                                    fade_ms=int(fade_ms))
+            return
+        except (pygame.error, TypeError):
+            # Some formats / platforms refuse `start` — fall back to
+            # playing from 0 rather than going silent.
+            pass
+    pygame.mixer.music.play(loops, fade_ms=int(fade_ms))
+
+
+def play_track(index=0, loops=-1, start_sec=0.0, fade_ms=0):
     """Play a track by index. loops=-1 means loop forever. ``start_sec``
     seeks into the track before playback — only supported on file
-    tracks; generated chiptunes ignore the offset."""
+    tracks; generated chiptunes ignore the offset. ``fade_ms`` ramps the
+    volume up from silence (pygame's own fade-in)."""
     global _current_track
     if not _initialized:
         init()
@@ -264,23 +308,15 @@ def play_track(index=0, loops=-1, start_sec=0.0):
     try:
         if track["type"] == "file":
             pygame.mixer.music.load(track["path"])
-            pygame.mixer.music.set_volume(_volume)
-            if start_sec and start_sec > 0.0:
-                try:
-                    pygame.mixer.music.play(loops, start=float(start_sec))
-                except (pygame.error, TypeError):
-                    # Some formats / platforms refuse `start` — fall back
-                    # to playing from 0 rather than going silent.
-                    pygame.mixer.music.play(loops)
-            else:
-                pygame.mixer.music.play(loops)
+            _apply_mixer_volume()
+            _start_stream(loops, start_sec, fade_ms)
         elif track["type"] == "generated":
-            _play_generated(track["seed"], loops)
+            _play_generated(track["seed"], loops, fade_ms)
     except Exception:
         pass
 
 
-def play_file(filename, loops=-1, start_sec=0.0):
+def play_file(filename, loops=-1, start_sec=0.0, fade_ms=0):
     """Play a track by its filename. Returns True if found and started.
     ``start_sec`` seeks into the file (playtest-from-cursor uses this to
     keep the music in sync with the level position)."""
@@ -288,7 +324,7 @@ def play_file(filename, loops=-1, start_sec=0.0):
         return False
     idx = track_index_by_file(filename)
     if idx is not None:
-        play_track(idx, loops, start_sec=start_sec)
+        play_track(idx, loops, start_sec=start_sec, fade_ms=fade_ms)
         return True
     # Try direct path in the bundled or user music dir.
     path = None
@@ -302,21 +338,15 @@ def play_file(filename, loops=-1, start_sec=0.0):
         _current_track = None
         try:
             pygame.mixer.music.load(path)
-            pygame.mixer.music.set_volume(_volume)
-            if start_sec and start_sec > 0.0:
-                try:
-                    pygame.mixer.music.play(loops, start=float(start_sec))
-                except (pygame.error, TypeError):
-                    pygame.mixer.music.play(loops)
-            else:
-                pygame.mixer.music.play(loops)
+            _apply_mixer_volume()
+            _start_stream(loops, start_sec, fade_ms)
             return True
         except Exception:
             return False
     return False
 
 
-def _play_generated(seed, loops=-1):
+def _play_generated(seed, loops=-1, fade_ms=0):
     """Generate and play a simple chiptune track using raw audio."""
     try:
         rng = random.Random(seed)
@@ -388,8 +418,8 @@ def _play_generated(seed, loops=-1):
             buf.write(struct.pack('<h', max(-32768, min(32767, s))))
         buf.seek(0)
         pygame.mixer.music.load(buf, "wav")
-        pygame.mixer.music.set_volume(_volume)
-        pygame.mixer.music.play(loops)
+        _apply_mixer_volume()
+        pygame.mixer.music.play(loops, fade_ms=int(fade_ms))
     except Exception:
         pass
 
@@ -403,13 +433,15 @@ def fadeout(ms=1000):
 
 
 def stop():
-    """Stop music playback."""
-    global _current_track
+    """Stop music playback, and drop any level-owned volume scaling so
+    the next track starts at the user's own volume."""
+    global _current_track, _level_volume
     try:
         pygame.mixer.music.stop()
     except Exception:
         pass
     _current_track = None
+    _level_volume = 1.0
 
 
 def pause():

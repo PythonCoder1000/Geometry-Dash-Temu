@@ -9,13 +9,14 @@ from ..constants import (
     T_BLOCK, T_SLAB, T_SLOPE, T_SPIKE, T_HALF_SPIKE, T_SAW, T_END,
     T_MOVE_TRIGGER, T_CAMERA_TRIGGER, T_MODE_DUAL, T_ROTATE_TRIGGER,
     T_FOLLOW_TRIGGER, SOLID_HITBOX_FRACTION, TELEPORT_LINK_TYPES, PX_PER_UNIT,
+    TRIGGER_TYPES, Z_LAYER_INDEX, T_SWAP_TRIGGER,
 )
-from ..graphics import draw_bg, draw_obj, draw_end_wall
+from ..graphics import draw_bg, draw_obj, draw_end_wall, sprite_extent
 from ..geometry import (
     obj_scale, spike_hitboxes, saw_hitbox, cell_rect, slab_rect, slope_polygon,
 )
-from ..levels import get_group_id
-from ..objects import active_start
+from ..levels import get_group_id, get_groups
+from ..objects import active_start, get_z_layer, get_z_order
 from ..jump_predictor import find_probe, predict, draw_overlay
 from ..physics import PhysicsParams
 from ..play import x_at_time, real_time_to_x
@@ -87,7 +88,12 @@ def render_canvas(screen, st, stars, mountains):
     # Several Start Pos objects may sit in a level; only one spawns the
     # player, so it gets a ring the inactive ones do not have.
     live_start = active_start(st.objects)
-    objs = sorted(st.objects, key=lambda o: (o.get("layer", 0), o.get("y", 0), o.get("x", 0)))
+    # Draw order mirrors real gameplay: Z-Layer first, then Z-Order,
+    # falling back to the Editor Layer / y / x tie-breaks this canvas
+    # always used pre-Z-Layer (so untouched levels look identical).
+    objs = sorted(st.objects, key=lambda o: (
+        Z_LAYER_INDEX[get_z_layer(o)], get_z_order(o),
+        o.get("layer", 0), o.get("y", 0), o.get("x", 0)))
     for o in objs:
         if not _in_view(o, left, right, top, bot):
             continue
@@ -130,14 +136,55 @@ def _center(st, gx, gy):
     return gx * e - st.cam_x + e // 2, gy * e - st.cam_y + e // 2
 
 
+# Every group field a trigger's target(s) can be spelled with, in the
+# order _resolve_targets (player/triggers.py) reads them -- mirrored here
+# so the editor draws a line for a group id however it got there (Link
+# tool oids, or a group id typed straight into the panel).
+_GROUP_TARGET_KEYS = ("target_group", "target_group2", "target_group3",
+                     "target_group4")
+
+
+def _resolve_link_targets(o, by_oid, by_group):
+    """Same resolution order as TriggerMixin._resolve_targets, for the
+    editor's link-line overlay."""
+    seen = set()
+    out = []
+    for oid in (o.get("target_oids") or ()):
+        if oid and oid not in seen:
+            tgt = by_oid.get(oid)
+            if tgt is not None:
+                seen.add(oid)
+                out.append(tgt)
+    single = o.get("target_oid")
+    if single and single not in seen:
+        tgt = by_oid.get(single)
+        if tgt is not None:
+            seen.add(single)
+            out.append(tgt)
+    for key in _GROUP_TARGET_KEYS:
+        group = o.get(key)
+        if not group:
+            continue
+        for tgt in by_group.get(group, ()):
+            toid = tgt.get("oid")
+            if toid is None:
+                out.append(tgt)
+            elif toid not in seen:
+                seen.add(toid)
+                out.append(tgt)
+    return out
+
+
 def _render_trigger_links(screen, st):
     by_oid = {o["oid"]: o for o in st.objects if o.get("oid")}
+    by_group = {}
+    for o in st.objects:
+        for g in get_groups(o):
+            by_group.setdefault(g, []).append(o)
     for o in st.objects:
         t = o["t"]
-        if t not in (T_MOVE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER):
-            continue
-        sx, sy = _center(st, o["x"], o["y"])
         if t == T_FOLLOW_TRIGGER:
+            sx, sy = _center(st, o["x"], o["y"])
             src = by_oid.get(o.get("source_oid"))
             tgt = by_oid.get(o.get("target_oid"))
             if src:
@@ -145,13 +192,22 @@ def _render_trigger_links(screen, st):
             if tgt and not o.get("follow_player"):
                 pygame.draw.line(screen, (120, 220, 200), (sx, sy), _center(st, tgt["x"], tgt["y"]), 1)
             continue
-        oids = o.get("target_oids") or ([o["target_oid"]] if o.get("target_oid") else [])
-        col = (200, 150, 255) if t == T_MOVE_TRIGGER else (255, 170, 200)
+        if t not in TRIGGER_TYPES:
+            continue
+        targets = _resolve_link_targets(o, by_oid, by_group)
+        if not targets:
+            continue
+        sx, sy = _center(st, o["x"], o["y"])
+        if t == T_MOVE_TRIGGER:
+            col = (200, 150, 255)
+        elif t == T_ROTATE_TRIGGER:
+            col = (255, 170, 200)
+        elif t == T_SWAP_TRIGGER:
+            col = (120, 220, 200)
+        else:
+            col = (150, 200, 255)
         first = None
-        for oid in oids:
-            tgt = by_oid.get(oid)
-            if tgt is None:
-                continue
+        for tgt in targets:
             first = first or tgt
             pygame.draw.line(screen, col, (sx, sy), _center(st, tgt["x"], tgt["y"]), 1)
         if t == T_MOVE_TRIGGER and first is not None:
@@ -393,6 +449,23 @@ def render_marquee(screen, start, mpos):
         pygame.draw.rect(screen, (120, 255, 140), rr, 1)
 
 
+def _ghost_surface(t, e, alpha=130):
+    """A translucent scratch surface big enough for ``t``'s sprite.
+
+    Returns it with the offset from the cell's top-left to the surface's,
+    which is negative for the real-GD art that overhangs its cell — a
+    plain ``e`` x ``e`` ghost would crop a portal to a third of itself.
+    Whole-surface alpha is why these cannot just be drawn onto the screen.
+    """
+    w, h = sprite_extent(t, e)
+    # Rotation grows the footprint; the diagonal always covers it.
+    span = int(math.ceil(math.hypot(w, h)))
+    ghost = pygame.Surface((span, span), pygame.SRCALPHA)
+    ghost.set_alpha(alpha)
+    off = -(span - e) // 2
+    return ghost, off, off
+
+
 def render_cursor(screen, st, mpos):
     """Ghost preview under the cursor for the active mode / tool."""
     e = st.eff_cell
@@ -402,10 +475,10 @@ def render_cursor(screen, st, mpos):
         _render_stamp_preview(screen, st, gx, gy)
         return
     if st.mode == MODE_BUILD:
-        ghost = pygame.Surface((e, e), pygame.SRCALPHA)
-        ghost.set_alpha(130)
-        draw_obj(ghost, st.selected_type, 0, 0, e, st.pulse, st.rotation)
-        screen.blit(ghost, (sx, sy))
+        ghost, gx_off, gy_off = _ghost_surface(st.selected_type, e)
+        draw_obj(ghost, st.selected_type, -gx_off, -gy_off, e, st.pulse,
+                 st.rotation)
+        screen.blit(ghost, (sx + gx_off, sy + gy_off))
         pygame.draw.rect(screen, C_WHITE, (sx, sy, e, e), 1)
     elif st.mode == MODE_DELETE:
         red = (255, 80, 80)
@@ -439,10 +512,10 @@ def _render_stamp_preview(screen, st, gx, gy):
     for so in stamp:
         cx = (gx + so["x"] - min_x) * e - st.cam_x
         cy = (gy + so["y"] - min_y) * e - st.cam_y
-        ghost = pygame.Surface((e, e), pygame.SRCALPHA)
-        ghost.set_alpha(140)
-        draw_obj(ghost, so["t"], 0, 0, e, st.pulse, so.get("r", 0), scale=obj_scale(so))
-        screen.blit(ghost, (cx, cy))
+        ghost, gx_off, gy_off = _ghost_surface(so["t"], e, alpha=140)
+        draw_obj(ghost, so["t"], -gx_off, -gy_off, e, st.pulse, so.get("r", 0),
+                 scale=obj_scale(so))
+        screen.blit(ghost, (cx + gx_off, cy + gy_off))
     sx, sy = st.cell_to_screen(gx, gy)
     pygame.draw.rect(screen, (160, 220, 255),
                      (sx, sy, (max(xs) - min_x + 1) * e, (max(ys) - min_y + 1) * e), 1)

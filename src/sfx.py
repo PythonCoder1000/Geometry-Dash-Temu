@@ -161,6 +161,24 @@ def _gen_gravity():
     return _make_wav(samples)
 
 
+# The bundled sound library, as ``{name: generator}``. Module level (not
+# a local inside init()) because the names are also the authoring
+# vocabulary of the SFX Trigger family -- objects.py builds its ``sfx``
+# choice Field from SOUND_NAMES, so the editor can never offer a sound
+# this module cannot play.
+SOUND_GENERATORS = {
+    "click": _gen_click,
+    "bot_click": _gen_bot_click,
+    "orb": _gen_orb,
+    "death": _gen_death,
+    "practice_checkpoint": _gen_checkpoint,
+    "win": _gen_win,
+    "pad": _gen_pad,
+    "gravity": _gen_gravity,
+}
+SOUND_NAMES = tuple(SOUND_GENERATORS)
+
+
 def init():
     """Generate and cache all sound effects."""
     global _initialized, _sounds, _enabled
@@ -173,17 +191,7 @@ def init():
         pass
     _initialized = True
     _enabled = not bool(prefs.get("sfx_muted", False))
-    generators = {
-        "click": _gen_click,
-        "bot_click": _gen_bot_click,
-        "orb": _gen_orb,
-        "death": _gen_death,
-        "practice_checkpoint": _gen_checkpoint,
-        "win": _gen_win,
-        "pad": _gen_pad,
-        "gravity": _gen_gravity,
-    }
-    for name, gen in generators.items():
+    for name, gen in SOUND_GENERATORS.items():
         try:
             wav_buf = gen()
             _sounds[name] = pygame.mixer.Sound(wav_buf)
@@ -191,21 +199,56 @@ def init():
             pass
 
 
-def play(name, volume=0.5):
+def _scaled_volume(volume):
+    """A per-sound weight (0..1) scaled by the user's master SFX volume,
+    so the Settings slider affects every effect immediately."""
+    master = float(prefs.get("sfx_vol", 0.5))
+    master = max(0.0, min(1.0, master))
+    return max(0.0, min(1.0, float(volume))) * master
+
+
+def play(name, volume=0.5, loops=0):
     """Play a named sound effect.
 
-    The supplied `volume` is treated as a per-sound weight (0..1) and is
-    further scaled by the user's master SFX volume from prefs, so adjusting
-    the slider in Settings affects every effect immediately.
+    ``loops`` follows pygame's convention: 0 plays once, -1 repeats until
+    stopped. Returns the ``pygame.mixer.Channel`` the sound landed on, or
+    None when SFX are muted/uninitialised, the name is unknown, or every
+    mixer channel is busy -- the SFX Trigger family keys its live
+    instances off that handle, and every caller here must cope with it
+    being absent under a dummy audio driver.
     """
     if not _enabled or not _initialized:
-        return
+        return None
     snd = _sounds.get(name)
-    if snd:
-        master = float(prefs.get("sfx_vol", 0.5))
-        master = max(0.0, min(1.0, master))
-        snd.set_volume(max(0.0, min(1.0, volume)) * master)
-        snd.play()
+    if snd is None:
+        return None
+    try:
+        snd.set_volume(_scaled_volume(volume))
+        return snd.play(loops)
+    except Exception:
+        return None
+
+
+def set_channel_volume(channel, volume):
+    """Re-scale a playing channel (from :func:`play`) through the same
+    master-volume weighting. Safe on None / a finished channel."""
+    if channel is None:
+        return
+    try:
+        channel.set_volume(_scaled_volume(volume))
+    except Exception:
+        pass
+
+
+def stop_channel(channel):
+    """Stop a channel returned by :func:`play`. Safe on None / a channel
+    that already finished on its own."""
+    if channel is None:
+        return
+    try:
+        channel.stop()
+    except Exception:
+        pass
 
 
 def set_enabled(val, persist=True):

@@ -19,7 +19,7 @@ from typing import NamedTuple
 from ..constants import (
     UNITS_PER_BLOCK, PLAYER_SIZE_UNITS as PLAYER_SIZE, ORB_TYPES,
     T_TELEPORT_PORTAL, PHYSICS_TPS,
-    MODE_CUBE, MODE_SHIP, MODE_WAVE, MODE_UFO, MODE_ROBOT, px_to_units,
+    MODE_CUBE, MODE_SHIP, MODE_WAVE, MODE_UFO, MODE_ROBOT,
 )
 
 # ``passed`` entries for these types gate a real future action (a
@@ -58,6 +58,12 @@ class SnapVals(NamedTuple):
     wave_vy_smooth: float = 0.0
     time_warp: float = 1.0
     jump_block_armed: bool = False
+    # Checkpoint 6 (deep-research-report.md, "Gameplay, camera, UI, and
+    # environment"): which way gameplay runs (+1 / -1 -- see
+    # Player.set_gameplay_direction). Defaulted, like every field added
+    # after the original tuple, so older on-disk caches still load; a
+    # level with no Reverse / Gameplay Rotation trigger never leaves 1.
+    move_dir: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -77,10 +83,19 @@ class SimPlayer(Player):
     __slots__ = (
         "_grid_ox", "_grid_oy", "_grid_w", "_grid_h",
         "_grid_arr", "_trigger_grid_arr",
-        "_obj_index",
+        "_obj_index", "_displaced_oids",
     )
 
     _GRID_MARGIN = 50
+
+    # A search replays the level thousands of times per solve, so the
+    # Checkpoint 5 audio triggers must not reach the mixer here: a Song
+    # Trigger would reload the track on every replay and an SFX Trigger
+    # would fire a sound per candidate input. The triggers still run and
+    # still record their live state (see TriggerMixin's own comment), so
+    # the simulation stays identical to real play -- only the output is
+    # silenced.
+    audio_output_enabled = False
 
     def __init__(self, objects, params=None):
         self._init_grid(objects)
@@ -95,6 +110,14 @@ class SimPlayer(Player):
         self._nearby_cache_result = []
         self._nearby_trigger_cache_key = None
         self._nearby_trigger_cache_result = []
+        # Mirrors ``_ever_moved`` but holds only objects CURRENTLY away
+        # from their origin cell (kept in sync by ``_set_object_pos`` and
+        # ``reset``/``restore`` below), so snapshot/restore/dedup can
+        # scan just what actually moved instead of every object a move
+        # trigger has ever touched this session — see ``_set_object_pos``
+        # for why that distinction matters on long searches. ``reset()``
+        # (called from ``super().__init__()``) sets the real value.
+        self._displaced_oids = set()
         super().__init__(objects, params=params)
         # Solver probe sees bot-only objects by default — that's the
         # whole point of the "bot only" toggle: the bot must reason
@@ -102,6 +125,23 @@ class SimPlayer(Player):
         # through it. Must be set *after* super().__init__() /
         # reset(), which otherwise forces this back to False.
         self._bot_visibility = True
+
+    def reset(self):
+        super().reset()
+        self._displaced_oids = set()
+
+    def _set_object_pos(self, obj, fx, fy, final=False):
+        super()._set_object_pos(obj, fx, fy, final=final)
+        oid = self._oid_index[id(obj)]
+        ox = obj.get("_orig_x")
+        oy = obj.get("_orig_y")
+        displaced = (ox is None or oy is None
+                     or obj["x"] != ox or obj["y"] != oy
+                     or "_fx" in obj or "_fy" in obj)
+        if displaced:
+            self._displaced_oids.add(oid)
+        else:
+            self._displaced_oids.discard(oid)
 
     def _init_grid(self, objects):
         if not objects:
@@ -353,6 +393,7 @@ def snapshot(player):
         player.wave_vy_smooth,
         player.time_warp,
         player._jump_block_armed,
+        player.move_dir,
     )
     passed = frozenset(player.passed)
     anims = player.move_animations
@@ -381,23 +422,40 @@ def snapshot(player):
     # so two states with the same world layout collapse to one
     # dedup key regardless of history.
     obj_pos_list = []
-    ever_moved = getattr(player, "_ever_moved", None)
-    if ever_moved:
-        for oid, o in ever_moved.items():
-            ox = o.get("_orig_x")
-            oy = o.get("_orig_y")
-            displaced = (ox is None or oy is None
-                         or o["x"] != ox or o["y"] != oy
-                         or "_fx" in o or "_fy" in o)
-            if displaced:
+    displaced_oids = getattr(player, "_displaced_oids", None)
+    if displaced_oids is not None:
+        # SimPlayer keeps this set exactly in sync with "currently
+        # displaced" (see _set_object_pos / restore), so no recheck is
+        # needed here — just look each one up, instead of rescanning
+        # every object a move trigger has ever touched this session.
+        obj_index = getattr(player, "_obj_index", None)
+        ever_moved = getattr(player, "_ever_moved", None)
+        lookup = obj_index if obj_index is not None else ever_moved
+        if lookup is not None:
+            for oid in displaced_oids:
+                o = lookup.get(oid)
+                if o is None:
+                    continue
                 obj_pos_list.append((oid, o['x'], o['y'],
                                      o.get('_fx'), o.get('_fy')))
     else:
-        # Fallback for callers that don't populate _ever_moved.
-        for i, o in enumerate(player.objects):
-            if '_fx' in o or '_fy' in o:
-                obj_pos_list.append((i, o['x'], o['y'],
-                                     o.get('_fx'), o.get('_fy')))
+        ever_moved = getattr(player, "_ever_moved", None)
+        if ever_moved:
+            for oid, o in ever_moved.items():
+                ox = o.get("_orig_x")
+                oy = o.get("_orig_y")
+                displaced = (ox is None or oy is None
+                             or o["x"] != ox or o["y"] != oy
+                             or "_fx" in o or "_fy" in o)
+                if displaced:
+                    obj_pos_list.append((oid, o['x'], o['y'],
+                                         o.get('_fx'), o.get('_fy')))
+        else:
+            # Fallback for callers that don't populate _ever_moved.
+            for i, o in enumerate(player.objects):
+                if '_fx' in o or '_fy' in o:
+                    obj_pos_list.append((i, o['x'], o['y'],
+                                         o.get('_fx'), o.get('_fy')))
     obj_pos = tuple(obj_pos_list)
     m = player.mirror
     if m is None:
@@ -467,6 +525,10 @@ def restore(player, snap):
         player._jump_block_armed = bool(vals[27])
     else:
         player._jump_block_armed = False
+    if len(vals) >= 29:
+        player.move_dir = int(vals[28])
+    else:
+        player.move_dir = 1
     player.passed = set(passed)
     player.held_orbs = set(held_orbs)
     player.mirror_passed = set(mirror_passed)
@@ -495,22 +557,43 @@ def restore(player, snap):
     # a 342-object level). _spatial_rebucket only touches the object
     # that actually moved, so call it per-object here instead — same
     # fix as SimPlayer._spatial_rebucket for _step_move_animations.
-    ever_moved = getattr(player, "_ever_moved", None)
-    if ever_moved:
-        snap_oids = {entry[0] for entry in obj_pos} if obj_pos else ()
-        for oid, o in ever_moved.items():
-            if oid in snap_oids:
-                continue
-            ox = o.get("_orig_x")
-            if ox is None:
-                continue
-            oy = o["_orig_y"]
-            if o["x"] != ox or o["y"] != oy or "_fx" in o or "_fy" in o:
+    snap_oids = {entry[0] for entry in obj_pos} if obj_pos else set()
+    displaced_oids = getattr(player, "_displaced_oids", None)
+    if displaced_oids is not None:
+        # ``_displaced_oids`` only ever holds objects presently away
+        # from origin, so this is exactly the reset candidates — no
+        # need to walk the (much larger, monotonically growing)
+        # ``_ever_moved`` set of everything a trigger has ever touched.
+        obj_index = getattr(player, "_obj_index", None)
+        if obj_index is not None:
+            for oid in displaced_oids - snap_oids:
+                o = obj_index.get(oid)
+                if o is None:
+                    continue
+                ox = o.get("_orig_x")
+                if ox is None:
+                    continue
                 o["x"] = ox
-                o["y"] = oy
+                o["y"] = o["_orig_y"]
                 o.pop("_fx", None)
                 o.pop("_fy", None)
                 player._spatial_rebucket(o)
+    else:
+        ever_moved = getattr(player, "_ever_moved", None)
+        if ever_moved:
+            for oid, o in ever_moved.items():
+                if oid in snap_oids:
+                    continue
+                ox = o.get("_orig_x")
+                if ox is None:
+                    continue
+                oy = o["_orig_y"]
+                if o["x"] != ox or o["y"] != oy or "_fx" in o or "_fy" in o:
+                    o["x"] = ox
+                    o["y"] = oy
+                    o.pop("_fx", None)
+                    o.pop("_fy", None)
+                    player._spatial_rebucket(o)
     if obj_pos:
         obj_index = getattr(player, "_obj_index", None)
         if obj_index is None:
@@ -529,6 +612,12 @@ def restore(player, snap):
             else:
                 o.pop('_fy', None)
             player._spatial_rebucket(o)
+    if displaced_oids is not None:
+        # Authoritative: the snapshot's obj_pos already only ever lists
+        # genuinely-displaced entries (see snapshot()'s filter), so this
+        # is exactly the restored state's displaced set regardless of
+        # what it was before restore() ran.
+        player._displaced_oids = set(snap_oids)
     if mirror is None:
         player.mirror = None
     else:
@@ -554,13 +643,28 @@ def restore(player, snap):
             "on_ground": bool(mog), "angle": float(mang),
             "alive": bool(malive),
             "mode": mmode,
-            "size": int(msize),
+            # float, not int: §3.2 gives Spider a 27.5 / 16.5 body, so an
+            # int() here silently truncated the restored mirror to 27 / 16
+            # and desynced a replay from the run that produced it.
+            "size": float(msize),
             "flight_budget": int(mfb),
             "thrust_disabled": bool(mtd),
         }
 
 
 _CONTINUOUS_Y_MODES = (MODE_SHIP, MODE_WAVE, MODE_UFO, MODE_ROBOT)
+
+# Search-dedup granularity, in GD units: two states whose y / vy land in
+# the same bucket collapse to one node. The flying modes get a finer
+# bucket because their y is continuous rather than snapping to surfaces.
+# Purely a completeness/speed tradeoff, not a physics quantity — but it
+# is measured against unit-space y, so it must be stated in units (it
+# used to be a px literal, which retuned the search whenever the render
+# scale moved).
+DEDUP_Y_BUCKET_UNITS = 1.5
+DEDUP_VY_BUCKET_UNITS = 0.6
+DEDUP_Y_BUCKET_SMOOTH_UNITS = 0.9
+DEDUP_VY_BUCKET_SMOOTH_UNITS = 0.45
 
 
 def dedup_key(snap):
@@ -587,6 +691,7 @@ def dedup_key(snap):
         mirror_input_buffer = vals.mirror_input_buffer
         size = vals.size
         move_speed = vals.move_speed
+        move_dir = vals.move_dir
     else:
         mode = vals[9]
         y = vals[1]
@@ -599,12 +704,14 @@ def dedup_key(snap):
         mirror_input_buffer = vals[19]
         size = vals[20]
         move_speed = vals[10]
+        # Legacy plain-tuple snaps predate the field entirely.
+        move_dir = vals[28] if len(vals) > 28 else 1
     if mode in _CONTINUOUS_Y_MODES:
-        y_bucket = round(y / px_to_units(1.5))
-        vy_bucket = round(vy / px_to_units(0.75))
+        y_bucket = round(y / DEDUP_Y_BUCKET_SMOOTH_UNITS)
+        vy_bucket = round(vy / DEDUP_VY_BUCKET_SMOOTH_UNITS)
     else:
-        y_bucket = round(y / px_to_units(2.5))
-        vy_bucket = round(vy / px_to_units(1.0))
+        y_bucket = round(y / DEDUP_Y_BUCKET_UNITS)
+        vy_bucket = round(vy / DEDUP_VY_BUCKET_UNITS)
     # Hash active animation frames + moved-object positions into the
     # dedup key. Empty tuples (no movement) collapse to a no-op.
     anims_t = snap[2] if len(snap) > 2 else ()
@@ -644,7 +751,7 @@ def dedup_key(snap):
         1 if input_buffer > 0 else 0,
         1 if dash_timer > 0 else 0,
         1 if teleport_cooldown > 0 else 0,
-        int(size), round(move_speed, 4),
+        int(size), round(move_speed, 4), move_dir,
         anim_key, obj_pos_key, passed_orbs,
     )
     mirror = snap[4] if len(snap) > 4 else None
@@ -662,7 +769,8 @@ def dedup_key(snap):
         (my, mvy, _mgrav, _mog, _mang, malive, mmode, msize,
          _mfb, _mtd) = mirror
     mirror_buf = 1 if mirror_input_buffer > 0 else 0
-    return base + (round(my / px_to_units(2.5)), round(mvy / px_to_units(1.0)),
+    return base + (round(my / DEDUP_Y_BUCKET_UNITS),
+                   round(mvy / DEDUP_VY_BUCKET_UNITS),
                    1 if malive else 0, mmode, msize,
                    _mgrav, 1 if _mog else 0, mirror_buf)
 
@@ -677,11 +785,11 @@ def player_dedup_key(player):
     y = player.y
     vy = player.vy
     if mode in _CONTINUOUS_Y_MODES:
-        y_bucket = round(y / px_to_units(1.5))
-        vy_bucket = round(vy / px_to_units(0.75))
+        y_bucket = round(y / DEDUP_Y_BUCKET_SMOOTH_UNITS)
+        vy_bucket = round(vy / DEDUP_VY_BUCKET_SMOOTH_UNITS)
     else:
-        y_bucket = round(y / px_to_units(2.5))
-        vy_bucket = round(vy / px_to_units(1.0))
+        y_bucket = round(y / DEDUP_Y_BUCKET_UNITS)
+        vy_bucket = round(vy / DEDUP_VY_BUCKET_UNITS)
     anims = player.move_animations
     if anims:
         oid_index = player._oid_index
@@ -694,20 +802,36 @@ def player_dedup_key(player):
     # "if _fx in o or _fy in o" filter dropped completed-animation
     # objects, producing dedup keys that didn't reflect the world
     # state and let A* collapse genuinely-different branches.
-    objs = getattr(player, "_ever_moved", None)
-    if objs:
+    displaced_oids = getattr(player, "_displaced_oids", None)
+    if displaced_oids is not None:
+        # Already exactly "currently displaced" (see _set_object_pos /
+        # restore) — no need to recheck each one against its origin, or
+        # to walk every object a trigger has ever touched this session.
         rows = []
-        for oid, o in objs.items():
-            ox = o.get("_orig_x")
-            oy = o.get("_orig_y")
-            displaced = (ox is None or oy is None
-                         or o["x"] != ox or o["y"] != oy
-                         or "_fx" in o or "_fy" in o)
-            if displaced:
-                rows.append((oid, int(o["x"]), int(o["y"])))
+        obj_index = getattr(player, "_obj_index", None)
+        objs = obj_index if obj_index is not None else getattr(
+            player, "_ever_moved", None)
+        if objs is not None:
+            for oid in displaced_oids:
+                o = objs.get(oid)
+                if o is not None:
+                    rows.append((oid, int(o["x"]), int(o["y"])))
         obj_pos_key = tuple(sorted(rows))
     else:
-        obj_pos_key = ()
+        objs = getattr(player, "_ever_moved", None)
+        if objs:
+            rows = []
+            for oid, o in objs.items():
+                ox = o.get("_orig_x")
+                oy = o.get("_orig_y")
+                displaced = (ox is None or oy is None
+                             or o["x"] != ox or o["y"] != oy
+                             or "_fx" in o or "_fy" in o)
+                if displaced:
+                    rows.append((oid, int(o["x"]), int(o["y"])))
+            obj_pos_key = tuple(sorted(rows))
+        else:
+            obj_pos_key = ()
     # See dedup_key's comment: a fired one-shot orb/portal has to be
     # part of the key or a backward teleport's destination can alias
     # with an earlier, shallower visit where the orb was still live.
@@ -719,7 +843,7 @@ def player_dedup_key(player):
         1 if player.input_buffer > 0 else 0,
         1 if player.dash_timer > 0 else 0,
         1 if player.teleport_cooldown > 0 else 0,
-        int(player.size), round(player.move_speed, 4),
+        int(player.size), round(player.move_speed, 4), player.move_dir,
         anim_key, obj_pos_key, passed_orbs,
     )
     m = player.mirror

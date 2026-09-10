@@ -52,7 +52,18 @@ def apply_display_mode():
     Called on startup and again whenever the Settings screen toggles
     fullscreen so the change takes effect immediately.
     """
-    flags = pygame.FULLSCREEN if settings.get_fullscreen() else 0
+    # SCALED is required alongside FULLSCREEN, not optional: a bare
+    # `pygame.FULLSCREEN` asks SDL for a real 1200x700 *video mode*, and
+    # pygame's own docs say that when "an exact match for the requested
+    # size cannot be made ... pygame will select the closest compatible
+    # match" — so on any desktop that has no 1200x700 mode (e.g. a
+    # 1512x982 Retina panel) the display mode changes and the image is
+    # stretched to fit, which is the blur. SCALED keeps the desktop mode
+    # and scales the 1200x700 logical surface onto it instead.
+    #
+    # Windowed mode is deliberately left unscaled: at exactly WIDTH x
+    # HEIGHT the scale is 1:1, so SCALED would only add a renderer hop.
+    flags = (pygame.FULLSCREEN | pygame.SCALED) if settings.get_fullscreen() else 0
     return pygame.display.set_mode((WIDTH, HEIGHT), flags)
 
 

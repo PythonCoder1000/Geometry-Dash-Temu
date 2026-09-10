@@ -39,6 +39,8 @@ from .constants import (
     T_CAMERA_TRIGGER, T_BG_TRIGGER, T_MOVE_TRIGGER, T_COLOR_TRIGGER,
     T_PULSE_TRIGGER, T_ROTATE_TRIGGER, T_FOLLOW_TRIGGER, T_TIME_WARP,
     T_BLACKOUT_TRIGGER,
+    T_GROUND_TRIGGER, T_MG_TRIGGER, T_BG_SPEED_TRIGGER, T_MG_SPEED_TRIGGER,
+    T_UI_TRIGGER, T_EVENT_TRIGGER, T_END_TRIGGER,
     T_JUMP_PREDICTOR, T_BOT_CHECKPOINT, T_DASH_STOP,
     T_ITEM_PICKUP, T_ITEM_COUNTER, T_JUMP_BLOCK, T_WAVE_BLOCK, T_BONK_BLOCK,
     T_KEYFRAME,
@@ -1105,52 +1107,67 @@ def _render_dash_stop(surf, s, frame_t):
         shadow=True)
 
 
-def _render_trigger(surf, s, t):
-    """Trigger plate — a colour-coded panel carrying a two-letter code.
+# A placed trigger's proportions, as fractions of the cell.  Taken from
+# how GD's own `edit_e*Btn` art is laid out: a white word across the top
+# third and a colour-coded disc filling the rest, over a TRANSPARENT
+# cell.  GD draws no plate, no border and no gloss behind either — that
+# is the whole reason its triggers read as editor annotation while a
+# filled glossy panel reads as something the player can touch.
+TRIGGER_LABEL_CY = 0.22       # centre of the caption
+TRIGGER_LABEL_H = 0.30        # caption cap height
+TRIGGER_BODY_CY = 0.63        # centre of the disc / glyph
+TRIGGER_BODY_R = 0.27         # disc radius
 
-    Kept schematic on purpose (letters, not iconography) so authors read
-    them as editor metadata, but given the same bevel/gloss/contour
-    finish as the real objects, and an inset dashed frame that no
-    gameplay object has.
+
+def _render_trigger(surf, s, t):
+    """Trigger marker in GD's editor grammar.
+
+    A colour-coded disc under a short white caption, on a transparent
+    cell — the layout GD uses for a placed trigger, reproduced with this
+    engine's own vector drawing rather than GD's baked bitmaps.
+
+    Going procedural rather than blitting `edit_e*Btn` is deliberate:
+    those frames cover only 47 of this engine's trigger types, they bake
+    GD's own English word into the pixels at GD's editor scale (so the
+    long ones overflow a 50 px cell), and they would drop the per-type
+    colour coding that is the only thing telling 70 types apart.  What
+    was actually un-GD-like about the old look was the CONVENTION — a
+    saturated, bevelled, glossy plate filling the cell — not the absence
+    of GD's textures, so that is what this changes.
     """
     col = TYPE_COLS.get(t, C_GRAY)
-    rect = pygame.Rect(5, 5, s - 10, s - 10)
-    radius = max(3, s // 12)
     w = max(2, s // 24)
-    draw_bevel_rect(surf, rect, col, radius=radius, outline=w)
-    draw_gloss(surf, rect.inflate(-s // 6, -s // 3), alpha=50)
-    # Dashed inset frame: the "this is an editor marker" cue.
-    inset = rect.inflate(-w * 3, -w * 3)
-    dash = max(2, s // 14)
-    dash_col = lighter(col, 90)
-    for x in range(inset.left, inset.right - dash, dash * 2):
-        pygame.draw.line(surf, dash_col, (x, inset.top), (x + dash, inset.top), 1)
-        pygame.draw.line(surf, dash_col, (x, inset.bottom),
-                         (x + dash, inset.bottom), 1)
-    for y in range(inset.top, inset.bottom - dash, dash * 2):
-        pygame.draw.line(surf, dash_col, (inset.left, y), (inset.left, y + dash), 1)
-        pygame.draw.line(surf, dash_col, (inset.right, y),
-                         (inset.right, y + dash), 1)
-    cx, cy = s // 2, s // 2
+    cx = s // 2
+    cy = int(s * TRIGGER_BODY_CY)
+    if t not in (T_CAMERA_TRIGGER, T_TIME_WARP):
+        # GD's colour disc, with a dark rim so a pale trigger colour
+        # still separates from a bright background.
+        r = int(s * TRIGGER_BODY_R)
+        pygame.draw.circle(surf, outline_col(col), (cx, cy), r + w)
+        pygame.draw.circle(surf, col, (cx, cy), r)
+        pygame.draw.circle(surf, lighter(col, 55), (cx, cy), r,
+                           max(1, w // 2))
     if t == T_CAMERA_TRIGGER:
         # Proportional to `s`: the old glyph used raw pixel offsets and
         # shrank to a few pixels once the sprite was downsampled.
-        body = pygame.Rect(cx - int(s * 0.20), cy - int(s * 0.13),
-                           int(s * 0.32), int(s * 0.26))
+        # Sized to carry the same visual weight as the colour disc the
+        # other triggers get, so a row of mixed triggers reads evenly.
+        body = pygame.Rect(cx - int(s * 0.24), cy - int(s * 0.13),
+                           int(s * 0.34), int(s * 0.26))
         pygame.draw.rect(surf, outline_col(col), body.inflate(w, w), 0,
                          border_radius=max(1, w))
         pygame.draw.rect(surf, C_WHITE, body, w, border_radius=max(1, w))
-        lens = [(body.right, cy - int(s * 0.09)),
-                (body.right + int(s * 0.12), cy - int(s * 0.15)),
-                (body.right + int(s * 0.12), cy + int(s * 0.15)),
-                (body.right, cy + int(s * 0.09))]
+        lens = [(body.right, cy - int(s * 0.08)),
+                (body.right + int(s * 0.13), cy - int(s * 0.15)),
+                (body.right + int(s * 0.13), cy + int(s * 0.15)),
+                (body.right, cy + int(s * 0.08))]
         draw_outlined_poly(surf, lens, C_WHITE, w, outline_col(col))
     elif t == T_TIME_WARP:
         # Stopwatch glyph: a circle (the dial) + two hands. The dial
         # outline reads as the "T" of time warp; the offset hands give
         # it a clock vibe so authors don't confuse it with the rotate
         # trigger (which is also circular).
-        r = max(4, s // 3)
+        r = max(4, int(s * TRIGGER_BODY_R * 0.85))
         pygame.draw.circle(surf, outline_col(col), (cx, cy), r, w + 2)
         pygame.draw.circle(surf, C_WHITE, (cx, cy), r, w)
         # Tick at the 12-o'clock position.
@@ -1159,17 +1176,35 @@ def _render_trigger(surf, s, t):
         _glyph_stroke(surf, C_WHITE, (cx, cy), (cx - r // 2, cy - r // 2), w)
         _glyph_stroke(surf, C_WHITE, (cx, cy), (cx + int(r * 0.7), cy), w)
         pygame.draw.circle(surf, outline_col(col), (cx, cy), max(1, w))
-    else:
-        label = {T_BG_TRIGGER: "BG", T_MOVE_TRIGGER: "MV",
-                 T_COLOR_TRIGGER: "CL", T_PULSE_TRIGGER: "PL",
-                 T_ROTATE_TRIGGER: "RT", T_FOLLOW_TRIGGER: "FL",
-                 T_BLACKOUT_TRIGGER: "BK"}.get(t)
-        if label is None:
-            # Keep newer/extended trigger types identifiable instead of
-            # displaying a confusing question mark in the editor.
-            words = str(t).replace("_trigger", "").split("_")
-            label = "".join(w[:1].upper() for w in words)[:4] or "TR"
-        txt(surf, label, cx, cy, max(10, s // 4), C_WHITE, True, shadow=True)
+    # The caption runs for EVERY trigger, glyph or disc — GD labels all of
+    # them, and it is the only thing separating types that share a colour.
+    txt(surf, _trigger_label(t), cx, int(s * TRIGGER_LABEL_CY),
+        max(10, int(s * TRIGGER_LABEL_H)), C_WHITE, True, shadow=True)
+
+
+def _trigger_label(t):
+    """The short caption a placed trigger carries.
+
+    Explicit two/three-letter codes where the derived initials would be
+    ambiguous -- "event_trigger" and "end_trigger" both derive to a bare
+    "E", and the scenery family derives to single letters that say
+    nothing.
+    """
+    label = {T_BG_TRIGGER: "BG", T_MOVE_TRIGGER: "MV",
+             T_COLOR_TRIGGER: "CL", T_PULSE_TRIGGER: "PL",
+             T_ROTATE_TRIGGER: "RT", T_FOLLOW_TRIGGER: "FL",
+             T_BLACKOUT_TRIGGER: "BK",
+             T_GROUND_TRIGGER: "GRD", T_MG_TRIGGER: "MG",
+             T_BG_SPEED_TRIGGER: "BGS", T_MG_SPEED_TRIGGER: "MGS",
+             T_UI_TRIGGER: "UI", T_EVENT_TRIGGER: "EVT",
+             T_END_TRIGGER: "END",
+             T_CAMERA_TRIGGER: "CAM", T_TIME_WARP: "TIME"}.get(t)
+    if label is None:
+        # Keep newer/extended trigger types identifiable instead of
+        # displaying a confusing question mark in the editor.
+        words = str(t).replace("_trigger", "").split("_")
+        label = "".join(w[:1].upper() for w in words)[:4] or "TR"
+    return label
 
 
 # ---- Dispatcher: render one sprite at a given size & frame -----------------
@@ -1677,7 +1712,7 @@ def sprite_extent(t, s=CELL, frame=0, variant=None):
 
 
 def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
-             scale=1.0, scale_y=None, alpha=255, fit_cell=False):
+             scale=1.0, scale_y=None, alpha=255, tint=None, fit_cell=False):
     """Blit the pre-rendered sprite image for this object type.
 
     ``(x, y)`` is the top-left of the object's grid cell.  The sprite is
@@ -1706,6 +1741,9 @@ def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
     When ``sx != sy`` the sprite is stretched non-uniformly via
     ``pygame.transform.scale``; the cached square sprite stays the
     canonical render so other zoom levels still hit the cache.
+
+    ``tint`` (Checkpoint 2's Area Tint) is an ``(r, g, b)`` multiply
+    colour, applied to the same copy for the same cache-safety reason.
     """
     # Visual rotation accepts any angle now (free rotation feature) —
     # only the collision helpers (slab_rect, spike_hitboxes,
@@ -1756,10 +1794,13 @@ def draw_obj(surf, t, x, y, s=CELL, pulse=0, rot=0, meta=None,
         # One transform.scale per blit — caches don't help here because
         # every sx/sy combination is unique.
         img = pygame.transform.scale(img, (sw, sh))
-    if alpha < 255:
+    if alpha < 255 or tint:
         if not scaled:
             img = img.copy()  # transform.scale already returned a copy
-        img.set_alpha(alpha)
+        if tint:
+            img.fill((*tint, 255), special_flags=pygame.BLEND_RGBA_MULT)
+        if alpha < 255:
+            img.set_alpha(alpha)
     if rot:
         rotated = pygame.transform.rotate(img, -rot)
         surf.blit(rotated, rotated.get_rect(center=(x + s / 2, y + s / 2)))
