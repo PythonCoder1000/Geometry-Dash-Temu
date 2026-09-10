@@ -13,31 +13,48 @@ import sys
 # Window / grid / timing
 # ---------------------------------------------------------------------------
 WIDTH, HEIGHT = 1200, 700
-# Internal editor/world cell.  Gameplay and level files are authored against
-# this stable value; presentation zoom is handled by the camera/editor.
-CELL = 50
 # Real GD units per editor block (verified live 2026-09-07 against the
 # Move Trigger's "Small Step" behavior: Small Step only changes the
 # trigger UI's input granularity, not the underlying scale, which is
-# always 30). This is the canonical world unit — see src/units.py and
-# docs/development/UNITS_REFACTOR.md. CELL above is a RENDER-ONLY
-# constant (px per block on screen at zoom 1); it must not be used by
-# physics/collision/bot code once that refactor is complete.
+# always 30). This is the canonical world unit.
+# Every physics/collision/trigger/bot length is stated in these units.
 UNITS_PER_BLOCK = 30.0
+
+# ---------------------------------------------------------------------------
+# Camera framing.
+#
+# GD is a cocos2d-x game whose design resolution is 480 x 320 applied with
+# ``ResolutionPolicy::FIXED_HEIGHT``, and its camera maps screen size to
+# world size 1:1 at zoom 1.  So 1 GD unit == 1 point, the VERTICAL field
+# of view is locked at 320 units (10.67 blocks) regardless of window
+# size, and the horizontal extent falls out of the display aspect ratio.
+# Corroborated independently by NamuWiki ("if the camera zoom is not set
+# separately, the height of the floor and ceiling is fixed to 10 blocks").
+# See docs/PHYSICS.md, "Camera framing".
+CAMERA_FOV_UNITS = 320.0
+# Pixels per block on screen at zoom 1 — a PURE RENDER constant, derived
+# from the FOV above and this window's height.  Nothing in the physics,
+# collision, trigger or bot path may read it (or PX_PER_UNIT below, or
+# anything derived from either): those paths state every length in GD
+# units directly, so the render scale can move without retuning them.
+#
+# Rounded to a whole pixel: sprites are baked at this size and the PNG
+# cache is keyed on it, and pygame surfaces are integer-sized, so a
+# fractional CELL would put an int() at every render call site and
+# reintroduce exactly the px/unit rounding this file just removed.  The
+# residual is 700 * 30 / 66 = 318.2 units of vertical FOV rather than
+# 320 — 0.6% tighter than the sourced figure.
+CELL = int(round(HEIGHT * UNITS_PER_BLOCK / CAMERA_FOV_UNITS))
 # Canonical physics tick rate. Physics bible Part 0 / §2.7: real GD
 # standardized its physics loop to 240 TPS in Update 2.2 (Dec 19, 2023);
 # this engine now matches. Every "per tick" constant below is expressed
-# in terms of PHYSICS_TPS (see VEL_PX_PER_TICK / GRAVITY's formulas), so
+# in terms of PHYSICS_TPS (see GRAVITY_UT / BASE_MOVE_SPEED_UT), so
 # most of them rescale automatically when this changes — the ones that
 # don't (BASE_MOVE_SPEED, INPUT_BUFFER_TICKS, and any literal frame count
 # elsewhere) are called out at their own definition. The renderer runs at
 # any FPS and interpolates between ticks (see play.PlaySession).
 FPS = 240
 PHYSICS_TPS = 240
-GROUND_Y = 550
-
-# Maximum motion (px) covered by a single inner collision substep.
-COLLISION_SUBSTEP_PX = 1.0
 
 # Two-hitbox model: the OUTER rect (full sprite size, rotated with the
 # player) triggers hazards / orbs / pads / triggers; the INNER rect (a
@@ -47,36 +64,61 @@ COLLISION_SUBSTEP_PX = 1.0
 # further down (after the mode constants they're keyed on).
 
 # ---------------------------------------------------------------------------
-# Player tunables (physics)
+# The render boundary.
 #
-# Calibration: docs/PHYSICS.md; archived research under docs/reference/.
-# The reference states
-# gamemode speeds in "Vels" (1 Vel = 60 GD units/second) and distances in
-# GD units (1 editor block = 30 units = one CELL on screen).  We convert
-# through this engine's existing px/CELL scale so every constant below is
-# auditable against the bible's numbers:
-#
-#     PX_PER_UNIT     = CELL / 30          (px per GD unit)
-#     VEL_PX_PER_TICK = 60 * PX_PER_UNIT / PHYSICS_TPS   (px/tick per 1 Vel)
-#
-# Horizontal and vertical quantities must use the SAME unit conversion.
-# Keeping the old 300 px/s scroll with GD jump velocities made arcs narrow.
+# PX_PER_UNIT and px_to_units are the ONLY px<->unit conversion in the
+# codebase (``geometry.py`` used to carry a second, independent copy).
+# They belong to rendering and to the two authoring surfaces that hand
+# the engine a genuine screen/world PIXEL — the editor's px-authored
+# jump-predictor nudge fields and its "test from cursor" spawn x — and
+# nothing else may use them.  A physics length routed through here would
+# silently change meaning whenever CELL moved.
 # ---------------------------------------------------------------------------
-PLAYER_SIZE = 44
-MINI_PLAYER_SIZE = 24
-
 PX_PER_UNIT = CELL / UNITS_PER_BLOCK
-VEL_PX_PER_TICK = 60.0 * PX_PER_UNIT / PHYSICS_TPS  # == PX_PER_UNIT at 60 TPS
-# Public: any px-space length/velocity/accel literal -> its GD-unit
-# equivalent (the tick-based integration means the same factor applies to
-# positions, velocities and accelerations alike). Used both to derive the
-# *_UT constants below and for one-off literal conversions in player/
-# collision code migrated to units.
 PX_TO_UNIT_RATIO = 1.0 / PX_PER_UNIT
 
 
 def px_to_units(v_px):
+    """A screen/world PIXEL length -> GD units at the current render scale."""
     return v_px * PX_TO_UNIT_RATIO
+
+
+# ---------------------------------------------------------------------------
+# Player tunables (physics)
+#
+# Calibration: docs/PHYSICS.md; archived research under docs/reference/.
+# The reference states gamemode speeds in "Vels" (1 Vel = 60 GD units/
+# second) and distances in GD units (1 editor block = 30 units).  Every
+# tunable below is therefore derived in GD units per tick FIRST, straight
+# from the reference's own numbers; the ``*_PX``-scale twins are the
+# derived ones (``value_ut * PX_PER_UNIT``), for render/HUD code only.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Player body size.
+#
+# Defined in GD units FIRST (the px twins are derived), because the size is
+# a physics quantity, not a render one: it decides what "a 2-block gap"
+# means, how tall a jump reads against the blocks it clears, and how many
+# body-lengths of world scroll past per second.
+#
+# Bible Sec 3.2: every box gamemode (Cube/Ship/Ball/UFO/Robot/Swing) has a
+# main "red" hitbox of exactly 30 units at normal size and 18 units in mini
+# — i.e. the player IS one full block, and mini is 0.6 of one.
+#
+# These were 44 px / 24 px (= 26.4 / 14.4 units, 0.88 / 0.48 blocks): px
+# literals inherited from the pre-GD-units prototype that the units cutover
+# converted by ratio instead of re-deriving from the bible. That left the
+# body 12% small against a world grid that IS in real GD units, so every
+# jump read ~12% higher and the world scrolled ~14% faster *relative to the
+# player* than real GD — and HITBOX_SOLID_FRACTION (whose entries are
+# literally bible_blue/bible_red, e.g. 9/30) silently produced a 7.92-unit
+# solid box instead of the bible's 9.
+# ---------------------------------------------------------------------------
+PLAYER_SIZE_UNITS = UNITS_PER_BLOCK          # 30 units = 1 block
+MINI_PLAYER_SIZE_UNITS = UNITS_PER_BLOCK * 0.6   # 18 units = 0.6 blocks
+PLAYER_SIZE = int(round(PLAYER_SIZE_UNITS * PX_PER_UNIT))
+MINI_PLAYER_SIZE = int(round(MINI_PLAYER_SIZE_UNITS * PX_PER_UNIT))
 
 # ---------------------------------------------------------------------------
 # Canonical GD-unit constants (units/second, units/second^2).
@@ -86,9 +128,9 @@ def px_to_units(v_px):
 # factor times 60^2. VEL_UNIT_PER_S below IS that "1 Vel", named for what
 # it actually is instead of leaving it as an inline literal. These _UPS /
 # _UPS2 constants are the ones player/collision/bot code should migrate
-# to (see docs/development/UNITS_REFACTOR.md); the legacy *_PX-scale names
-# further down are still derived from them so nothing else has to change
-# yet, and their numeric values are unchanged by this refactor.
+# to; the *_UT (units/tick) constants below are derived straight from
+# them, and the *_PX-scale names are in turn derived from the *_UT ones
+# for render/HUD code only.
 # ---------------------------------------------------------------------------
 VEL_UNIT_PER_S = 60.0  # 1 "Vel" (bible units)
 
@@ -102,42 +144,54 @@ def _accel_ups2(factor):
     return factor * VEL_UNIT_PER_S ** 2
 
 
-def _ups_to_px_per_tick(v_ups):
-    """GD units/second -> px/tick, at this engine's render/tick scale."""
-    return v_ups * PX_PER_UNIT / PHYSICS_TPS
+def _ups_to_units_per_tick(v_ups):
+    """GD units/second -> GD units/tick. No render scale involved."""
+    return v_ups / PHYSICS_TPS
 
 
-def _ups2_to_px_per_tick2(a_ups2):
-    """GD units/second^2 -> px/tick^2."""
-    return a_ups2 * PX_PER_UNIT / PHYSICS_TPS ** 2
+def _ups2_to_units_per_tick2(a_ups2):
+    """GD units/second^2 -> GD units/tick^2. No render scale involved."""
+    return a_ups2 / PHYSICS_TPS ** 2
+
+
+def _ut_to_px(v_ut):
+    """A GD-unit quantity -> its px twin, for render/HUD/menu code only."""
+    return v_ut * PX_PER_UNIT
 
 
 BASE_MOVE_SPEED_UPS = _vel_ups(5.193)
-BASE_MOVE_SPEED = _ups_to_px_per_tick(BASE_MOVE_SPEED_UPS)
+BASE_MOVE_SPEED_UT = _ups_to_units_per_tick(BASE_MOVE_SPEED_UPS)
+BASE_MOVE_SPEED = _ut_to_px(BASE_MOVE_SPEED_UT)
 
 # 0.216 velocity units per 240 Hz tick (reference §1.3). The old
 # 72 blocks/s² estimate contradicted that and produced a 3.5-block jump.
 GRAVITY_UPS2 = _accel_ups2(0.864)
-GRAVITY = _ups2_to_px_per_tick2(GRAVITY_UPS2)
+GRAVITY_UT = _ups2_to_units_per_tick2(GRAVITY_UPS2)
+GRAVITY = _ut_to_px(GRAVITY_UT)
 
 # Flying modes use 0.9582 base acceleration in updateJump's decompilation.
 # Ship's baseline ascent factor is 0.4; release depends on momentum.
 SHIP_GRAVITY_UPS2 = _accel_ups2(0.9582 * 0.4)
-SHIP_GRAVITY = _ups2_to_px_per_tick2(SHIP_GRAVITY_UPS2)
+SHIP_GRAVITY_UT = _ups2_to_units_per_tick2(SHIP_GRAVITY_UPS2)
+SHIP_GRAVITY = _ut_to_px(SHIP_GRAVITY_UT)
 SHIP_THRUST_UPS2 = SHIP_GRAVITY_UPS2 * 2.0
+SHIP_THRUST_UT = SHIP_GRAVITY_UT * 2.0
 SHIP_THRUST = SHIP_GRAVITY * 2.0
 
 # Cube jump velocity, 1x speed portal: bible §1.4 table, 11.18G.
 JUMP_FORCE_UPS = -_vel_ups(11.18)
-JUMP_FORCE = _ups_to_px_per_tick(JUMP_FORCE_UPS)
+JUMP_FORCE_UT = _ups_to_units_per_tick(JUMP_FORCE_UPS)
+JUMP_FORCE = _ut_to_px(JUMP_FORCE_UT)
 # Pads: no distinct bible figure (the bible documents gamemode click
 # velocities, not a separate pad table) — ratio to JUMP_FORCE preserved
 # from the pre-retune tuning (pads hit ~12% harder than the yellow orb).
 PAD_FORCE_UPS = JUMP_FORCE_UPS * 1.125
+PAD_FORCE_UT = JUMP_FORCE_UT * 1.125
 PAD_FORCE = JUMP_FORCE * 1.125
 # Ball click velocity, 1x speed: bible §1.4 / §1.3, "3.354G (3/10 of cube)".
 BALL_FLIP_FORCE_UPS = _vel_ups(3.354)
-BALL_FLIP_FORCE = _ups_to_px_per_tick(BALL_FLIP_FORCE_UPS)
+BALL_FLIP_FORCE_UT = _ups_to_units_per_tick(BALL_FLIP_FORCE_UPS)
+BALL_FLIP_FORCE = _ut_to_px(BALL_FLIP_FORCE_UT)
 DASH_SPEED = 16.0
 # Dash duration: not given numerically anywhere in the bible (only
 # qualitative orb-buffering behavior around dash orbs, §2.4). Also dead
@@ -161,14 +215,16 @@ PLAYER_START_GX = 3
 # value is now used for BOTH the grounded launch and the midair flap
 # (see player/core.py's _apply_mode_physics, MODE_UFO branch).
 UFO_JUMP_FORCE_UPS = -_vel_ups(7.0)
-UFO_JUMP_FORCE = _ups_to_px_per_tick(UFO_JUMP_FORCE_UPS)
+UFO_JUMP_FORCE_UT = _ups_to_units_per_tick(UFO_JUMP_FORCE_UPS)
+UFO_JUMP_FORCE = _ut_to_px(UFO_JUMP_FORCE_UT)
 SPIDER_TELEPORT_RANGE = 6  # cells (legacy; teleports are now unbounded)
 # Robot: bible §1.4, "Hold velocity 5.59G (1/2 of cube jump)... gravity
 # disabled while held." Repurposed from a per-tick thrust subtracted
 # against gravity into the fixed hold velocity itself (gravity is now
 # skipped entirely while the hold is active — see core.py).
 ROBOT_THRUST_UPS = _vel_ups(5.59)
-ROBOT_THRUST = _ups_to_px_per_tick(ROBOT_THRUST_UPS)
+ROBOT_THRUST_UT = _ups_to_units_per_tick(ROBOT_THRUST_UPS)
+ROBOT_THRUST = _ut_to_px(ROBOT_THRUST_UT)
 # The decompiled timer advances by dt/10 with dt in 60 Hz units:
 # its 1.5 limit represents 15/60 seconds, not 1.5 seconds.
 ROBOT_FLIGHT_SECONDS = 0.25
@@ -177,52 +233,97 @@ ROBOT_FLIGHT_SECONDS = 0.25
 # listed here (Wave has no gravity; Spider's fall is defined by its
 # instant teleport, not acceleration, per §1.4) don't use a fall clamp.
 MAX_FALL_BOX_UPS = _vel_ups(15.0)           # Cube / Ball / Robot / Spider: -15G
-MAX_FALL_BOX = _ups_to_px_per_tick(MAX_FALL_BOX_UPS)
+MAX_FALL_BOX_UT = _ups_to_units_per_tick(MAX_FALL_BOX_UPS)
+MAX_FALL_BOX = _ut_to_px(MAX_FALL_BOX_UT)
 MAX_FALL_UFO_UPS = _vel_ups(6.4)            # UFO: -6.4G
-MAX_FALL_UFO = _ups_to_px_per_tick(MAX_FALL_UFO_UPS)
+MAX_FALL_UFO_UT = _ups_to_units_per_tick(MAX_FALL_UFO_UPS)
+MAX_FALL_UFO = _ut_to_px(MAX_FALL_UFO_UT)
 MAX_RISE_UFO_UPS = _vel_ups(8.0)
-MAX_RISE_UFO = _ups_to_px_per_tick(MAX_RISE_UFO_UPS)
+MAX_RISE_UFO_UT = _ups_to_units_per_tick(MAX_RISE_UFO_UPS)
+MAX_RISE_UFO = _ut_to_px(MAX_RISE_UFO_UT)
 MAX_FALL_SWING_UPS = _vel_ups(8.0)          # Swing: -8G
-MAX_FALL_SWING = _ups_to_px_per_tick(MAX_FALL_SWING_UPS)
+MAX_FALL_SWING_UT = _ups_to_units_per_tick(MAX_FALL_SWING_UPS)
+MAX_FALL_SWING = _ut_to_px(MAX_FALL_SWING_UT)
 SHIP_MAX_RISE_UPS = _vel_ups(8.0)           # Ship (holding): 8G
-SHIP_MAX_RISE = _ups_to_px_per_tick(SHIP_MAX_RISE_UPS)
+SHIP_MAX_RISE_UT = _ups_to_units_per_tick(SHIP_MAX_RISE_UPS)
+SHIP_MAX_RISE = _ut_to_px(SHIP_MAX_RISE_UT)
 SHIP_MAX_FALL_UPS = _vel_ups(6.4)           # Ship (released): -6.4G
-SHIP_MAX_FALL = _ups_to_px_per_tick(SHIP_MAX_FALL_UPS)
+SHIP_MAX_FALL_UT = _ups_to_units_per_tick(SHIP_MAX_FALL_UPS)
+SHIP_MAX_FALL = _ut_to_px(SHIP_MAX_FALL_UT)
 # Swing click: bible §1.4, "multiplies the y-velocity by 0.8, then
 # toggles the gravity" — applied in core.py's MODE_SWING branch.
 SWING_VY_MULTIPLIER = 0.8
 
 # ---------------------------------------------------------------------------
-# Unit-space (GD units / GD units-per-tick) twins of the constants above,
-# for player/collision code migrated to units (see
-# docs/development/UNITS_REFACTOR.md, Phase 2/3). Derived by dividing the
-# already-verified px constant by PX_PER_UNIT rather than re-deriving from
-# the bible numbers a second time, so `value_ut * PX_PER_UNIT ==
-# value_px` is exact by construction — no room for the two families to
-# drift apart.
+# Collision / interaction margins, in GD units.
+#
+# Every one of these used to be spelled ``px_to_units(<pixel literal>)``
+# at the old CELL=50 render scale, which meant a physics tolerance
+# silently retuned itself whenever the camera zoom moved.  None of them
+# has a reference figure — they are engine-internal tolerances — so each
+# is restated here at exactly the GD-unit value that expression produced
+# (px * 30/50), and is now independent of CELL.
 # ---------------------------------------------------------------------------
-GRAVITY_UT = px_to_units(GRAVITY)
-SHIP_GRAVITY_UT = px_to_units(SHIP_GRAVITY)
-SHIP_THRUST_UT = px_to_units(SHIP_THRUST)
-JUMP_FORCE_UT = px_to_units(JUMP_FORCE)
-PAD_FORCE_UT = px_to_units(PAD_FORCE)
-BALL_FLIP_FORCE_UT = px_to_units(BALL_FLIP_FORCE)
-UFO_JUMP_FORCE_UT = px_to_units(UFO_JUMP_FORCE)
-BASE_MOVE_SPEED_UT = px_to_units(BASE_MOVE_SPEED)
-ROBOT_THRUST_UT = px_to_units(ROBOT_THRUST)
-MAX_FALL_BOX_UT = px_to_units(MAX_FALL_BOX)
-MAX_FALL_UFO_UT = px_to_units(MAX_FALL_UFO)
-MAX_RISE_UFO_UT = px_to_units(MAX_RISE_UFO)
-MAX_FALL_SWING_UT = px_to_units(MAX_FALL_SWING)
-SHIP_MAX_RISE_UT = px_to_units(SHIP_MAX_RISE)
-SHIP_MAX_FALL_UT = px_to_units(SHIP_MAX_FALL)
-PLAYER_SIZE_UNITS = px_to_units(PLAYER_SIZE)
-MINI_PLAYER_SIZE_UNITS = px_to_units(MINI_PLAYER_SIZE)
-COLLISION_SUBSTEP_UNITS = px_to_units(COLLISION_SUBSTEP_PX)
-# HEIGHT is the render/screen-space height in px (window size), used by
-# player/core.py for the "fell off the screen" bound and free-cam target
-# alongside a unit-space player position — needs the same conversion.
-HEIGHT_UNITS = px_to_units(HEIGHT)
+# Maximum motion covered by a single inner collision substep (was 1 px).
+COLLISION_SUBSTEP_UNITS = 0.6
+# Outward slack on the body box when testing orb/pad/trigger touch, so a
+# contact that lands exactly on an edge still registers (was 3 px).
+TOUCH_PAD_UNITS = 1.8
+# How far above/below a surface still counts as standing on it, for the
+# ground-adjacency test (was 1 px).
+GROUND_CONTACT_MARGIN_UNITS = 0.6
+# Slack on the one-block snap band a slope may pull the body through
+# (was 4 px).
+SLOPE_SNAP_MARGIN_UNITS = 2.4
+# Floor on the inner ("solid") hitbox so a tiny body can never degenerate
+# to a zero-area box (was 2 px).
+MIN_INNER_HITBOX_UNITS = 1.2
+# Spacing of the sampled beam a teleport draws between its two poses
+# (was 8 px).
+TELEPORT_BEAM_STEP_UNITS = 4.8
+
+# ---------------------------------------------------------------------------
+# Play-field vs camera height — two different things that used to share
+# one CELL-derived ``HEIGHT_UNITS``.
+#
+#   * CAMERA_HEIGHT_UNITS is how much world the screen SHOWS. It is a
+#     render quantity and therefore moves with CELL: it is the FOV.
+#   * PLAYFIELD_HEIGHT_UNITS is a gameplay bound — the dual mirror
+#     reflects about its midpoint and the bots' void floor is a multiple
+#     of it. Freezing it at 14 blocks keeps every existing level and
+#     saved bot run playing identically now that the FOV has changed.
+# ---------------------------------------------------------------------------
+CAMERA_HEIGHT_UNITS = HEIGHT * UNITS_PER_BLOCK / CELL
+PLAYFIELD_HEIGHT_UNITS = 14.0 * UNITS_PER_BLOCK
+# The world row the drawn ground band starts on, and where the player's
+# feet rest when a level places no Start Pos (see
+# ``Player._default_ground_y``). This was the px literal 550, which only
+# meant "row 11" at the old CELL=50 scale.
+GROUND_Y_UNITS = 11.0 * UNITS_PER_BLOCK
+# Default camera top edge, when no camera trigger is driving the view.
+#
+# It cannot be 0 any more. A camera pinned to world row 0 was fine while
+# the view was 14 rows tall — the ground plane at row 11 landed 11/14 of
+# the way down the screen. With the FOV cut to GD's 320 units the same
+# pin would crop the bottom of the world away, taking the ground and the
+# play lane with it. So the default view is defined by where it puts the
+# GROUND, keeping this engine's long-standing 11-above / 3-below split
+# of the screen, and the camera's top edge falls out of that.
+#
+# At the old CELL=50 this expression is exactly 0, i.e. it generalises
+# the previous behaviour rather than replacing it.
+GROUND_SCREEN_FRACTION = 11.0 / 14.0
+CAMERA_BASE_Y_UNITS = (GROUND_Y_UNITS
+                       - GROUND_SCREEN_FRACTION * CAMERA_HEIGHT_UNITS)
+# World-px twins, for the camera and for graphics.draw_bg's parallax
+# layout (both work in world px and subtract cam_y).
+GROUND_Y = round(GROUND_Y_UNITS * PX_PER_UNIT)
+CAMERA_BASE_Y_PX = CAMERA_BASE_Y_UNITS * PX_PER_UNIT
+# "Fell off the screen" band, measured from the camera's top edge. Stated
+# as absolute unit distances (previously PLAYFIELD + 300 px below and
+# 500 px above) so shrinking the FOV cannot make a level unwinnable.
+FALL_OFF_BELOW_CAM_UNITS = PLAYFIELD_HEIGHT_UNITS + 180.0
+FALL_OFF_ABOVE_CAM_UNITS = 300.0
 
 # Mini ground modes scale jump velocity by 0.8. Flying modes have their
 # own acceleration factors in core.py; extra per-level scaling stays optional.
@@ -236,10 +337,9 @@ MINI_WAVE_ANGLE_SCALE = 63.43 / 45.0
 MINI_WAVE_VY_SCALE = 2.0
 
 # Player trail: solid (no fade) while on screen; samples further behind
-# the player than this (world px) are dropped so the list doesn't grow
-# without bound over a long run.
-TRAIL_MAX_DISTANCE = WIDTH * 3
-TRAIL_MAX_DISTANCE_UNITS = px_to_units(TRAIL_MAX_DISTANCE)
+# the player than this are dropped so the list doesn't grow without bound
+# over a long run. 72 blocks — several screens' worth at any zoom.
+TRAIL_MAX_DISTANCE_UNITS = 72.0 * UNITS_PER_BLOCK
 
 # Orb / pad strength multipliers relative to JUMP_FORCE / PAD_FORCE.
 # Mirrors GD: pink = small, yellow = medium, red = big. No bible figure

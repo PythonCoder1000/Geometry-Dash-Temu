@@ -76,12 +76,19 @@ are fractions of `CELL` by design (see geometry.py's own comments); they
 convert exactly via `px_literal * (UNITS_PER_BLOCK / CELL)` = `px_literal
 * 0.6`, preserving the identical fraction-of-block ratio, not retuning it.
 
+**Superseded by Phase 10.** That conversion was correct arithmetic but
+the wrong architecture: it left the *meaning* of every one of those
+literals tied to the live `CELL`. They are now stated in GD units
+outright, and the px builders are derived from them.
+
 ## Phases (checklist — kept in sync here and restated in chat each turn)
 
 - [x] **Phase 0 — scouting** (done: coupling map above)
 - [x] **Phase 1 — foundation**: `UNITS_PER_BLOCK = 30`, `src/units.py`
       (`block_to_units`, `world_to_screen`, `screen_to_world`), physics
       constants redefined in units/second first, px/tick derived from them.
+      (`src/units.py` was later deleted in Phase 10 — nothing ever
+      imported it, and it was a third copy of the px<->unit shim.)
       Zero behavior change (test_physics.py 28/28, test_game.py 504/504
       bit-for-bit). Committed `1079450`.
 - [x] **Phase 2 — player core**: `Player.x/y/vx/vy` and every
@@ -129,6 +136,21 @@ convert exactly via `px_literal * (UNITS_PER_BLOCK / CELL)` = `px_literal
       (504/504) fully migrated to unit-scale assertions; one genuine stale
       test found (`wave_velocity` mirror estimate expected raw units where
       the code now correctly returns px) and fixed rather than papered over.
+- [x] **Phase 10 — finish the job: `CELL` really is render-only now.**
+      Done as part of the camera-zoom fix (see `docs/PHYSICS.md`,
+      "Camera framing"). Removed the duplicate px<->unit shim
+      (`geometry._PX_TO_UNIT_RATIO`) and the dead third copy
+      (`src/units.py`); restated every `px_to_units(<px literal>)`
+      physics length as a named GD-unit constant; made `geometry.py`'s
+      unit builders the primary shape definitions with the integer-px
+      ones derived from them; derived the `*_UT` constants from the
+      reference's units/second figures instead of from their own px
+      twins; split `HEIGHT_UNITS` into `CAMERA_HEIGHT_UNITS` (FOV) and
+      `PLAYFIELD_HEIGHT_UNITS` (frozen 14 blocks). `px_to_units` now has
+      exactly three legitimate callers, all at the render/authoring
+      boundary (`play.py`'s test-from-cursor spawn x, `jump_predictor`'s
+      px-authored nudge fields and its recorded px hitbox samples).
+      Guarded by the "CELL is render-only" section in `test_game.py`.
 - [ ] **Phase 9 — full playtest & sign-off**: GUI playtest every gamemode,
       editor placement/zoom, bot solve on a bundled level; update
       `docs/PHYSICS.md` to describe the unit model as implemented; remove

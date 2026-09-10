@@ -3,18 +3,45 @@
 No pygame drawing here — only ``pygame.Rect`` construction — so the
 physics, the bots and the editor's hitbox overlay all read collision
 shapes from one place.
+
+Every shape is defined ONCE, in GD units, by the ``*_units`` builders in
+the second half of this module.  The integer-pixel builders in the first
+half are thin wrappers that scale those unit shapes by ``PX_PER_UNIT``
+for the editor's hitbox overlay; they carry no independent numbers of
+their own.  (They used to: both halves spelled their insets as pixel
+literals against a hardcoded CELL=50, plus a private duplicate of the
+px<->unit ratio, so the two families desynced the moment the render
+scale moved.)
 """
 
 import functools
 
 import pygame
 
-from .constants import CELL, UNITS_PER_BLOCK
+from .constants import CELL, UNITS_PER_BLOCK, PX_PER_UNIT
 
-# Ratio that converts a CELL-px literal into the equivalent GD-unit
-# value, preserving the exact fraction-of-block it represents (both CELL
-# and UNITS_PER_BLOCK denote "1 block" in their own scale). 30/50 = 0.6.
-_PX_TO_UNIT_RATIO = UNITS_PER_BLOCK / CELL
+
+# ---------------------------------------------------------------------------
+# Local shape insets, in GD units, measured from the top-left of the cell.
+#
+# These are the single source of truth for every hitbox in this module.
+# They were pixel literals against CELL=50 until the render scale became
+# adjustable; each is the exact same fraction of a block it always was
+# (px * 30/50), just stated in the unit system physics actually runs in.
+# ---------------------------------------------------------------------------
+HALF_BLOCK_UNITS = UNITS_PER_BLOCK / 2.0
+
+# GD-style internal rectangular danger zone for a spike: narrower and
+# taller than the visible triangle so corner approaches stay forgiving
+# (0.30 x 0.64 of the tile, centred horizontally, clear of the floor).
+SPIKE_LOCAL_UNITS = (10.2, 10.2, 9.0, 19.2)
+HALF_SPIKE_LOCAL_UNITS = (10.2, 19.2, 9.0, 10.2)
+# Pad activation strip: a shallow band across the bottom of the cell.
+PAD_LOCAL_UNITS = (3.0, 19.2, 24.0, 10.8)
+# Total (both sides) shrink from the cell to the saw's danger circle —
+# the visible teeth spin but the danger region stays static at roughly
+# 70% of the visible radius, and an even delta keeps it cell-centred.
+SAW_INSET_UNITS = 9.6
 
 
 def clamp(v, lo, hi):
@@ -130,15 +157,29 @@ def cell_rect(gx, gy, scale=1.0, scale_y=None):
     return _scale_rect_around_cell_center(base, gx, gy, scale, scale_y)
 
 
+def _units_rect_to_px(x, y, w, h):
+    """A GD-unit cell-local rect -> its integer-pixel twin.
+
+    Rounds the two EDGES rather than the origin and the size, so a shape
+    that ends exactly on a cell boundary in units still ends exactly on
+    it in pixels at any render scale.
+    """
+    x0, y0 = round(x * PX_PER_UNIT), round(y * PX_PER_UNIT)
+    x1, y1 = round((x + w) * PX_PER_UNIT), round((y + h) * PX_PER_UNIT)
+    return pygame.Rect(x0, y0, x1 - x0, y1 - y0)
+
+
 # Slab local offsets (pre-rotation) in cell-local coords. Precomputed so
 # slab_rect just branches the table and does one Rect alloc — no repeated
 # normalize_rotation / if-chain per call.
-_SLAB_LOCAL = {
-    0:   (0,          CELL // 2, CELL,      CELL // 2),
-    180: (0,          0,         CELL,      CELL // 2),
-    90:  (0,          0,         CELL // 2, CELL),
-    270: (CELL // 2,  0,         CELL // 2, CELL),
+_SLAB_LOCAL_UNITS = {
+    0:   (0.0,              HALF_BLOCK_UNITS, UNITS_PER_BLOCK,  HALF_BLOCK_UNITS),
+    180: (0.0,              0.0,              UNITS_PER_BLOCK,  HALF_BLOCK_UNITS),
+    90:  (0.0,              0.0,              HALF_BLOCK_UNITS, UNITS_PER_BLOCK),
+    270: (HALF_BLOCK_UNITS, 0.0,              HALF_BLOCK_UNITS, UNITS_PER_BLOCK),
 }
+_SLAB_LOCAL = {rot: tuple(_units_rect_to_px(*local))
+               for rot, local in _SLAB_LOCAL_UNITS.items()}
 
 
 def slab_rect(gx, gy, rotation=0, scale=1.0, scale_y=None):
@@ -185,18 +226,8 @@ def rotate_local_rect(local_rect, rotation, size=CELL):
 # produces fresh Rects), so the cached Rects can't be mutated externally.
 @functools.lru_cache(maxsize=16)
 def _spike_base_rotated(rotation, half):
-    # GD-style internal rectangular danger zone, narrower and taller than
-    # the visible triangle so corner approaches stay forgiving. Clone
-    # ratios from the recreation report:
-    #   full spike: 0.30 × 0.65 of the tile
-    #   half spike: 0.30 × 0.35 of the tile
-    # Both are centered horizontally with a 1 px gap above the floor so
-    # the lower corners remain non-lethal.
-    if half:
-        base = (pygame.Rect(17, 32, 15, 17),)
-    else:
-        base = (pygame.Rect(17, 17, 15, 32),)
-    return tuple(rotate_local_rect(r, rotation) for r in base)
+    local = HALF_SPIKE_LOCAL_UNITS if half else SPIKE_LOCAL_UNITS
+    return (rotate_local_rect(_units_rect_to_px(*local), rotation),)
 
 
 def spike_hitboxes(gx, gy, rotation=0, half=False, scale=1.0, scale_y=None):
@@ -212,8 +243,7 @@ def spike_hitboxes(gx, gy, rotation=0, half=False, scale=1.0, scale_y=None):
 
 @functools.lru_cache(maxsize=8)
 def _pad_trigger_base_rotated(rotation):
-    return rotate_local_rect(
-        pygame.Rect(5, CELL - 18, CELL - 10, 18), rotation)
+    return rotate_local_rect(_units_rect_to_px(*PAD_LOCAL_UNITS), rotation)
 
 
 def pad_trigger_rect(gx, gy, rotation=0):
@@ -261,25 +291,23 @@ def slope_polygon(gx, gy, rotation=0, scale=1.0, scale_y=None):
 def saw_hitbox(gx, gy, scale=1.0, scale_y=None):
     """Circular saw hitbox — smaller than the grid cell for fairness.
 
-    GD-style: the visible teeth spin but the danger region stays static
-    and is roughly 70% of the visible saw radius. With CELL=50 that's
-    a 34×34 inner box (cell inflated by -16 each side); using an even
-    delta keeps the hitbox center exactly aligned with the cell center.
+    See :data:`SAW_INSET_UNITS`; the inset is rounded to an even number
+    of pixels so the hitbox center stays exactly on the cell center.
     """
-    base = cell_rect(gx, gy).inflate(-16, -16)
+    inset = 2 * round(SAW_INSET_UNITS * PX_PER_UNIT / 2)
+    base = cell_rect(gx, gy).inflate(-inset, -inset)
     return _scale_rect_around_cell_center(base, gx, gy, scale, scale_y)
 
 
 # ---------------------------------------------------------------------------
-# Unit-space (GD units, float) hitbox builders.
+# Unit-space (GD units, float) hitbox builders — the PRIMARY definitions.
 #
-# Mirror the CELL-px functions above exactly, but in real GD units using
-# pygame.FRect (no integer snapping) — see docs/development/UNITS_REFACTOR.md
-# ("Decision: collision precision"). Every pixel-literal inset in the
-# functions above is a fraction of CELL by design; each is converted here
-# via ``* _PX_TO_UNIT_RATIO`` (30/50 = 0.6), preserving the identical
-# fraction-of-block ratio rather than retuning it. These are additive:
-# nothing above is changed or removed by adding these.
+# These are what physics, collision and the bots collide against, using
+# pygame.FRect so nothing is snapped to a pixel grid (see
+# docs/development/UNITS_REFACTOR.md, "Decision: collision precision").
+# The integer-px builders above are derived from the same
+# ``*_LOCAL_UNITS`` tables, so the two families cannot drift apart when
+# the render scale changes.
 # ---------------------------------------------------------------------------
 
 def _scale_frect_around_cell_center(frect, gx, gy, scale, scale_y=None):
@@ -300,12 +328,6 @@ def cell_rect_units(gx, gy, scale=1.0, scale_y=None):
     base = pygame.FRect(gx * UNITS_PER_BLOCK, gy * UNITS_PER_BLOCK,
                          UNITS_PER_BLOCK, UNITS_PER_BLOCK)
     return _scale_frect_around_cell_center(base, gx, gy, scale, scale_y)
-
-
-_SLAB_LOCAL_UNITS = {
-    rot: tuple(v * _PX_TO_UNIT_RATIO for v in local)
-    for rot, local in _SLAB_LOCAL.items()
-}
 
 
 def slab_rect_units(gx, gy, rotation=0, scale=1.0, scale_y=None):
@@ -348,13 +370,8 @@ def rotate_local_frect(local_frect, rotation, size=UNITS_PER_BLOCK):
 
 @functools.lru_cache(maxsize=16)
 def _spike_base_rotated_units(rotation, half):
-    if half:
-        base = (pygame.FRect(17 * _PX_TO_UNIT_RATIO, 32 * _PX_TO_UNIT_RATIO,
-                              15 * _PX_TO_UNIT_RATIO, 17 * _PX_TO_UNIT_RATIO),)
-    else:
-        base = (pygame.FRect(17 * _PX_TO_UNIT_RATIO, 17 * _PX_TO_UNIT_RATIO,
-                              15 * _PX_TO_UNIT_RATIO, 32 * _PX_TO_UNIT_RATIO),)
-    return tuple(rotate_local_frect(r, rotation) for r in base)
+    local = HALF_SPIKE_LOCAL_UNITS if half else SPIKE_LOCAL_UNITS
+    return (rotate_local_frect(pygame.FRect(*local), rotation),)
 
 
 def spike_hitboxes_units(gx, gy, rotation=0, half=False, scale=1.0, scale_y=None):
@@ -370,10 +387,7 @@ def spike_hitboxes_units(gx, gy, rotation=0, half=False, scale=1.0, scale_y=None
 
 @functools.lru_cache(maxsize=8)
 def _pad_trigger_base_rotated_units(rotation):
-    return rotate_local_frect(
-        pygame.FRect(5 * _PX_TO_UNIT_RATIO, (CELL - 18) * _PX_TO_UNIT_RATIO,
-                     (CELL - 10) * _PX_TO_UNIT_RATIO, 18 * _PX_TO_UNIT_RATIO),
-        rotation)
+    return rotate_local_frect(pygame.FRect(*PAD_LOCAL_UNITS), rotation)
 
 
 def pad_trigger_rect_units(gx, gy, rotation=0):
@@ -410,7 +424,6 @@ def slope_polygon_units(gx, gy, rotation=0, scale=1.0, scale_y=None):
 
 
 def saw_hitbox_units(gx, gy, scale=1.0, scale_y=None):
-    base = cell_rect_units(gx, gy).inflate(-16 * _PX_TO_UNIT_RATIO,
-                                            -16 * _PX_TO_UNIT_RATIO)
+    base = cell_rect_units(gx, gy).inflate(-SAW_INSET_UNITS, -SAW_INSET_UNITS)
     return _scale_frect_around_cell_center(base, gx, gy, scale, scale_y)
 
